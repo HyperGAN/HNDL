@@ -8,7 +8,7 @@ Write your network as a few lines of text. Give HNDL its input and output shapes
 
 ## A network in a string
 
-Each line starts with an operation. Leave out a dimension to let HNDL infer it, and optionally add `name=` for named access. Input and output constraints belong in the API call:
+Write a simple sequence with one operation per line. Leave out a dimension to let HNDL infer it, and optionally add `name=` for named access. Input and output constraints belong in the API call:
 
 ```python
 from hndl.torch import network
@@ -125,6 +125,70 @@ Choose a target divisible by 8 or explicitly change the architecture.
 
 Literal values remain constraints. Writing `linear 128 name=project` would also fail for the 32 × 32 target because the seed needs 8192 values. Omitted dimensions are inferred when the constraints determine them; a named policy supplies declared construction choices. Multiple valid choices are reported as ambiguous when no selected policy chooses among them. HNDL does not silently crop, broadcast, or replace layers to make them fit.
 
+## Split, name, and reuse tensors
+
+Assignment gives an operation's output a name you can use later. `#` starts a comment, either on its own line or after an operation:
+
+```python
+branches = network(
+    """
+    # Take 64 features, then keep the remainder. dim defaults to 1.
+    z1, z2 = split 64 name=partition  # Both are [B, 64] here.
+
+    content = linear 128 x=z1
+    features = relu                 # Continues from content.
+    style = linear 128 x=z2          # Starts another branch from z2.
+    add a=features b=style name=combined
+    """,
+    input_shape=("B", 128),
+    output_shape=("B", 128),
+    device="cpu",
+)
+```
+
+`split 64` produces exactly two outputs: the first 64 entries along `dim`, and everything after them. With 160 input features, the outputs would have 64 and 96 features. Use `dim=2`, for example, to split an image's height. Both pieces must be nonempty, and splitting the batch dimension is excluded.
+
+The proposed graph display includes every input and output port:
+
+```pycon
+>>> print(branches)
+Network: [B, 128] -> [B, 128]  dtype=float32
+name       operation  input shapes                        output shapes
+partition  split      x=[B, 128]                          first(z1)=[B, 64], rest(z2)=[B, 64]
+content    linear     x=z1:[B, 64]                        out(content)=[B, 128]
+features   relu       x=content:[B, 128]                  out(features)=[B, 128]
+style      linear     x=z2:[B, 64]                        out(style)=[B, 128]
+combined   add        a=features:[B, 128], b=style:[B, 128] out(combined)=[B, 128]
+```
+
+For one output, `features = relu` and `relu name=features` do the same thing: name the layer and bind its output tensor. For multiple outputs, `z1` and `z2` name tensors, while optional `name=partition` names the split operation. `branches["partition"]` accesses that operation; `z1` and `z2` are values inside the network, not stored attributes or modules.
+
+A single-output operation becomes the current tensor for the next line. A split has no single current output, so the next operation must select its input, such as `x=z1`. Joins bind all inputs explicitly. Names can be reused as inputs anywhere later in the definition, but cannot be reassigned. Each operation runs once per forward call; both branches share the split results and retain normal gradient flow.
+
+This branched model still accepts and returns a tensor. Layer lookup uses names; positional indexing and slicing apply to simple chains. The final single output is returned by default. For a split-only definition, pass `output="z2"` and `output_shape=("B", 64)` to select the remainder explicitly.
+
+### Feed a branch into adaptive normalization
+
+With the custom `adaptive_norm` operation described in the spec registered, the same bindings can route features and style parameters:
+
+```text
+z1, z2 = split 64
+project = linear x=z1             # Resolves to 32 * 4 * 4 = 512.
+features = reshape 32 4 4
+adaptive_norm x=features params=z2 # 32 channels need 64 style parameters.
+```
+
+Use input shape `("B", 128)` and output shape `("B", 32, 4, 4)`. This operation expects one scale adjustment and one bias per channel, so `z2` already has the required width. To learn a style mapping first, replace the final line with a branch:
+
+```text
+style_hidden = linear 128 x=z2
+relu
+style = linear                    # Resolves to 2 * 32 = 64.
+adaptive_norm x=features params=style
+```
+
+That chain is a small subnetwork. A reusable subnetwork can also be registered as a custom operation with declared ports and shape rules, then called as `style = style_mlp x=z2`. Assignment handles the wiring; each DSL occurrence creates its own module instance when the network is built.
+
 ## Register your own operation
 
 Extend the vocabulary with a PyTorch module and its shape rule. Here is a proposed registration for the shape-preserving SiLU activation:
@@ -177,6 +241,6 @@ plan = resolve(
 print(plan)
 ```
 
-Built-in resolution needs no PyTorch import or tensor allocation. Save the resolved plan with your experiment to record exactly which architecture was constructed. Named graphs and custom multi-input operations are also part of the proposed v1; the text DSL starts with sequences.
+Built-in resolution needs no PyTorch import or tensor allocation. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences, named branches, and custom multi-input operations use the same resolve-then-build workflow.
 
 [SPEC.md](SPEC.md) defines the language, registration, shape rules, and PyTorch interface. [DESIGN.md](DESIGN.md) preserves the original rationale; the spec reflects the current DSL-focused API.
