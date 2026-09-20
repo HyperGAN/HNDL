@@ -2,22 +2,22 @@
 
 **Human-readable Network Definition Language**, pronounced “handle.”
 
-Write your network as a few lines of text. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
+Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
 **Status: design stage.** The API and console output below describe the proposed behavior. There is no implementation yet.
 
 ## A network in a string
 
-Write a simple sequence with one operation per line. Leave out a dimension to let HNDL infer it, and optionally add `name=` for named access. Input and output constraints belong in the API call:
+Use familiar calls and assignments. `x` is the input tensor and `out` selects the output. Leave out a dimension to let HNDL infer it. Input and output constraints belong in the API call:
 
 ```python
 from hndl.torch import network
 
 model = network(
     """
-    linear 64 name=hidden
-    relu name=activation
-    linear name=scores
+    hidden = linear(x, 64, name="hidden")
+    hidden = relu(hidden, name="activation")
+    out = linear(hidden, name="scores")
     """,
     input_shape=("B", 128),
     output_shape=("B", 10),
@@ -25,7 +25,9 @@ model = network(
 )
 ```
 
-Here, `B` is a variable batch size. The final `linear` has no width argument, so the output constraint determines its 10 output features. Names are optional: `linear 64`, `relu`, and `linear` describe the same operations without custom names. HNDL resolves the dimensions before constructing any modules.
+Here, `B` is a variable batch size. The final `linear` has no width argument, so the output constraint determines its 10 output features. Layer names are optional: `linear(x, 64)` works too. Variables hold tensor references; `name="hidden"` gives the layer a stable name for lookup and saved state. Reassigning `hidden` connects the next operation without changing earlier tensors. HNDL resolves the dimensions before constructing any modules.
+
+This string is a declarative subset of Python: assignments, registered operation calls, literal arguments, and comments. HNDL parses it into a graph without executing it as Python.
 
 Use `print(model)` to inspect it. HNDL supplies the shape table as its module representation:
 
@@ -66,29 +68,29 @@ Initial weights use PyTorch’s normal random state. For repeatable initializati
 A generator starts with 128 features and produces a 32 × 32 RGB image. Choose the channels and three upsampling stages; let the target determine the projection width and starting height and width.
 
 ```python
-generator_dsl = """
-linear name=project
-relu name=project_relu
-reshape 512 name=seed
-deconv 256 policy=up2 name=up1
-relu name=act1
-deconv 128 policy=up2 name=up2
-relu name=act2
-deconv 64 policy=up2 name=up3
-relu name=act3
-conv 3 kernel_size=3 stride=1 padding=1 name=rgb
-tanh name=range
+generator_config = """
+x = linear(x, name="project")
+x = relu(x, name="project_relu")
+x = reshape(x, 512, name="seed")
+x = deconv(x, 256, policy="up2", name="up1")
+x = relu(x, name="act1")
+x = deconv(x, 128, policy="up2", name="up2")
+x = relu(x, name="act2")
+x = deconv(x, 64, policy="up2", name="up3")
+x = relu(x, name="act3")
+x = conv(x, 3, kernel_size=3, stride=1, padding=1, name="rgb")
+out = tanh(x, name="range")
 """
 
 generator = network(
-    generator_dsl,
+    generator_config,
     input_shape=("B", 128),
     output_shape=("B", 3, 32, 32),
     device="cpu",
 )
 ```
 
-The `up2` policy selects transposed-convolution settings that exactly double height and width. `reshape 512` fixes the channels; the following convolution requires an image-shaped tensor, so HNDL infers the remaining height and width. Shapes include batch, channels, height, and width:
+The `up2` policy selects transposed-convolution settings that exactly double height and width. `reshape(x, 512)` fixes the channels; the following convolution requires an image-shaped tensor, so HNDL infers the remaining height and width. Shapes include batch, channels, height, and width:
 
 ```pycon
 >>> print(generator)
@@ -123,22 +125,22 @@ Three doubling stages require an integer seed height; 30 / 8 = 3.75.
 Choose a target divisible by 8 or explicitly change the architecture.
 ```
 
-Literal values remain constraints. Writing `linear 128 name=project` would also fail for the 32 × 32 target because the seed needs 8192 values. Omitted dimensions are inferred when the constraints determine them; a named policy supplies declared construction choices. Multiple valid choices are reported as ambiguous when no selected policy chooses among them. HNDL does not silently crop, broadcast, or replace layers to make them fit.
+Literal values remain constraints. Writing `linear(x, 128, name="project")` would also fail for the 32 × 32 target because the seed needs 8192 values. Omitted dimensions are inferred when the constraints determine them; a named policy supplies declared construction choices. Multiple valid choices are reported as ambiguous when no selected policy chooses among them. HNDL does not silently crop, broadcast, or replace layers to make them fit.
 
-## Split, name, and reuse tensors
+## Split and reuse tensors
 
-Assignment gives an operation's output a name you can use later. `#` starts a comment, either on its own line or after an operation:
+Tuple assignment names the two results of a split. Pass either result into later operations, and use `#` for comments:
 
 ```python
 branches = network(
     """
     # Take 64 features, then keep the remainder. dim defaults to 1.
-    z1, z2 = split 64 name=partition  # Both are [B, 64] here.
+    z1, z2 = split(x, 64, name="partition")  # Both are [B, 64] here.
 
-    content = linear 128 x=z1
-    features = relu                 # Continues from content.
-    style = linear 128 x=z2          # Starts another branch from z2.
-    add a=features b=style name=combined
+    content = linear(z1, 128, name="content")
+    features = relu(content, name="features")
+    style = linear(z2, 128, name="style")
+    out = add(features, style, name="combined")
     """,
     input_shape=("B", 128),
     output_shape=("B", 128),
@@ -146,48 +148,96 @@ branches = network(
 )
 ```
 
-`split 64` produces exactly two outputs: the first 64 entries along `dim`, and everything after them. With 160 input features, the outputs would have 64 and 96 features. Use `dim=2`, for example, to split an image's height. Both pieces must be nonempty, and splitting the batch dimension is excluded.
+`split(x, 64)` produces exactly two outputs: the first 64 entries along `dim`, and everything after them. With 160 input features, the outputs would have 64 and 96 features. Use `dim=2`, for example, to split an image's height. Both pieces must be nonempty, and splitting the batch dimension is excluded.
 
 The proposed graph display includes every input and output port:
 
 ```pycon
 >>> print(branches)
 Network: [B, 128] -> [B, 128]  dtype=float32
-name       operation  input shapes                        output shapes
-partition  split      x=[B, 128]                          first(z1)=[B, 64], rest(z2)=[B, 64]
-content    linear     x=z1:[B, 64]                        out(content)=[B, 128]
-features   relu       x=content:[B, 128]                  out(features)=[B, 128]
-style      linear     x=z2:[B, 64]                        out(style)=[B, 128]
-combined   add        a=features:[B, 128], b=style:[B, 128] out(combined)=[B, 128]
+name       operation  input shapes                                    output shapes
+partition  split      x=input:[B, 128]                                first=[B, 64], rest=[B, 64]
+content    linear     x=partition.first:[B, 64]                        out=[B, 128]
+features   relu       x=content.out:[B, 128]                           out=[B, 128]
+style      linear     x=partition.rest:[B, 64]                         out=[B, 128]
+combined   add        a=features.out:[B, 128], b=style.out:[B, 128]     out=[B, 128]
 ```
 
-For one output, `features = relu` and `relu name=features` do the same thing: name the layer and bind its output tensor. For multiple outputs, `z1` and `z2` name tensors, while optional `name=partition` names the split operation. `branches["partition"]` accesses that operation; `z1` and `z2` are values inside the network, not stored attributes or modules.
+`z1` and `z2` are tensor references inside the definition. `name="partition"` names the split layer, accessible as `branches["partition"]`. Each operation runs once per forward call; both branches share the split results and retain normal gradient flow.
 
-A single-output operation becomes the current tensor for the next line. A split has no single current output, so the next operation must select its input, such as `x=z1`. Joins bind all inputs explicitly. Names can be reused as inputs anywhere later in the definition, but cannot be reassigned. Each operation runs once per forward call; both branches share the split results and retain normal gradient flow.
-
-This branched model still accepts and returns a tensor. Layer lookup uses names; positional indexing and slicing apply to simple chains. The final single output is returned by default. For a split-only definition, pass `output="z2"` and `output_shape=("B", 64)` to select the remainder explicitly.
+This branched model still accepts and returns a tensor. Layer lookup uses names; positional indexing and slicing apply to simple chains. The `out` binding always selects the returned tensor. A split-only config can finish with `out = z2` to return the remainder.
 
 ### Feed a branch into adaptive normalization
 
-With the custom `adaptive_norm` operation described in the spec registered, the same bindings can route features and style parameters:
+With the custom `adaptive_norm` operation described in the spec registered, a config can route features and style parameters:
 
-```text
-z1, z2 = split 64
-project = linear x=z1             # Resolves to 32 * 4 * 4 = 512.
-features = reshape 32 4 4
-adaptive_norm x=features params=z2 # 32 channels need 64 style parameters.
+```python
+z1, z2 = split(x, 64)
+features = reshape(linear(z1), 32, 4, 4)  # Projection resolves to 512.
+out = adaptive_norm(features, z2)        # 32 channels need 64 style parameters.
 ```
 
-Use input shape `("B", 128)` and output shape `("B", 32, 4, 4)`. This operation expects one scale adjustment and one bias per channel, so `z2` already has the required width. To learn a style mapping first, replace the final line with a branch:
+Use input shape `("B", 128)` and output shape `("B", 32, 4, 4)`. This operation expects one scale adjustment and one bias per channel, so `z2` already has the required width. To learn a style mapping first, replace the final line with:
 
-```text
-style_hidden = linear 128 x=z2
-relu
-style = linear                    # Resolves to 2 * 32 = 64.
-adaptive_norm x=features params=style
+```python
+style = linear(relu(linear(z2, 128)))     # Final width resolves to 64.
+out = adaptive_norm(features, style)
 ```
 
-That chain is a small subnetwork. A reusable subnetwork can also be registered as a custom operation with declared ports and shape rules, then called as `style = style_mlp x=z2`. Assignment handles the wiring; each DSL occurrence creates its own module instance when the network is built.
+Nested calls create ordinary graph nodes. A reusable subnetwork can also be registered as an operation with declared ports and shape rules, then called as `style = style_mlp(z2)`. Each call creates its own module instance when the model is built.
+
+## Author with native Python
+
+For reusable helpers, loops, or programmatically chosen architectures, use an ordinary Python function and the explicit trusted-code entry point:
+
+```python
+from hndl import ops
+from hndl.torch import network_from_callable
+
+
+def mlp(x, widths):
+    for width in widths:
+        x = ops.relu(ops.linear(x, width))
+    return x
+
+
+def architecture(x):
+    z1, z2 = ops.split(x, 64, name="partition")
+    content = mlp(z1, [128, 128])
+    style = mlp(z2, [128])
+    return ops.add(content, style, name="combined")
+
+
+model = network_from_callable(
+    architecture,
+    input_shape=("B", 128),
+    output_shape=("B", 128),
+    device="cpu",
+)
+```
+
+HNDL calls `architecture` once with a symbolic input to capture a finite graph. Python helpers and loops run during that construction step. The resulting model runs the captured operations on real tensors during `model(x)`; it does not rerun your authoring function. Tensor-dependent Python branching is unsupported.
+
+Both frontends use the same operations, shape rules, resolver, and PyTorch backend. Native local variable names do not name layers; use `name="..."` when a stable layer identity matters. Unnamed calls receive generated names. The callable runs as ordinary trusted Python with your process's permissions.
+
+## Load a config file
+
+Save declarative assignments in a file such as `generator.hndl`, using the same syntax as `generator_config` above. Load it with constraints from your application:
+
+```python
+from hndl.torch import network_file
+
+generator = network_file(
+    "generator.hndl",
+    input_shape=("B", 128),
+    output_shape=("B", 3, 32, 32),
+    device="cpu",
+)
+```
+
+File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, loops, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
+
+The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The proposed loader applies source, parser, graph, and model-size limits and parses all declarative input in an isolated worker. Even AST parsing can exhaust resources, so syntax restrictions alone are insufficient. See the [loading and trust contract](SPEC.md#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
 
 ## Register your own operation
 
@@ -204,14 +254,15 @@ registry.register(
     identity="example.silu",
     version=1,
     shape=preserves_shape,
+    max_state_bytes=0,
 )
 register_torch(registry, "silu", module=nn.SiLU, state_version=1)
 
 model = network(
     """
-    linear 64 name=hidden
-    silu name=activation
-    linear name=scores
+    hidden = linear(x, 64, name="hidden")
+    hidden = silu(hidden, name="activation")
+    out = linear(hidden, name="scores")
     """,
     input_shape=("B", 128),
     output_shape=("B", 10),
@@ -220,13 +271,13 @@ model = network(
 )
 ```
 
-The DSL now understands `silu`. `preserves_shape` tells the resolver that input and output dimensions, layout, and dtype are equal, so constraints propagate in both directions. The backend constructs an `nn.SiLU` for execution. Registration carries the operation's version; network text uses its plain name.
+Configs now understand `silu(x)`. Native functions use `registry.ops.silu(x)` and pass that same registry to `network_from_callable`. `preserves_shape` tells the resolver that input and output dimensions, layout, and dtype are equal, so constraints propagate in both directions. `max_state_bytes=0` declares that this operation has no parameter or buffer storage. The backend constructs an `nn.SiLU` for execution. Registration carries the operation's version; network text uses its plain name.
 
 This helper covers unary operations with no author arguments. Operations that change shapes or accept several inputs need their own rules and port declarations, described in [SPEC.md](SPEC.md#8-custom-operators-and-minimal-graphs). Custom implementations still need numerical and gradient checks; declaring a shape rule does not prove their code correct.
 
 ## Experiment with less boilerplate
 
-Change `linear 64` to `linear 128`, resolve the same input/output constraints, and send the resulting model through your existing training and evaluation loop. Compare accuracy, loss, or inference time while keeping architecture definitions small and readable. HNDL handles the connecting dimensions; your application owns metrics, optimizers, and the search over candidates.
+Change `linear(x, 64)` to `linear(x, 128)`, resolve the same input/output constraints, and send the resulting model through your existing training and evaluation loop. Compare accuracy, loss, or inference time while keeping architecture definitions small and readable. HNDL handles the connecting dimensions; your application owns metrics, optimizers, and the search over candidates.
 
 For inspection without building a model, use the pure resolver:
 
@@ -234,13 +285,13 @@ For inspection without building a model, use the pure resolver:
 from hndl import resolve
 
 plan = resolve(
-    generator_dsl,
+    generator_config,
     input_shape=("B", 128),
     output_shape=("B", 3, 32, 32),
 )
 print(plan)
 ```
 
-Built-in resolution needs no PyTorch import or tensor allocation. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences, named branches, and custom multi-input operations use the same resolve-then-build workflow.
+Built-in config resolution needs no PyTorch import or tensor allocation. `resolve_file(...)` reads a config file; `resolve_callable(...)` captures a trusted Python function before using the same pure resolver. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences, named branches, and custom multi-input operations use the same resolve-then-build workflow.
 
-[SPEC.md](SPEC.md) defines the language, registration, shape rules, and PyTorch interface. [DESIGN.md](DESIGN.md) preserves the original rationale; the spec reflects the current DSL-focused API.
+[SPEC.md](SPEC.md) defines the language, registration, shape rules, and PyTorch interface. [DESIGN.md](DESIGN.md) preserves the original rationale; the spec defines the current Python authoring and declarative loading APIs.
