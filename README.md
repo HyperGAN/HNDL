@@ -2,135 +2,182 @@
 
 **Human-readable Network Definition Language**, pronounced “handle.”
 
-Describe the network you want, declare its input and output shapes, and let HNDL work out the dimensions between them. The aim is to make architectures easy to read and change, catch shape conflicts before building a model, and reduce the boilerplate around network experiments.
+Write your network as a few lines of text. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: design stage.** This repository contains the proposed language and construction contract. The Python API below is a proposal; there is no implementation or installable package in this repository yet.
+**Status: design stage.** The API and console output below describe the proposed behavior. There is no implementation yet.
 
-## Start with what you know
+## A network in a string
 
-Suppose each example has 128 input features and your network should produce 10 scores. You choose a hidden layer with 64 features:
+Each line describes a layer. Input and output constraints belong in the API call:
 
 ```python
-from hndl import AUTO, Layer, Sequence, TensorSpec, resolve
+from hndl.torch import network
 
-spec = Sequence(
-    schema_version=1,
-    input=TensorSpec(("B", 128), layout="BF", dtype="float32"),
-    output=TensorSpec(("B", 10), layout="BF", dtype="float32"),
-    layers=[
-        Layer("hidden", "linear@1", out_features=64),
-        Layer("activation", "relu@1"),
-        Layer("scores", "linear@1", out_features=AUTO),
-    ],
+model = network(
+    """
+    hidden: linear 64
+    activation: relu
+    scores: linear auto
+    """,
+    input_shape=("B", 128),
+    output_shape=("B", 10),
+    device="cpu",
+    initialization_seed=7,
 )
-
-plan = resolve(spec)
-print(plan.describe())
 ```
 
-`B` is the batch size, which can vary between calls. `BF` means batch × features. The output contract determines that `scores` needs 10 output features, and the preceding layer determines its input width. The resulting shapes are:
+Here, `B` is a variable batch size. The output constraint determines that `scores` needs 10 output features. HNDL resolves the dimensions before constructing any modules.
 
-```text
-input       [B, 128]
-hidden      [B, 64]
-activation  [B, 64]
-scores      [B, 10]
+Inspect the result in the Python console:
+
+```pycon
+>>> print(model.describe())
+Network: [B, 128] -> [B, 10]  dtype=float32
+index  name        operation  input shape  output shape
+0      hidden      linear     [B, 128]     [B, 64]
+1      activation  relu       [B, 64]      [B, 64]
+2      scores      linear     [B, 64]      [B, 10]
+
+>>> model[0]
+Linear(in_features=128, out_features=64, bias=True)
+>>> model["scores"]
+Linear(in_features=64, out_features=10, bias=True)
 ```
 
-Each layer has a stable name and a versioned operator, such as `linear@1`. The plan records the resolved arguments, shapes, and reasons for each inferred value. Resolution does not allocate tensors or require PyTorch.
-
-The proposed PyTorch backend then builds a normal `torch.nn.Module`:
+The result is an ordinary `torch.nn.Module` with sequential indexing. Calling it returns a tensor:
 
 ```python
 import torch
-from hndl.torch import build
 
-model = build(plan, device="cpu", initialization_seed=7)
 x = torch.randn(8, 128)
-scores = model(x=x)["output"]  # Shape: [8, 10]
+scores = model(x)                        # Tensor with shape [8, 10]
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+first_layer = model[0]                   # The actual registered module
+last_layer = model[-1]
+features = model[:2]                     # nn.Sequential sharing these layers
 ```
 
-The host application supplies tensors and chooses the device. Every call returns a dictionary of named outputs, including for a single-output network. Training uses ordinary PyTorch parameters, autograd, and optimizers.
+Named and integer access return the same modules used by the network. Slices reuse their parameters, so training a slice also updates the original model. The complete model retains its resolved shape contract; a slice is a regular PyTorch sequence. Standard `state_dict()`, `train()`, and `eval()` remain available.
 
-## Change the target, resolve the dimensions
+## Change the target, keep the definition
 
-A generator makes the idea more useful. Start with a 128-value vector and ask for a 32 × 32 RGB image. Choose three upsampling stages and their channel counts; leave the projection width and starting spatial dimensions automatic.
+A generator starts with 128 features and produces a 32 × 32 RGB image. Choose the channels and three upsampling stages; let the target determine the projection width and starting height and width.
 
 ```python
-from hndl import AUTO, Layer, Policy, Sequence, TensorSpec, resolve
+generator_dsl = """
+project: linear auto
+project_relu: relu
+seed: reshape 512 auto auto
+up1: deconv 256 policy=up2
+act1: relu
+up2: deconv 128 policy=up2
+act2: relu
+up3: deconv 64 policy=up2
+act3: relu
+rgb: conv 3 kernel_size=3 stride=1 padding=1
+range: tanh
+"""
 
-spec = Sequence(
-    schema_version=1,
-    input=TensorSpec(("B", 128), layout="BF", dtype="float32"),
-    output=TensorSpec(("B", 3, 32, 32), layout="NCHW", dtype="float32"),
-    policies=[
-        Policy("spatial.up2_transpose@1", nodes=["up1", "up2", "up3"]),
-    ],
-    layers=[
-        Layer("project", "linear@1", out_features=AUTO),
-        Layer("project_relu", "relu@1"),
-        Layer("seed", "reshape@1", shape=[512, AUTO, AUTO]),
-        Layer("up1", "conv_transpose2d@1", out_channels=256),
-        Layer("act1", "relu@1"),
-        Layer("up2", "conv_transpose2d@1", out_channels=128),
-        Layer("act2", "relu@1"),
-        Layer("up3", "conv_transpose2d@1", out_channels=64),
-        Layer("act3", "relu@1"),
-        Layer("rgb", "conv2d@1", out_channels=3,
-              kernel_size=3, stride=1, padding=1),
-        Layer("range", "tanh@1"),
-    ],
+generator = network(
+    generator_dsl,
+    input_shape=("B", 128),
+    output_shape=("B", 3, 32, 32),
+    device="cpu",
+    initialization_seed=7,
 )
-
-plan = resolve(spec)
 ```
 
-`NCHW` means batch × channels × height × width. The selected policy fixes each transposed convolution to kernel 4, stride 2, padding 1, dilation 1, output padding 0, and groups 1. These settings exactly double height and width. Three stages therefore require a 4 × 4 starting map to reach 32 × 32, so the projection must produce `512 × 4 × 4 = 8192` values.
+The `up2` policy selects transposed-convolution settings that exactly double height and width. Shapes include batch, channels, height, and width:
 
-Edit the output contract and resolve a new plan:
+```pycon
+>>> print(generator.describe())
+Network: [B, 128] -> [B, 3, 32, 32]  dtype=float32
+index  name          operation  input shape       output shape
+0      project       linear     [B, 128]          [B, 8192]
+1      project_relu  relu       [B, 8192]         [B, 8192]
+2      seed          reshape    [B, 8192]         [B, 512, 4, 4]
+3      up1           deconv     [B, 512, 4, 4]    [B, 256, 8, 8]
+4      act1          relu       [B, 256, 8, 8]    [B, 256, 8, 8]
+5      up2           deconv     [B, 256, 8, 8]    [B, 128, 16, 16]
+6      act2          relu       [B, 128, 16, 16]  [B, 128, 16, 16]
+7      up3           deconv     [B, 128, 16, 16]  [B, 64, 32, 32]
+8      act3          relu       [B, 64, 32, 32]   [B, 64, 32, 32]
+9      rgb           conv       [B, 64, 32, 32]   [B, 3, 32, 32]
+10     range         tanh       [B, 3, 32, 32]    [B, 3, 32, 32]
+```
 
-| Target image | Starting map | Projection width |
+Three doublings require a 4 × 4 seed, so the projection produces `512 × 4 × 4 = 8192` values. Change only `output_shape` and construct a new model:
+
+| Output constraint | Resolved seed | Projection width |
 | --- | --- | --- |
-| 32 × 32 | 512 × 4 × 4 | 8192 |
-| 64 × 64 | 512 × 8 × 8 | 32768 |
-| 32 × 64 | 512 × 4 × 8 | 16384 |
+| `("B", 3, 32, 32)` | `[B, 512, 4, 4]` | 8192 |
+| `("B", 3, 64, 64)` | `[B, 512, 8, 8]` | 32768 |
+| `("B", 3, 32, 64)` | `[B, 512, 4, 8]` | 16384 |
 
-The layer sequence stays the same. Each new plan describes a new model with its own parameter shapes. `tanh` is an explicit architecture choice; your data preparation and objective must use the intended output range.
-
-A 30 × 30 target cannot satisfy those three exact doubling stages. Resolution should report an error along these lines before any model is built:
+With a 30 × 30 target, resolution fails before allocating model parameters:
 
 ```text
-E_CONSTRAINT: output height 30 conflicts with up1 → up2 → up3.
+E_CONSTRAINT: output height 30 conflicts with up1 -> up2 -> up3.
 Three doubling stages require an integer seed height; 30 / 8 = 3.75.
 Choose a target divisible by 8 or explicitly change the architecture.
 ```
 
-Likewise, setting `project.out_features=128` for the 32 × 32 target produces a reshape conflict: the starting map needs 8192 values. HNDL preserves the value you wrote and explains the conflict.
+Literal values remain constraints. Writing `project: linear 128` would also fail for the 32 × 32 target because the seed needs 8192 values. `auto` resolves dimensions when the constraints determine them; a named policy supplies declared construction choices. Multiple valid choices are reported as ambiguous when no selected policy chooses among them. HNDL does not silently crop, broadcast, or replace layers to make them fit.
 
-## What automatic means
+## Register your own operation
 
-- **Literal values are constraints.** A width of `64` remains `64`.
-- **`AUTO` asks for resolution.** HNDL can infer a value when the constraints determine it uniquely.
-- **Named policies make declared choices.** The doubling policy above supplies exact convolution settings to the selected layers.
-- **Unanswered choices are errors.** If several shapes are valid and no selected policy decides between them, the plan remains ambiguous.
+Extend the vocabulary with a PyTorch module and its shape rule. Here is a proposed registration for the shape-preserving SiLU activation:
 
-HNDL will not silently crop an image, insert a projection, broadcast a join, or change a layer to make the shapes fit. Omitted optional arguments use documented defaults unless an explicitly selected policy supplies them; `AUTO` explicitly requests resolution and is not a synonym for an omitted argument.
+```python
+from torch import nn
+from hndl import Registry, preserves_shape
+from hndl.torch import network, register_torch
 
-Shape checks cover the declared contracts and supported operator rules. They cannot establish model quality or the correctness of arbitrary custom code. Runtime input checks still validate the tensors your application supplies.
+registry = Registry.builtins()
+registry.register(
+    "silu",
+    identity="example.silu",
+    version=1,
+    shape=preserves_shape,
+)
+register_torch(registry, "silu", module=nn.SiLU, state_version=1)
 
-## Keep experiments focused on the network
+model = network(
+    """
+    hidden: linear 64
+    activation: silu
+    scores: linear auto
+    """,
+    input_shape=("B", 128),
+    output_shape=("B", 10),
+    registry=registry,
+    device="cpu",
+    initialization_seed=7,
+)
+```
 
-The intended workflow is to edit a specification, resolve and inspect it, build the model, and run your existing training or evaluation code. Compare candidate architectures using the metrics you care about, then save the specification and resolved plan alongside the experiment results.
+The DSL now understands `silu`. `preserves_shape` tells the resolver that input and output dimensions, layout, and dtype are equal, so constraints propagate in both directions. The backend constructs an `nn.SiLU` for execution. Registration carries the operation's version; network text uses its plain name.
 
-For example, try hidden widths of 32, 64, and 128 in the first example. Resolve and build each candidate, then pass it to the same training and evaluation function in your application. Compare validation accuracy and inference time. The input stays at 128 features and the output stays at 10 scores; HNDL resolves the connecting dimensions for each candidate.
+This helper covers unary operations with no author arguments. Operations that change shapes or accept several inputs need their own rules and port declarations, described in [SPEC.md](SPEC.md#8-custom-operators-and-minimal-graphs). Custom implementations still need numerical and gradient checks; declaring a shape rule does not prove their code correct.
 
-HNDL handles architecture constraints and module construction. Your application owns datasets, losses, metrics, optimizers, training schedules, and any search over candidate networks. A valid shape plan is a useful starting point for an experiment, not a prediction that its metrics will improve.
+## Experiment with less boilerplate
 
-The proposed v1 also includes structured graphs with named inputs and outputs, branches and joins, and custom operators with declared shape rules. These support residual paths and style-conditioned blocks while keeping the same resolve-then-build workflow. A compact sequence syntax is planned after the structured core.
+Change `linear 64` to `linear 128`, resolve the same input/output constraints, and send the resulting model through your existing training and evaluation loop. Compare accuracy, loss, or inference time while keeping architecture definitions small and readable. HNDL handles the connecting dimensions; your application owns metrics, optimizers, and the search over candidates.
 
-## Read the contract
+For inspection without building a model, use the pure resolver:
 
-- [SPEC.md](SPEC.md) defines the technical v1 contract: data structures, resolution rules, operators, policies, plans, runtime behavior, and acceptance criteria.
-- [DESIGN.md](DESIGN.md) records the original design and its rationale.
+```python
+from hndl import resolve
 
-Implementation begins with the pure resolver and shape checks, followed by the PyTorch builder and graph extensions. HNDL is intended to work independently of any training framework, including HyperGAN.
+plan = resolve(
+    generator_dsl,
+    input_shape=("B", 128),
+    output_shape=("B", 3, 32, 32),
+)
+print(plan.describe())
+```
+
+Built-in resolution needs no PyTorch import or tensor allocation. Save the resolved plan with your experiment to record exactly which architecture was constructed. Named graphs and custom multi-input operations are also part of the proposed v1; the text DSL starts with sequences.
+
+[SPEC.md](SPEC.md) defines the language, registration, shape rules, and PyTorch interface. [DESIGN.md](DESIGN.md) preserves the original rationale; the spec reflects the current DSL-focused API.

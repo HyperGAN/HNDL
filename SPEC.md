@@ -24,7 +24,7 @@ The initial deliverable includes the sequence DSL, a typed Python construction A
 
 HNDL owns tensor contracts, architecture resolution, construction, module registration, plan persistence, and diagnostics. The host owns data semantics, losses, metrics, regularizers, optimizers, training schedules, runtime random streams, devices, and complete checkpoint recovery. Researchers can vary architecture specifications while keeping their metric evaluation loop unchanged; HNDL does not optimize a metric or search architectures automatically.
 
-Topology search, dynamic image sizes, runtime control flow, parameter sharing, distributed training, export backends, a visual editor, and full StyleGAN recipes are outside v1. HNDL has no HyperGAN runtime dependency.
+Topology search, dynamic image sizes, runtime control flow, weight tying between graph nodes, distributed training, export backends, a visual editor, and full StyleGAN recipes are outside v1. HNDL has no HyperGAN runtime dependency.
 
 ## 2. Core invariants
 
@@ -118,7 +118,7 @@ The following proposed internal/structured JSON encoding defines a two-layer per
 
 Validation must reject duplicate IDs, missing references, undeclared ports, missing required bindings, cycles, and nodes that cannot reach any declared output. Multiple public outputs are allowed. Graph values are tensors; adapters must flatten Python tuple/dict results into declared tensor ports.
 
-Each node owns an independent module instance and executes once per forward. Fan-out reuses a computed tensor. It does not clone the source module, repeat its invocation, or tie parameters between nodes. Explicit weight sharing is deferred and must fail if requested.
+Each node owns an independent module instance and executes once per forward. Fan-out reuses a computed tensor. It does not clone the source module, repeat its invocation, or tie parameters between nodes. Explicit weight tying between graph nodes is deferred and must fail if requested. External reuse of built modules through sequence slices is supported as described in §7.
 
 The sequence DSL lowers to external input `x`, public output `output`, and consecutive unary nodes connected through `out`. Structured authoring requires explicit node IDs. The DSL may generate deterministic position-based IDs for unlabeled lines but must show them in the expansion and warn that inserting layers changes later generated names. Explicit labels become stable node IDs.
 
@@ -202,49 +202,133 @@ Ordinary convolution inversion may produce an integer interval, not a unique inp
 
 For concat, axes index the complete tensor shape and axis `0` is batch, which cannot be concatenated in v1. The spelling/normalization of negative axes remains to be fixed in the argument schema. No join introduces broadcasting, casts, or layout conversion.
 
-## 7. Public API and worked resolution
+## 7. DSL and public API
 
-The proposed interface has four main operations:
+The primary API accepts a multiline string with one layer per nonblank line and tensor constraints supplied separately:
+
+```python
+from hndl.torch import network
+
+source = """
+hidden: linear 64
+activation: relu
+scores: linear auto
+"""
+model = network(
+    source,
+    input_shape=("B", 128),
+    output_shape=("B", 10),
+    device="cpu",
+    initialization_seed=7,
+)
+print(model.describe())
+# With a caller-supplied tensor x of shape [B, 128]:
+# scores = model(x)
+```
+
+`describe()` returns a printable table with network input/output shapes and dtype, followed by every layer's index, name, operation, and resolved input/output shapes. The following console output is illustrative; no implementation has produced it yet:
+
+```text
+Network: [B, 128] -> [B, 10]  dtype=float32
+index  name        operation  input shape  output shape
+0      hidden      linear     [B, 128]     [B, 64]
+1      activation  relu       [B, 64]      [B, 64]
+2      scores      linear     [B, 64]      [B, 10]
+```
+
+The public baseline is:
 
 | API | Result and requirements |
 | --- | --- |
-| `Sequence(...)`, `Layer(...)`, `TensorSpec(...)`, `Policy(...)` | Typed authoring helpers that lower to the structured specification |
-| `resolve(spec)` | Immutable `ResolvedPlan`; pure built-in registry available by default; custom providers explicitly registered |
-| `plan.describe()` | Node/port shapes, value provenance, asserted contracts, static parameter counts where known, semantic digest |
-| `hndl.torch.build(plan, *, device, initialization_seed)` | Fully materialized ordinary PyTorch `GraphModule` |
+| `resolve(source, *, input_shape, output_shape, dtype="float32", registry=None)` | Parse and resolve a sequence into an immutable `ResolvedPlan`, without torch |
+| `network(source, *, input_shape, output_shape, device, initialization_seed, dtype="float32", registry=None)` | Resolve and build a sequence module with tensor-returning `forward(x)` |
+| `model.plan` | The immutable resolved plan used to construct the module |
+| `model.describe()` | A complete printable layer input/output shape table; must work without sample tensors or a forward pass |
+| `plan.describe()` | Detailed node/port shapes, value provenance, asserted contracts, static parameter counts where known, and semantic digest |
+| `hndl.torch.build(plan, *, device, initialization_seed)` | Lower-level construction returning a dictionary-output `GraphModule` |
 
-Registry injection, graph helper constructors, serialization methods, and detailed signatures remain pending. Built-in `resolve(spec)` must not import a backend or discover arbitrary custom entry points.
+`resolve` is exported by `hndl`; `network` is exported by `hndl.torch`. The latter is the resolve/build convenience API and must not introduce different resolution semantics. A missing registry selects the built-in registry. Structured graph resolution and serialization helpers remain to be named; their data contracts are defined here.
 
-The generator example uses three exact doubling stages to work backward from an output contract:
+### Sequence syntax and exact version bindings
+
+A line contains an optional `id:`, an operator alias, documented positional arguments, and named scalar arguments. Blank lines and surrounding whitespace are ignored. Labels follow the node-ID rules in §4. `auto`, `true`, and `false` are lowercase. Allow integers, finite numeric values, and registered aliases for policy selection. Unknown operators, policies, arguments, duplicate labels, and repeated positional/named assignments fail with source locations.
+
+The initial positional mappings are `linear <out_features>`, `conv <out_channels>`, `deconv <out_channels>`, and `reshape <non-batch dimensions...>`. `relu`, `tanh`, and `flatten` require no positional arguments. Other scalar arguments use their operator schema's field names, such as `kernel_size=3`. Complex/tuple-valued custom arguments use structured data until separately specified. Multi-input joins use the graph representation, not implicit names inside sequences.
+
+The DSL does not use `@` version suffixes. Registry bindings map aliases to exact immutable identities: `linear` to `linear@1`, `conv` to `conv2d@1`, `deconv` to `conv_transpose2d@1`, and policy `up2` to `spatial.up2_transpose@1`. Other built-in aliases bind the matching catalog operator at version 1. Custom aliases use explicit registration (§8). Duplicate/conflicting aliases fail. Resolution must never choose a newest installed version or discover arbitrary plugins. Saved plans materialize exact identities/versions and the effects of policy selection, so restoration does not depend on current alias bindings.
+
+There is no Python evaluation, arithmetic, loops, nesting, implicit tensor context, or imports in the DSL. Its semantics must match equivalent structured graph input. Exact lexical details beyond this baseline must be fixed in the parser schema before shipping.
+
+### Layer access
+
+The sequence module provides access to the actual registered PyTorch layers:
 
 ```python
-from hndl import AUTO, Layer, Policy, Sequence, TensorSpec, resolve
-from hndl.torch import build
+first = model[0]
+last = model[-1]
+hidden = model["hidden"]
+assert first is hidden
+assert len(model) == 3
+layers = list(model)
+features = model[:2]
+```
 
-spec = Sequence(
-    schema_version=1,
-    input=TensorSpec(("B", 128), layout="BF", dtype="float32"),
-    output=TensorSpec(("B", 3, 32, 32), layout="NCHW", dtype="float32"),
-    policies=[Policy("spatial.up2_transpose@1", nodes=["up1", "up2", "up3"])],
-    layers=[
-        Layer("project", "linear@1", out_features=AUTO),
-        Layer("project_relu", "relu@1"),
-        Layer("seed", "reshape@1", shape=[512, AUTO, AUTO]),
-        Layer("up1", "conv_transpose2d@1", out_channels=256),
-        Layer("act1", "relu@1"),
-        Layer("up2", "conv_transpose2d@1", out_channels=128),
-        Layer("act2", "relu@1"),
-        Layer("up3", "conv_transpose2d@1", out_channels=64),
-        Layer("act3", "relu@1"),
-        Layer("rgb", "conv2d@1", out_channels=3,
-              kernel_size=3, stride=1, padding=1),
-        Layer("range", "tanh@1"),
-    ],
+Integer indexing, including negative indices, follows layer order; string lookup uses the node ID. `len(model)` counts layers and iteration yields those same modules in order. An unknown name raises `KeyError`; an out-of-range integer raises `IndexError`.
+
+A slice returns an ordinary `torch.nn.Sequential` containing the selected existing module objects in slice order. It shares parameters, buffers, training mode, and device changes with the original modules; it is not a copy. The sliced object has no HNDL plan or shape guarantees, and arbitrary slices may not form a shape-compatible sequence. Creating a slice must not add registrations to the original model or alter its state keys.
+
+The facade must preserve the backend's single registration under `nodes.n_<node_id>` and corresponding state keys, without registering each layer a second time or adding a wrapper prefix. Parameter access, gradients, optimizers, state dictionaries, device moves, and train/eval use ordinary PyTorch behavior. Structural replacement, insertion, or deletion through the HNDL container is rejected to keep its plan sound; ordinary parameter value updates remain supported. Architecture changes require resolving/building a new model.
+
+General graphs support node-name lookup only; positional indexing, slicing, and sequence iteration are not graph APIs. Their execution interface remains `forward(**inputs)` returning a dictionary of named tensors.
+
+### Worked generator resolution
+
+The generator uses three explicit doubling stages to work backward from an output contract:
+
+```python
+from hndl.torch import network
+
+source = """
+project: linear auto
+project_relu: relu
+seed: reshape 512 auto auto
+up1: deconv 256 policy=up2
+act1: relu
+up2: deconv 128 policy=up2
+act2: relu
+up3: deconv 64 policy=up2
+act3: relu
+rgb: conv 3 kernel_size=3 stride=1 padding=1
+range: tanh
+"""
+model = network(
+    source,
+    input_shape=("B", 128),
+    output_shape=("B", 3, 32, 32),
+    device="cpu",
+    initialization_seed=7,
 )
-plan = resolve(spec)
-model = build(plan, device="cpu", initialization_seed=7)
+print(model.describe())
 # With a caller-supplied tensor z of shape [B, 128]:
-# image = model(x=z)["output"]
+# image = model(z)
+```
+
+Illustrative complete shape output:
+
+```text
+Network: [B, 128] -> [B, 3, 32, 32]  dtype=float32
+index  name          operation  input shape       output shape
+0      project       linear     [B, 128]          [B, 8192]
+1      project_relu  relu       [B, 8192]         [B, 8192]
+2      seed          reshape    [B, 8192]         [B, 512, 4, 4]
+3      up1           deconv     [B, 512, 4, 4]    [B, 256, 8, 8]
+4      act1          relu       [B, 256, 8, 8]    [B, 256, 8, 8]
+5      up2           deconv     [B, 256, 8, 8]    [B, 128, 16, 16]
+6      act2          relu       [B, 128, 16, 16]  [B, 128, 16, 16]
+7      up3           deconv     [B, 128, 16, 16]  [B, 64, 32, 32]
+8      act3          relu       [B, 64, 32, 32]   [B, 64, 32, 32]
+9      rgb           conv       [B, 64, 32, 32]   [B, 3, 32, 32]
+10     range         tanh       [B, 3, 32, 32]    [B, 3, 32, 32]
 ```
 
 The last convolution preserves spatial size. The selected transpose policy gives `output_height = 8 * seed_height` and the same relation for width. The projection width is then `512 * seed_height * seed_width`.
@@ -256,20 +340,6 @@ The last convolution preserves spatial size. The selected transpose policy gives
 | `[B,3,32,64]` | `[B,512,4,8]` | `16384` | Resolved |
 | `[B,3,30,30]` | Would require axes of `3.75` | — | Contradiction |
 | `[B,3,32,32]` with literal projection width `128` | Needs `8192` elements | — | Contradiction; retain the literal |
-
-### Compact sequence frontend
-
-The later v1 text frontend must lower to the same numerical plan as equivalent structured input. For example:
-
-```text
-project: linear auto
-project_relu: relu
-seed: reshape 512 auto auto
-up1: deconv 256 policy=spatial.up2_transpose@1
-act1: relu
-```
-
-This is a partial sequence fragment; contracts, schema version, and remaining layers are external to it. Syntax consists of an optional `id:`, an operator alias, documented positional arguments, and named scalar arguments. Allow integers, finite numeric values, booleans, `auto`, and registered policy IDs. Reject unknown fields and repeated positional/named assignments. Aliases map to exact operator versions, which appear in the plan. Complex/tuple-valued custom arguments use structured data. There is no Python evaluation, arithmetic, loops, nesting, or implicit tensor context.
 
 ## 8. Custom operators and minimal graphs
 
@@ -287,6 +357,43 @@ A custom operator registration must provide:
 | Capabilities | Declared/tested dtype/device and gradient behavior, separate from host qualification |
 
 Shape providers and backend builders may live in separate modules. Resolving a data specification must not import arbitrary plugins or execute its contents. Registered providers are trusted code; opaque modules may instead use fully declared **asserted** input/output contracts. Those contracts are not statically verified and require runtime checks before training. Backward inference through an opaque module is unavailable unless its provider supplies the necessary relations.
+
+### Registering a unary shape-preserving layer
+
+The simplest extension registers its pure shape rule separately from its PyTorch implementation:
+
+```python
+from torch import nn
+from hndl import Registry, preserves_shape
+from hndl.torch import network, register_torch
+
+registry = Registry.builtins()
+registry.register(
+    "silu", identity="example.silu", version=1, shape=preserves_shape,
+)
+register_torch(registry, "silu", module=nn.SiLU, state_version=1)
+
+model = network(
+    """
+hidden: linear 64
+activation: silu
+scores: linear auto
+""",
+    input_shape=("B", 128),
+    output_shape=("B", 10),
+    registry=registry,
+    device="cpu",
+    initialization_seed=7,
+)
+```
+
+`Registry.builtins()` returns an independently extensible registry containing the fixed built-in aliases. `register(alias, *, identity, version, shape, state_version=1)` binds a new alias to its exact operator identity/version. The no-argument unary helper shown here supplies an empty argument schema, input port `x`, output port `out`, default state compatibility version `1`, and unqualified capability status. State compatibility metadata belongs to the pure registration, so resolution can record it without loading a backend. More complex operators must declare their schemas/ports explicitly through the full extension API.
+
+`preserves_shape` contributes bidirectional equality relations for input/output dimensions, layout, and dtype; it is not merely a forward shape callback. Downstream constraints can therefore propagate through this custom layer. The provider's claim must still be verified against the actual module during numerical qualification; registering it does not qualify its device/dtype/gradient behavior.
+
+`register_torch(registry, alias, *, module, state_version)` attaches a backend constructor to the alias's already registered exact identity/version. Missing bindings, duplicate backend registration, and a state version differing from the pure declaration fail. In the no-argument unary form, the builder constructs `module()` once per node, invokes it with the `x` tensor, and binds its tensor result to `out`. There is no constructor introspection or assumption about other module arguments. `nn.SiLU` here uses its ordinary non-in-place constructor behavior.
+
+Pure registration and `resolve()` remain usable without importing torch, even though the combined example imports torch to register a backend. Resolution must not call the backend constructor. Backend bindings stay separate from serializable arguments; neither DSL nor saved data can import a module class. The plan stores `example.silu@1` and its state compatibility requirement, not executable Python. Building without its explicitly registered backend must fail.
 
 ### Required affine instance-normalization fixture
 
@@ -345,9 +452,9 @@ The **artifact digest** covers the complete saved plan except its own digest fie
 
 ## 10. PyTorch backend contract
 
-`build(plan, *, device, initialization_seed)` returns a normal training-mode `nn.Module`. Device is explicit; CPU is suitable for small fixtures and CUDA is the intended primary execution target. There is no silent CPU fallback. The plan fixes the qualified dtype, initially `float32`.
+`build(plan, *, device, initialization_seed)` returns a normal training-mode `GraphModule`. `network(...)` presents the sequence facade from §7 over the same construction semantics and registered state. Device is explicit; CPU is suitable for small fixtures and CUDA is the intended primary execution target. There is no silent CPU fallback. The plan fixes the qualified dtype, initially `float32`.
 
-- `forward(**inputs)` validates declared external input contracts and returns a dictionary keyed by public output names, including for a single output.
+- A `GraphModule` validates declared external input contracts in `forward(**inputs)` and returns a dictionary keyed by public output names, including for a single output. The sequence facade instead accepts `forward(x)` and returns the single output tensor, preserving the same contract checks.
 - Modules register once under `nodes.n_<node_id>`; the prefix avoids collisions with module attribute names. Stateless nodes keep execution/diagnostic identities without state entries.
 - Nodes run in stable topological order, breaking ties by declaration order. The order is saved in the plan.
 - Parameters/buffers are fully materialized before optimizer or distributed setup. No first-forward parameter creation is allowed.
@@ -391,7 +498,7 @@ Failures must expose a stable code, source/node/field location, affected constra
 | `E_BINDING` | A reference names an undeclared node or tensor port |
 | `E_STATE_VERSION` | Saved state requires an unavailable compatible operator implementation |
 
-Schema/version/resource-limit diagnostics also require stable codes; their complete catalog is pending. `plan.describe()` must expose shapes and provenance sufficiently to explain why a field changed between separately resolved specifications.
+Schema/version/resource-limit diagnostics also require stable codes; their complete catalog is pending. DSL failures include line/column locations where applicable. `model.describe()` must include every layer, its ID/operator, and complete input/output shapes without executing the network. `plan.describe()` must additionally expose provenance sufficiently to explain why a field changed between separately resolved specifications.
 
 Static resolution, dry-run/meta checks, and numerical preflight are distinct inspection modes. Numerical preflight must use disposable modules or restore affected state/RNG; it must not advance a live training stream or alter persistent buffers.
 
@@ -401,10 +508,12 @@ The following are future gates, not claims about tests already passing:
 
 | Gate | Required evidence |
 | --- | --- |
-| Pure core | Import, resolve, and serialize with no torch/CUDA; malformed specs and unavailable providers fail clearly |
+| Pure core | Import, parse DSL, resolve, and serialize with no torch/CUDA; malformed specs and unavailable providers fail clearly |
 | Shape resolution | Generator targets `32×32`, `64×64`, `32×64`; invalid `30×30`; literal-width conflict; inverse ambiguity; group divisibility and join conflicts |
-| Determinism | Repeated resolution is identical; equivalent graph/sequence/string inputs have the same semantic plan; policy order has no effect |
+| Determinism | Repeated resolution is identical; equivalent DSL/structured graph inputs have the same semantic plan; aliases bind exact versions; policy order has no effect |
 | Backend equivalence | Handwritten PyTorch comparison from identical state: forward values, input/parameter gradients, optimizer updates |
+| Public sequence API | Tensor forward result; complete shape table; integer/negative/name lookup and iteration; shared-module slices; stable state keys without double registration; structural assignment rejected |
+| Unary registration | `silu` example resolves through bidirectional shape equality; pure resolution never constructs/imports a backend; exact identity/state version is preserved |
 | Custom graph | Resolve `2*C`; fan-out works; feature/style gradients are correct; reject incorrect batch/channel contracts |
 | Numerical validity | Finite affine-normalization forward/backward for constant/nonconstant inputs; first/second derivative checks on suitable nondegenerate fixtures |
 | Registration and recovery | Stable registered state; fresh-process round-trip; no first-forward parameters or hidden runtime RNG draws |
@@ -415,11 +524,11 @@ No identity substitutes, blanket skips, fabricated successful output, or silent 
 
 Implement in this order:
 
-1. Pure schema/types, registry, linear/reshape/activation relations, trace, and plan serialization.
-2. Convolution relations, doubling policy, sequential examples, and shape/determinism checks.
-3. PyTorch construction, state registration, isolated initialization, CPU equivalence, and CUDA checks.
-4. Named graph joins/fan-out, custom providers, and the affine-normalization fixture.
-5. Compact sequence syntax, semantic equivalence checks, and walkthroughs.
+1. Pure schema/types, fixed registry aliases, the sequence DSL parser, linear/reshape/activation relations, trace, and plan serialization.
+2. Convolution relations, doubling policy, complete shape inspection, and DSL/graph semantic equivalence and determinism checks.
+3. PyTorch `network` facade and lower-level builder, layer access/slicing, state registration, isolated initialization, CPU equivalence, and CUDA checks.
+4. Simple custom-layer registration, then named graph joins/fan-out, full custom providers, and the affine-normalization fixture.
+5. Complete the public DSL walkthroughs and acceptance gates; host adapters follow the standalone core.
 
 A sequence-only first milestone is useful progress, not completion of the graph/custom-extension v1 contract. Host adapters follow the standalone core.
 
@@ -427,8 +536,9 @@ A sequence-only first milestone is useful progress, not completion of the graph/
 
 The baseline deliberately leaves these details visible:
 
-- Publish machine-readable author/plan schemas, registry injection and serialization APIs, and exact Python graph helpers. The JSON example above is proposed encoding.
-- Specify every built-in argument's name, type, default, automatic eligibility, scalar/pair normalization, and validation bounds. In particular, fix normalization/activation defaults and concat axis normalization. Do not inherit changing backend defaults implicitly.
+- Publish machine-readable author/plan schemas, serialization APIs, full custom-registration schemas, and exact Python graph helpers. The public sequence signatures and unary registration contract are fixed above; the JSON example is proposed encoding.
+- Complete every built-in argument's type, automatic eligibility, scalar/pair normalization, and validation bounds beyond the defaults fixed in §6. In particular, fix normalization/leaky-ReLU defaults and concat axis normalization. Do not inherit changing backend defaults implicitly.
+- Finalize DSL lexical rules, remaining positional mappings, generated-ID convention, and how structured plan restoration supplies the explicit backend registry. General graph helper APIs do not replace the primary DSL workflow.
 - Define the supported representation for sharing non-batch dimension variables during resolution. Only batch remains symbolic in a successful plan; no general expression language is implied.
 - Finalize canonical JSON encoding, semantic/artifact digest payloads, and golden test vectors.
 - Fix initialization override and trainability syntax, build-receipt representation, runtime-check controls, and supported PyTorch versions/devices with numerical tolerances.
