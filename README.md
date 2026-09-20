@@ -8,30 +8,29 @@ Write your network as a few lines of text. Give HNDL its input and output shapes
 
 ## A network in a string
 
-Each line describes a layer. Input and output constraints belong in the API call:
+Each line starts with an operation. Leave out a dimension to let HNDL infer it, and optionally add `name=` for named access. Input and output constraints belong in the API call:
 
 ```python
 from hndl.torch import network
 
 model = network(
     """
-    hidden: linear 64
-    activation: relu
-    scores: linear auto
+    linear 64 name=hidden
+    relu name=activation
+    linear name=scores
     """,
     input_shape=("B", 128),
     output_shape=("B", 10),
     device="cpu",
-    initialization_seed=7,
 )
 ```
 
-Here, `B` is a variable batch size. The output constraint determines that `scores` needs 10 output features. HNDL resolves the dimensions before constructing any modules.
+Here, `B` is a variable batch size. The final `linear` has no width argument, so the output constraint determines its 10 output features. Names are optional: `linear 64`, `relu`, and `linear` describe the same operations without custom names. HNDL resolves the dimensions before constructing any modules.
 
-Inspect the result in the Python console:
+Use `print(model)` to inspect it. HNDL supplies the shape table as its module representation:
 
 ```pycon
->>> print(model.describe())
+>>> print(model)
 Network: [B, 128] -> [B, 10]  dtype=float32
 index  name        operation  input shape  output shape
 0      hidden      linear     [B, 128]     [B, 64]
@@ -60,23 +59,25 @@ features = model[:2]                     # nn.Sequential sharing these layers
 
 Named and integer access return the same modules used by the network. Slices reuse their parameters, so training a slice also updates the original model. The complete model retains its resolved shape contract; a slice is a regular PyTorch sequence. Standard `state_dict()`, `train()`, and `eval()` remain available.
 
+Initial weights use PyTorch’s normal random state. For repeatable initialization in the same environment, call [`torch.manual_seed(7)`](https://docs.pytorch.org/docs/stable/notes/randomness.html#pytorch-random-number-generator) before constructing the network.
+
 ## Change the target, keep the definition
 
 A generator starts with 128 features and produces a 32 × 32 RGB image. Choose the channels and three upsampling stages; let the target determine the projection width and starting height and width.
 
 ```python
 generator_dsl = """
-project: linear auto
-project_relu: relu
-seed: reshape 512 auto auto
-up1: deconv 256 policy=up2
-act1: relu
-up2: deconv 128 policy=up2
-act2: relu
-up3: deconv 64 policy=up2
-act3: relu
-rgb: conv 3 kernel_size=3 stride=1 padding=1
-range: tanh
+linear name=project
+relu name=project_relu
+reshape 512 name=seed
+deconv 256 policy=up2 name=up1
+relu name=act1
+deconv 128 policy=up2 name=up2
+relu name=act2
+deconv 64 policy=up2 name=up3
+relu name=act3
+conv 3 kernel_size=3 stride=1 padding=1 name=rgb
+tanh name=range
 """
 
 generator = network(
@@ -84,14 +85,13 @@ generator = network(
     input_shape=("B", 128),
     output_shape=("B", 3, 32, 32),
     device="cpu",
-    initialization_seed=7,
 )
 ```
 
-The `up2` policy selects transposed-convolution settings that exactly double height and width. Shapes include batch, channels, height, and width:
+The `up2` policy selects transposed-convolution settings that exactly double height and width. `reshape 512` fixes the channels; the following convolution requires an image-shaped tensor, so HNDL infers the remaining height and width. Shapes include batch, channels, height, and width:
 
 ```pycon
->>> print(generator.describe())
+>>> print(generator)
 Network: [B, 128] -> [B, 3, 32, 32]  dtype=float32
 index  name          operation  input shape       output shape
 0      project       linear     [B, 128]          [B, 8192]
@@ -123,7 +123,7 @@ Three doubling stages require an integer seed height; 30 / 8 = 3.75.
 Choose a target divisible by 8 or explicitly change the architecture.
 ```
 
-Literal values remain constraints. Writing `project: linear 128` would also fail for the 32 × 32 target because the seed needs 8192 values. `auto` resolves dimensions when the constraints determine them; a named policy supplies declared construction choices. Multiple valid choices are reported as ambiguous when no selected policy chooses among them. HNDL does not silently crop, broadcast, or replace layers to make them fit.
+Literal values remain constraints. Writing `linear 128 name=project` would also fail for the 32 × 32 target because the seed needs 8192 values. Omitted dimensions are inferred when the constraints determine them; a named policy supplies declared construction choices. Multiple valid choices are reported as ambiguous when no selected policy chooses among them. HNDL does not silently crop, broadcast, or replace layers to make them fit.
 
 ## Register your own operation
 
@@ -145,15 +145,14 @@ register_torch(registry, "silu", module=nn.SiLU, state_version=1)
 
 model = network(
     """
-    hidden: linear 64
-    activation: silu
-    scores: linear auto
+    linear 64 name=hidden
+    silu name=activation
+    linear name=scores
     """,
     input_shape=("B", 128),
     output_shape=("B", 10),
     registry=registry,
     device="cpu",
-    initialization_seed=7,
 )
 ```
 
@@ -175,7 +174,7 @@ plan = resolve(
     input_shape=("B", 128),
     output_shape=("B", 3, 32, 32),
 )
-print(plan.describe())
+print(plan)
 ```
 
 Built-in resolution needs no PyTorch import or tensor allocation. Save the resolved plan with your experiment to record exactly which architecture was constructed. Named graphs and custom multi-input operations are also part of the proposed v1; the text DSL starts with sequences.

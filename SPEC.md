@@ -2,7 +2,7 @@
 
 **Status: proposed; no implementation exists yet.** This document defines the baseline for implementing **HNDL — Human-readable Network Definition Language**, pronounced “handle.” It turns the direction in [DESIGN.md](DESIGN.md) into a standalone technical contract. [README.md](README.md) introduces the same ideas with examples.
 
-“Must” denotes a v1 requirement. Python signatures and JSON examples describe the proposed interface, not an available package. This specification supersedes conflicting public API descriptions in DESIGN.md: the primary authoring surface is a multiline network DSL plus input/output constraints passed through Python. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
+“Must” denotes a v1 requirement. Python signatures and JSON examples describe the proposed interface, not an available package. This specification supersedes conflicting public API descriptions in DESIGN.md: the primary authoring surface is an operator-first multiline DSL plus input/output constraints passed through Python. Omitted inferable dimensions replace explicit unknown markers; optional names use `name=...`; printing a module shows its resolved shapes. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
 
 ## 1. Purpose and boundary
 
@@ -36,7 +36,7 @@ Topology search, dynamic image sizes, runtime control flow, weight tying between
 6. **Forward execution uses the plan.** It does not parse strings, solve constraints, select policies, or create parameters.
 7. **Limitations are visible.** Ambiguity, unsupported inference, contradictions, and asserted custom contracts must remain distinguishable.
 
-## 3. Tensor contracts and automatic values
+## 3. Tensor contracts and omitted dimensions
 
 A `TensorSpec` contains ordered dimensions including batch, an explicit layout, and a dtype. Initially supported layouts are:
 
@@ -49,16 +49,16 @@ Qualified v1 execution uses `float32`. A shared batch symbol, written `"B"` in t
 
 The sequence API accepts `input_shape` and `output_shape`, both including batch. Rank two means `BF`; rank four means `NCHW`. Unsupported ranks fail rather than guessing a layout. The `dtype` keyword defaults to `"float32"`. Structured graph contracts retain explicit layouts.
 
-The DSL token `auto` marks an explicitly unresolved numeric field, represented internally as `AUTO` and serialized as `{"auto": true}`. It is valid only where the operator schema permits it. It is not interchangeable with `None`, `null`, `-1`, zero, or an arbitrary expression.
+Omitting an inferable dimension creates a fresh unknown. For example, `linear` leaves output width to resolution, while `linear 64` fixes it at 64. The operator schema identifies inferable dimension fields; omission does not make every argument inferable. Structured JSON likewise omits such fields rather than storing a special sentinel. No public unknown-value helper is required.
 
 | Author value | Meaning |
 | --- | --- |
 | Literal | A hard constraint; a mismatch fails |
-| `AUTO` | Resolve through supported relations or an eligible selected policy; otherwise fail |
-| Omitted optional field | Use its versioned operator default, unless reserved for an applicable policy |
-| Omitted required field | Fail, unless a selected policy explicitly supplies that field |
+| Omitted inferable dimension | Resolve through supported relations or an eligible selected policy; otherwise fail |
+| Omitted optional non-dimension field | Use its versioned operator default, unless reserved for an applicable policy |
+| Omitted required non-inferable field | Fail, unless a selected policy explicitly supplies that field |
 
-`AUTO` must not quietly become an operator default when inference stalls. Derived input widths/channels are operator relations, not additional required user arguments.
+An unresolved dimension must not quietly become an operator default when inference stalls. Derived input widths/channels are operator relations, not additional required user arguments. `null`, `None`, `-1`, zero, arbitrary expressions, and keyword placeholders are not substitutes for omission. Each missing dimension is independent until a supported relation connects it.
 
 HNDL does not infer color space, value range, activation choice, layout conversion, mixed precision, or broadcasting. A declared `tanh` is an explicit operation; an image output contract does not imply it. Joins must not insert resizing or broadcasting.
 
@@ -101,7 +101,7 @@ The following proposed internal/structured JSON encoding defines a two-layer per
     {
       "id": "head",
       "op": "linear@1",
-      "args": {"out_features": {"auto": true}, "bias": true},
+      "args": {"bias": true},
       "inputs": {"x": "node:act/out"}
     }
   ],
@@ -120,7 +120,7 @@ Validation must reject duplicate IDs, missing references, undeclared ports, miss
 
 Each node owns an independent module instance and executes once per forward. Fan-out reuses a computed tensor. It does not clone the source module, repeat its invocation, or tie parameters between nodes. Explicit weight tying between graph nodes is deferred and must fail if requested. External reuse of built modules through sequence slices is supported as described in §7.
 
-The sequence DSL lowers to external input `x`, public output `output`, and consecutive unary nodes connected through `out`. Structured authoring requires explicit node IDs. The DSL may generate deterministic position-based IDs for unlabeled lines but must show them in the expansion and warn that inserting layers changes later generated names. Explicit labels become stable node IDs.
+The sequence DSL lowers to external input `x`, public output `output`, and consecutive unary nodes connected through `out`. Structured authoring requires explicit node IDs. The DSL assigns deterministic position-based IDs to unnamed lines, shows them in the printed table and expansion, and warns that inserting layers changes later generated names. Explicit `name` values become stable node IDs. Collisions between explicit and generated IDs fail.
 
 ## 5. Resolution algorithm
 
@@ -128,7 +128,7 @@ The resolver must perform the following logical steps:
 
 1. Validate the schema and graph; bind exact operator and policy versions from the active registry.
 2. Expand explicitly declared finite policy templates, if any, and validate their nodes/edges. The required initial policy does not change topology.
-3. Seed tensor contracts and literals. Apply policy requirements as constraints. Apply operator defaults only to omitted fields not already supplied by policy requirements or reserved for selected policy defaults. Create operator relations and automatic variables.
+3. Seed tensor contracts and literals. Apply policy requirements as constraints. Create fresh unknowns for omitted inferable dimensions and add operator relations. Apply operator defaults only to other omitted fields not already supplied by policy requirements or reserved for selected policy defaults.
 4. Propagate forward and backward to a fixed point, recording derivations and detecting contradictions.
 5. Ask selected policies to resolve remaining eligible choices according to their deterministic rules, then propagate again.
 6. Fail if any required construction value remains ambiguous or unresolved; otherwise freeze the concrete plan.
@@ -165,7 +165,7 @@ The required initial policy is `spatial.up2_transpose@1`, selected in the DSL as
 | `output_padding` | `0` on both axes |
 | `groups` | `1` |
 
-It supplies omitted/automatic eligible values and rejects contrary literals. These settings guarantee exact spatial doubling; channel widths and bias are separate arguments. The policy does not guarantee image quality. It must not silently substitute resize/convolution, crop, or a different architecture when a target fails.
+It supplies omitted eligible values and rejects contrary literals. These settings guarantee exact spatial doubling; channel widths and bias are separate arguments. The policy does not guarantee image quality. It must not silently substitute resize/convolution, crop, or a different architecture when a target fails.
 
 Custom policies are trusted, explicitly registered Python providers. Data files cannot contain executable expressions or arbitrary imports.
 
@@ -176,7 +176,7 @@ The minimum catalog is listed below; each identifier has semantic version `@1`. 
 | Operator | Arguments/ports relevant to shape | Required relation |
 | --- | --- | --- |
 | `linear` | `out_features`, optional bias | `BF → BF`; infer input width, constrain output width; no implicit flatten |
-| `reshape` | Non-batch `shape` | Preserve per-example element count and batch; output must have a supported layout |
+| `reshape` | Prefix of non-batch `shape` | Preserve per-example element count and batch; output must have a supported layout |
 | `flatten` | No shape choices | Combine all non-batch dimensions into `BF` |
 | `conv2d` | `out_channels`, kernel, stride, padding, dilation, groups | `NCHW → NCHW`; use the formula below independently per spatial axis |
 | `conv_transpose2d` | As above, plus `output_padding` | `NCHW → NCHW`; use the transpose formula below |
@@ -194,11 +194,11 @@ conv2d:           O = floor((I + 2p - d(k - 1) - 1) / s + 1)
 conv_transpose2d: O = (I - 1)s - 2p + d(k - 1) + output_padding + 1
 ```
 
-Dimensions, channels, kernel sizes, strides, and dilations must be positive. Convolution padding/output padding must be nonnegative; group divisibility and backend argument restrictions must also hold. The complete versioned argument schema must publish the allowed scalar/pair forms, defaults, and automatic fields before these operators ship.
+Dimensions, channels, kernel sizes, strides, and dilations must be positive. Convolution padding/output padding must be nonnegative; group divisibility and backend argument restrictions must also hold. The complete versioned argument schema must publish the allowed scalar/pair forms, defaults, and inferable fields before these operators ship.
 
-Defaults required by the examples are fixed for semantic version 1: `linear.bias=true`; convolution `bias=true`, `stride=1`, `padding=0`, `dilation=1`, and `groups=1`; transposed convolution additionally has `output_padding=0`. Convolution `kernel_size` and output channels are required unless a selected policy supplies an eligible field. Linear output width is required but may be `auto`. The `up2` policy's requirements take precedence over these defaults. Built-in activations are out-of-place. These are HNDL versioned choices, not dynamically inherited backend defaults.
+Defaults required by the examples are fixed for semantic version 1: `linear.bias=true`; convolution `bias=true`, `stride=1`, `padding=0`, `dilation=1`, and `groups=1`; transposed convolution additionally has `output_padding=0`. Convolution `kernel_size` is required unless a selected policy supplies it. Output channels and linear output widths are inferable when omitted; they have no fallback default. The `up2` policy's requirements take precedence over these defaults. Built-in activations are out-of-place. These are HNDL versioned choices, not dynamically inherited backend defaults.
 
-Ordinary convolution inversion may produce an integer interval, not a unique input. Transposed convolution does not inherently mean doubling. `reshape` may directly solve exactly one unknown product factor; multiple unknown factors require independent relations or a selected policy. Each `AUTO` occurrence is a distinct unknown unless a supported relation connects it. For example, known target height and width may separately determine two automatic seed axes.
+Ordinary convolution inversion may produce an integer interval, not a unique input. Transposed convolution does not inherently mean doubling. `reshape` may directly solve exactly one unknown product factor; multiple unknown factors require independent relations or a selected policy. Each omitted dimension is a distinct unknown unless a supported relation connects it. For example, known target height and width may separately determine two omitted seed axes.
 
 For concat, axes index the complete tensor shape and axis `0` is batch, which cannot be concatenated in v1. The spelling/normalization of negative axes remains to be fixed in the argument schema. No join introduces broadcasting, casts, or layout conversion.
 
@@ -210,23 +210,22 @@ The primary API accepts a multiline string with one layer per nonblank line and 
 from hndl.torch import network
 
 source = """
-hidden: linear 64
-activation: relu
-scores: linear auto
+linear 64 name=hidden
+relu name=activation
+linear name=scores
 """
 model = network(
     source,
     input_shape=("B", 128),
     output_shape=("B", 10),
     device="cpu",
-    initialization_seed=7,
 )
-print(model.describe())
+print(model)
 # With a caller-supplied tensor x of shape [B, 128]:
 # scores = model(x)
 ```
 
-`describe()` returns a printable table with network input/output shapes and dtype, followed by every layer's index, name, operation, and resolved input/output shapes. The following console output is illustrative; no implementation has produced it yet:
+`print(model)` uses the module's `__repr__`, following the standard PyTorch inspection convention, to display network input/output shapes and dtype followed by every layer's index, name, operation, and resolved input/output shapes. `repr(model)` returns the same representation. Inspection performs no forward pass, tensor allocation, or random draws. The following console output is illustrative; no implementation has produced it yet:
 
 ```text
 Network: [B, 128] -> [B, 10]  dtype=float32
@@ -241,19 +240,24 @@ The public baseline is:
 | API | Result and requirements |
 | --- | --- |
 | `resolve(source, *, input_shape, output_shape, dtype="float32", registry=None)` | Parse and resolve a sequence into an immutable `ResolvedPlan`, without torch |
-| `network(source, *, input_shape, output_shape, device, initialization_seed, dtype="float32", registry=None)` | Resolve and build a sequence module with tensor-returning `forward(x)` |
+| `network(source, *, input_shape, output_shape, device, initialization_seed=None, dtype="float32", registry=None)` | Resolve and build a sequence module with tensor-returning `forward(x)` |
 | `model.plan` | The immutable resolved plan used to construct the module |
-| `model.describe()` | A complete printable layer input/output shape table; must work without sample tensors or a forward pass |
+| `print(model)`, `repr(model)` | A complete layer input/output shape table through `__repr__`, with no sample tensors or execution |
+| `print(plan)`, `repr(plan)` | A concise resolved shape representation, usable without torch |
 | `plan.describe()` | Detailed node/port shapes, value provenance, asserted contracts, static parameter counts where known, and semantic digest |
-| `hndl.torch.build(plan, *, device, initialization_seed)` | Lower-level construction returning a dictionary-output `GraphModule` |
+| `hndl.torch.build(plan, *, device, initialization_seed=None)` | Lower-level construction returning a dictionary-output `GraphModule` |
 
-`resolve` is exported by `hndl`; `network` is exported by `hndl.torch`. The latter is the resolve/build convenience API and must not introduce different resolution semantics. A missing registry selects the built-in registry. Structured graph resolution and serialization helpers remain to be named; their data contracts are defined here.
+`resolve` is exported by `hndl`; `network` is exported by `hndl.torch`. The latter is the resolve/build convenience API and must not introduce different resolution semantics. A missing registry selects an independent built-in registry; explicit registry objects provide custom extensions without a mutable global singleton. Structured graph resolution and serialization helpers remain to be named; their data contracts are defined here.
 
 ### Sequence syntax and exact version bindings
 
-A line contains an optional `id:`, an operator alias, documented positional arguments, and named scalar arguments. Blank lines and surrounding whitespace are ignored. Labels follow the node-ID rules in §4. `auto`, `true`, and `false` are lowercase. Allow integers, finite numeric values, and registered aliases for policy selection. Unknown operators, policies, arguments, duplicate labels, and repeated positional/named assignments fail with source locations.
+Each nonblank line starts with an operator alias, followed by documented positional arguments and named scalar arguments. Optional `name=<id>` selects a stable node name; it is reserved frontend metadata and is never passed to the operator constructor. A custom operator argument also called `name` must use structured data; it cannot override the DSL metadata key. Blank lines and surrounding whitespace are ignored. Names follow the node-ID rules in §4. Boolean literals are lowercase `true` and `false`. Allow integers, finite numeric values, and registered aliases for policy selection. Unknown operators, policies, arguments, duplicate names, generated-name collisions, and repeated positional/named assignments fail with source locations. Legacy `id:` prefixes and an explicit unknown keyword are not part of the grammar.
 
-The initial positional mappings are `linear <out_features>`, `conv <out_channels>`, `deconv <out_channels>`, and `reshape <non-batch dimensions...>`. `relu`, `tanh`, and `flatten` require no positional arguments. Other scalar arguments use their operator schema's field names, such as `kernel_size=3`. Complex/tuple-valued custom arguments use structured data until separately specified. Multi-input joins use the graph representation, not implicit names inside sequences.
+The initial positional mappings are `linear [out_features]`, `conv [out_channels]`, `deconv [out_channels]`, and `reshape [non-batch dimension prefix...]`; brackets here mean optional syntax, not literal DSL characters. Omitted output widths/channels are inferred through connected contracts and rules. `relu`, `tanh`, and `flatten` require no positional arguments. Other scalar arguments use their operator schema's field names, such as `kernel_size=3`. Complex/tuple-valued custom arguments use structured data until separately specified. Multi-input joins use the graph representation, not implicit names inside sequences.
+
+For reshape, supplied dimensions fix the leading non-batch axes and constrain admissible output ranks. A prefix of length `K` requires at least `K` non-batch axes; it does not require exactly `K`. Resolve rank/layout from these bounds and connected contracts/operator rules over the supported layouts. Thus `reshape 512` permits either BF or NCHW until context narrows it: before deconvolution it fixes NCHW channels and leaves height/width to inference, while a connected BF contract makes it a complete feature width. `reshape 512 4 4` requires at least three non-batch axes, which uniquely establishes NCHW among the supported layouts and supplies its complete target shape.
+
+Structured `shape` arrays use the same prefix semantics; omitting `shape` supplies no dimensions. A reshape with no dimensions is valid when connected constraints establish its rank/layout and uniquely determine its full output shape. For example, `[B,2,4,4] → reshape → linear 10` infers BF from the linear input contract and feature width 32 from the upstream element count. Reject prefixes too long for the established rank and conflicting literals. If multiple supported ranks remain, report ambiguity rather than assuming the prefix is complete. Once rank is known, each missing factor still requires enough relations to determine it; element count alone cannot choose a factorization.
 
 The DSL does not use `@` version suffixes. Registry bindings map aliases to exact immutable identities: `linear` to `linear@1`, `conv` to `conv2d@1`, `deconv` to `conv_transpose2d@1`, and policy `up2` to `spatial.up2_transpose@1`. Other built-in aliases bind the matching catalog operator at version 1. Custom aliases use explicit registration (§8). Duplicate/conflicting aliases fail. Resolution must never choose a newest installed version or discover arbitrary plugins. Saved plans materialize exact identities/versions and the effects of policy selection, so restoration does not depend on current alias bindings.
 
@@ -289,26 +293,25 @@ The generator uses three explicit doubling stages to work backward from an outpu
 from hndl.torch import network
 
 source = """
-project: linear auto
-project_relu: relu
-seed: reshape 512 auto auto
-up1: deconv 256 policy=up2
-act1: relu
-up2: deconv 128 policy=up2
-act2: relu
-up3: deconv 64 policy=up2
-act3: relu
-rgb: conv 3 kernel_size=3 stride=1 padding=1
-range: tanh
+linear name=project
+relu name=project_relu
+reshape 512 name=seed
+deconv 256 policy=up2 name=up1
+relu name=act1
+deconv 128 policy=up2 name=up2
+relu name=act2
+deconv 64 policy=up2 name=up3
+relu name=act3
+conv 3 kernel_size=3 stride=1 padding=1 name=rgb
+tanh name=range
 """
 model = network(
     source,
     input_shape=("B", 128),
     output_shape=("B", 3, 32, 32),
     device="cpu",
-    initialization_seed=7,
 )
-print(model.describe())
+print(model)
 # With a caller-supplied tensor z of shape [B, 128]:
 # image = model(z)
 ```
@@ -348,7 +351,7 @@ A custom operator registration must provide:
 | Component | Requirement |
 | --- | --- |
 | Identity | Namespaced ID and immutable semantic version; duplicate registration fails |
-| Arguments | Types, required/default values, automatic eligibility, validation limits |
+| Arguments | Types, required/default values, inference eligibility, validation limits |
 | Ports | Named tensor inputs/outputs and ordering where applicable |
 | Constraints | Pure supported relations or bounded refinements with reasons |
 | Builder | Normal `nn.Module` built from concrete arguments without hidden globals/network access |
@@ -375,15 +378,14 @@ register_torch(registry, "silu", module=nn.SiLU, state_version=1)
 
 model = network(
     """
-hidden: linear 64
-activation: silu
-scores: linear auto
+linear 64 name=hidden
+silu name=activation
+linear name=scores
 """,
     input_shape=("B", 128),
     output_shape=("B", 10),
     registry=registry,
     device="cpu",
-    initialization_seed=7,
 )
 ```
 
@@ -405,9 +407,9 @@ For a concrete fixture, declare external input `z: [B,128]` and output `features
 | --- | --- | --- | --- |
 | `mapping` | `linear@1`, `out_features=256` | `x=input:z` | `[B,256]` |
 | `w` | `relu@1` | `x=node:mapping/out` | `[B,256]` |
-| `project` | `linear@1`, `out_features=AUTO` | `x=node:w/out` | `[B,1024]` |
+| `project` | `linear@1`, output width omitted | `x=node:w/out` | `[B,1024]` |
 | `seed` | `reshape@1`, `shape=[64,4,4]` | `x=node:project/out` | `[B,64,4,4]` |
-| `style` | `linear@1`, `out_features=AUTO` | `x=node:w/out` | `[B,128]` |
+| `style` | `linear@1`, output width omitted | `x=node:w/out` | `[B,128]` |
 | `norm` | Custom `adaptive_norm@1` | `x=node:seed/out`, `params=node:style/out` | `[B,64,4,4]` |
 
 Bind public output `features` to `node:norm/out`. Both branches consume the same `w` tensor; `mapping` and `w` each execute once. Reshape determines the projection width as `64 * 4 * 4`; the custom relation below determines the style width as `2 * 64`.
@@ -420,7 +422,7 @@ params: [B, 2*C]       BF
 out:    [B, C, H, W]   NCHW
 ```
 
-The relation `params.features = 2 * x.channels` must resolve an automatic style-affine output width. Batch/dtype equality and output-shape equality are required. Its exact numerical convention is:
+The relation `params.features = 2 * x.channels` must resolve an omitted style-affine output width. Batch/dtype equality and output-shape equality are required. Its exact numerical convention is:
 
 ```text
 mean       = mean(x, spatial_axes, keepdim=True)
@@ -452,7 +454,7 @@ The **artifact digest** covers the complete saved plan except its own digest fie
 
 ## 10. PyTorch backend contract
 
-`build(plan, *, device, initialization_seed)` returns a normal training-mode `GraphModule`. `network(...)` presents the sequence facade from §7 over the same construction semantics and registered state. Device is explicit; CPU is suitable for small fixtures and CUDA is the intended primary execution target. There is no silent CPU fallback. The plan fixes the qualified dtype, initially `float32`.
+`build(plan, *, device, initialization_seed=None)` returns a normal training-mode `GraphModule`. `network(...)` presents the sequence facade from §7 over the same construction semantics and registered state. Device is explicit; CPU is suitable for small fixtures and CUDA is the intended primary execution target. There is no silent CPU fallback. The plan fixes the qualified dtype, initially `float32`.
 
 - A `GraphModule` validates declared external input contracts in `forward(**inputs)` and returns a dictionary keyed by public output names, including for a single output. The sequence facade instead accepts `forward(x)` and returns the single output tensor, preserving the same contract checks.
 - Modules register once under `nodes.n_<node_id>`; the prefix avoids collisions with module attribute names. Stateless nodes keep execution/diagnostic identities without state entries.
@@ -461,13 +463,15 @@ The **artifact digest** covers the complete saved plan except its own digest fie
 - Runtime must preserve ordinary gradients. It must not silently detach, clone, cast, move tensors, or mutate a shared branch through in-place built-in activations.
 - Contract mismatches must be reported before applying the affected layer where possible. Asserted custom contracts require runtime validation.
 
-Initialization belongs to the plan and build receipt. Initial support is versioned `torch_default@1` plus explicit constant overrides. The supported PyTorch runtime must be recorded because its defaults affect initialization. A supplied seed uses an isolated RNG scope on the requested device and restores the caller's RNG state. Module construction order is stable; custom builders must respect the same requirements. Exact initial tensors across devices or PyTorch versions are not promised.
+Initialization rules belong to the plan; the build receipt records the selected seed mode and runtime. Initial support is versioned `torch_default@1` plus explicit constant overrides. Both `network` and `build` default to `initialization_seed=None`: construction uses and advances the caller's ordinary PyTorch RNG state, so `torch.manual_seed(...)` controls initialization as it does for handwritten modules. Supplying an explicit integer instead uses an isolated RNG scope on the requested device and restores the caller's RNG state afterward. No seed argument is needed for ordinary use.
+
+The supported PyTorch runtime must be recorded because its defaults affect initialization. Module construction order is stable; custom builders must respect the chosen RNG mode. Exact initial tensors across devices or PyTorch versions are not promised. Initialization draws happen at construction only; this does not permit hidden random draws during forward execution or representation/inspection.
 
 Per-node trainability masks are applied during construction and saved in the plan. Freezing parameters does not select evaluation mode. The host controls train/eval behavior and must preserve these masks. Stateful custom modules declare persistent buffers and manage derived caches correctly after state loading/device moves.
 
 ## 11. Persistence and compatibility
 
-Persist the author specification and full resolved plan. Reconstruct from the saved plan, not by applying a newer resolver to old `AUTO` fields. Before state loading, validate the semantic digest, required implementation/state versions, and state names/shapes/dtypes.
+Persist the author specification and full resolved plan. Reconstruct from the saved plan, not by applying a newer resolver to old omitted dimension fields. Before state loading, validate the semantic digest, required implementation/state versions, and state names/shapes/dtypes.
 
 These identities serve different purposes:
 
@@ -498,7 +502,7 @@ Failures must expose a stable code, source/node/field location, affected constra
 | `E_BINDING` | A reference names an undeclared node or tensor port |
 | `E_STATE_VERSION` | Saved state requires an unavailable compatible operator implementation |
 
-Schema/version/resource-limit diagnostics also require stable codes; their complete catalog is pending. DSL failures include line/column locations where applicable. `model.describe()` must include every layer, its ID/operator, and complete input/output shapes without executing the network. `plan.describe()` must additionally expose provenance sufficiently to explain why a field changed between separately resolved specifications.
+Schema/version/resource-limit diagnostics also require stable codes; their complete catalog is pending. DSL failures include line/column locations where applicable. `print(model)` and `repr(model)` must include every layer, its ID/operator, and complete input/output shapes without executing the network. Pure `print(plan)` exposes a concise shape representation without a backend. `plan.describe()` must additionally expose provenance sufficiently to explain why a field changed between separately resolved specifications.
 
 Static resolution, dry-run/meta checks, and numerical preflight are distinct inspection modes. Numerical preflight must use disposable modules or restore affected state/RNG; it must not advance a live training stream or alter persistent buffers.
 
@@ -509,14 +513,16 @@ The following are future gates, not claims about tests already passing:
 | Gate | Required evidence |
 | --- | --- |
 | Pure core | Import, parse DSL, resolve, and serialize with no torch/CUDA; malformed specs and unavailable providers fail clearly |
-| Shape resolution | Generator targets `32×32`, `64×64`, `32×64`; invalid `30×30`; literal-width conflict; inverse ambiguity; group divisibility and join conflicts |
+| Shape resolution | Omitted output widths/channels and reshape suffixes; rank resolution from prefix bounds and connected contracts, including bare reshape using upstream element count; ambiguous rank/factorization rejected; generator targets `32×32`, `64×64`, `32×64`; invalid `30×30`; literal-width conflict; inverse ambiguity; group divisibility and join conflicts |
 | Determinism | Repeated resolution is identical; equivalent DSL/structured graph inputs have the same semantic plan; aliases bind exact versions; policy order has no effect |
+| DSL | Operator-first syntax and optional reserved `name` metadata; deterministic generated IDs; collisions and unsupported placeholder/prefix syntax rejected |
 | Backend equivalence | Handwritten PyTorch comparison from identical state: forward values, input/parameter gradients, optimizer updates |
-| Public sequence API | Tensor forward result; complete shape table; integer/negative/name lookup and iteration; shared-module slices; stable state keys without double registration; structural assignment rejected |
+| Public sequence API | Tensor forward result; complete shape table from `print(model)` without allocation/RNG draws; integer/negative/name lookup and iteration; shared-module slices; stable state keys without double registration; structural assignment rejected |
 | Unary registration | `silu` example resolves through bidirectional shape equality; pure resolution never constructs/imports a backend; exact identity/state version is preserved |
 | Custom graph | Resolve `2*C`; fan-out works; feature/style gradients are correct; reject incorrect batch/channel contracts |
 | Numerical validity | Finite affine-normalization forward/backward for constant/nonconstant inputs; first/second derivative checks on suitable nondegenerate fixtures |
 | Registration and recovery | Stable registered state; fresh-process round-trip; no first-forward parameters or hidden runtime RNG draws |
+| Initialization | Default construction follows caller RNG and `torch.manual_seed`; explicit construction seeds isolate/restore RNG; inspection consumes no RNG |
 | CUDA | Selected operators and custom fixture execute and reload on CUDA within declared tolerances |
 | Compatibility | Load compatible saved plans without replanning; reject incompatible semantics/state versions actionably |
 
@@ -526,7 +532,7 @@ Implement in this order:
 
 1. Pure schema/types, fixed registry aliases, the sequence DSL parser, linear/reshape/activation relations, trace, and plan serialization.
 2. Convolution relations, doubling policy, complete shape inspection, and DSL/graph semantic equivalence and determinism checks.
-3. PyTorch `network` facade and lower-level builder, layer access/slicing, state registration, isolated initialization, CPU equivalence, and CUDA checks.
+3. PyTorch `network` facade and lower-level builder, shape representation, layer access/slicing, state registration, caller-controlled/isolated initialization modes, CPU equivalence, and CUDA checks.
 4. Simple custom-layer registration, then named graph joins/fan-out, full custom providers, and the affine-normalization fixture.
 5. Complete the public DSL walkthroughs and acceptance gates; host adapters follow the standalone core.
 
@@ -537,7 +543,7 @@ A sequence-only first milestone is useful progress, not completion of the graph/
 The baseline deliberately leaves these details visible:
 
 - Publish machine-readable author/plan schemas, serialization APIs, full custom-registration schemas, and exact Python graph helpers. The public sequence signatures and unary registration contract are fixed above; the JSON example is proposed encoding.
-- Complete every built-in argument's type, automatic eligibility, scalar/pair normalization, and validation bounds beyond the defaults fixed in §6. In particular, fix normalization/leaky-ReLU defaults and concat axis normalization. Do not inherit changing backend defaults implicitly.
+- Complete every built-in argument's type, inference eligibility, scalar/pair normalization, and validation bounds beyond the defaults fixed in §6. In particular, fix normalization/leaky-ReLU defaults and concat axis normalization. Do not inherit changing backend defaults implicitly.
 - Finalize DSL lexical rules, remaining positional mappings, generated-ID convention, and how structured plan restoration supplies the explicit backend registry. General graph helper APIs do not replace the primary DSL workflow.
 - Define the supported representation for sharing non-batch dimension variables during resolution. Only batch remains symbolic in a successful plan; no general expression language is implied.
 - Finalize canonical JSON encoding, semantic/artifact digest payloads, and golden test vectors.
