@@ -1,0 +1,8 @@
+# A two-hidden-layer perceptron for 28×28 grayscale images (MNIST-sized).
+flatten()
+linear(256)
+relu()
+dropout(0.2)
+linear(128)
+relu()
+linear()

@@ -19,7 +19,7 @@ x[B, ..., D] -> out[B, ..., D]
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `eps` (positional) | float | `1e-05` | > 0 | Added to the variance before the square root; must be positive. |
+| `eps` | float | `1e-05` | > 0 | Added to the variance before the square root; must be positive. |
 | `affine` | bool | `True` | — | Learn a per-feature scale and bias of width D. When false the layer has no parameters. |
 
 ## Description
@@ -98,7 +98,7 @@ Parameters: 2,890
 A parameter-free normalization of the incoming features.
 
 ```python
-layer_norm(0.001, affine=False)
+layer_norm(eps=0.001, affine=False)
 linear()
 ```
 

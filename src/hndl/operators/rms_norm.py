@@ -21,7 +21,7 @@ def _reference(module):
     summary="Scale the last axis by its root-mean-square, with a learned per-feature gain.",
     shape="x[B, ..., D] -> out[B, ..., D]",
     args={
-        "eps": Arg(float, 1e-6, min=0, exclusive_min=True,
+        "eps": Arg(float, 1e-6, min=0, exclusive_min=True, positional=False,
                    help="Added to the mean square before the reciprocal square root; must be positive."),
         "affine": Arg(bool, True, positional=False,
                       help="Learn a per-feature gain of width D. When false the layer has no parameters."),
@@ -32,7 +32,7 @@ def _reference(module):
                 "Pre-activation normalization without the mean subtraction of `layer_norm`."),
         Example("linear(64)\nrms_norm()\nlinear()", ("B", 12, 32), ("B", 12, 10),
                 "On a [B, T, D] sequence each of the 12 positions is normalized independently."),
-        Example("rms_norm(0.0001, affine=False)\nlinear()", ("B", 16), ("B", 4),
+        Example("rms_norm(eps=0.0001, affine=False)\nlinear()", ("B", 16), ("B", 4),
                 "A parameter-free variant, useful directly on the network input."),
     ],
     category="normalization",

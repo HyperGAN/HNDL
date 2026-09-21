@@ -71,7 +71,7 @@ class Expert(nn.Module):
         Example('moe(3, 24, activation="silu")', ("B", 6, 12), ("B", 6, 12),
                 "The operator preserves its input shape, so it drops into a residual stack unchanged."),
     ],
-    category="memory",
+    category="sequence",
 )
 class MixtureOfExperts(nn.Module):
     """A sparsely gated mixture of experts over the last axis of ``[B, D]`` or

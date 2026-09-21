@@ -19,7 +19,7 @@ x[B, C, ...] -> out[B, C, ...]
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `eps` (positional) | float | `1e-05` | > 0 | Added to the variance before the square root. |
+| `eps` | float | `1e-05` | > 0 | Added to the variance before the square root. |
 | `momentum` | float | `0.1` | >= 0; <= 1 | Weight of the current batch in the running-statistics update. |
 | `affine` | bool | `True` | — | Learn a per-channel scale and bias. |
 | `track_running_stats` | bool | `True` | — | Keep running_mean/running_var buffers and use them in eval mode. |

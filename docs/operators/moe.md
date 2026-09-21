@@ -2,7 +2,7 @@
 
 Sparse mixture of experts: route every token to its top-k feed-forward experts.
 
-**Category:** memory · **Identity:** `moe@1`
+**Category:** sequence · **Identity:** `moe@1`
 
 ## Shape
 

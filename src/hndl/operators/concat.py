@@ -44,7 +44,7 @@ def _relation(s):
         Example("a, b = split(2)\nconcat(b, a)", ("B", 5), ("B", 5), "Reorder sections by concatenating them back."),
         Example("a = linear(4)\nb = linear(x)\nconcat(a, b)", ("B", 8), ("B", 10), "The second width 6 is inferred."),
     ],
-    category="join",
+    category="shape",
 )
 class Concat(nn.Module):
     """``torch.cat(inputs, dim=axis)``. Every input is explicit; one missing

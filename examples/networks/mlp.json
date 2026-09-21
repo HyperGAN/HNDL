@@ -1,0 +1,8 @@
+{
+  "title": "Multilayer perceptron",
+  "description": "Flatten a 28×28 image and classify it with two ReLU hidden layers. The final width is inferred from the output contract.",
+  "input_shape": ["B", 1, 28, 28],
+  "output_shape": ["B", 10],
+  "parameters": 235146,
+  "reference": "Classic MNIST baseline; 784·256+256 + 256·128+128 + 128·10+10 = 235,146 parameters."
+}

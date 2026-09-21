@@ -20,7 +20,7 @@ x[B, C, H, W], params[B, 2*C] -> out[B, C, H, W]
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `eps` (positional) | float | `1e-05` | > 0 | Added to the variance for stability. |
+| `eps` | float | `1e-05` | > 0 | Added to the variance for stability. |
 
 ## Description
 

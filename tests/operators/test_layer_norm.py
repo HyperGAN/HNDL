@@ -58,7 +58,7 @@ def test_reduced_precision_tracks_the_float32_reference_on_cuda(dtype, tolerance
 @pytest.mark.parametrize("eps", [0.0, -1e-5])
 def test_non_positive_eps_is_an_argument_error(eps):
     with pytest.raises(HNDLError, match="E_ARGUMENT.*eps"):
-        resolve(f"layer_norm({eps})", input_shape=("B", 8), output_shape=("B", 8))
+        resolve(f"layer_norm(eps={eps})", input_shape=("B", 8), output_shape=("B", 8))
 
 
 def test_affine_false_has_no_parameters(device):

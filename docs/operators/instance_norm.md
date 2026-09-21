@@ -21,7 +21,7 @@ Relation: `x and out share the shape; rank 3 [B, C, L] or rank 4 [B, C, H, W]`
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `eps` (positional) | float | `1e-05` | > 0 | Added to the variance before the square root. |
+| `eps` | float | `1e-05` | > 0 | Added to the variance before the square root. |
 | `affine` | bool | `False` | — | Learn a per-channel scale and bias. |
 | `num_features` | int | inferred | >= 1; <= 2147483647; binds `C` | Channels at axis 1. Inferred from the incoming tensor. |
 
