@@ -123,13 +123,16 @@ class Pretrained(nn.Module):
 
     def __init__(self, source, output, component, config, revision, provider, sha256, layer, *, input_shapes):
         super().__init__()
-        self.source = sources.resolve_source(source, config, provider, sha256)
+        materialize = torch.empty(0).device.type != "meta"
+        if provider and not materialize:
+            self.source = sources.unverified_state_dict_source(source, provider, sha256, revision)
+        else:
+            self.source = sources.resolve_source(source, config, provider, sha256)
         self.output = output
         self.component = component
         self.layer = layer
         self.provider = sources.provider_for(self.source, output, component, layer)
         self.kind = self.provider.contract().kind
-        materialize = torch.empty(0).device.type != "meta"
         self.model = self.provider.instantiate(weights=materialize)
         self.model.eval()
         for parameter in self.model.parameters():

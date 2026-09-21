@@ -168,6 +168,18 @@ def _resolve_state_dict(source, config_path, provider, checksum):
     return Source("state_dict", str(path), digest[:16], {"provider": provider, "sha256": digest}, "", "local")
 
 
+def unverified_state_dict_source(source, provider, checksum, revision):
+    """Rebuild a ``.pth`` source from concrete plan arguments without touching the file.
+
+    The allocation-free meta probe needs only the architecture; the digest was
+    verified when the plan resolved and is verified again before any weights
+    are read, so the probe never hashes or opens the checkpoint.
+    """
+    provider_build(provider)
+    return Source("state_dict", str(Path(source).expanduser()), revision,
+                  {"provider": provider, "sha256": checksum}, "", "local")
+
+
 def provider_build(name):
     """The trusted builder registered for ``name`` on the active registry."""
     from .registry import Registry

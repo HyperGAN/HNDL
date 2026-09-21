@@ -33,6 +33,7 @@ Install the optional dependencies with `pip install 'hndl[pretrained]'`
 | `hf://owner/repo@revision` | A branch, tag, or commit of that repository |
 | `/path/to/checkpoint` | A directory holding `config.json` and safetensors weights (the layout `save_pretrained` writes) |
 | `/path/to/model.safetensors` with `config="/path/to/config.json"` | A bare weights file plus its configuration |
+| `/path/to/weights.pth` with `provider="<name>"` and `sha256="<hex>"` | A local state dict loaded into an architecture the host registered (see below) |
 
 A `.safetensors` file alone is not enough for any loader: tensors do not
 describe an architecture. Nothing in a checkpoint is executed as code.
@@ -70,13 +71,99 @@ The output shape is discovered by running the architecture on PyTorch's
 `meta` device with the declared input shape, so no weights are read during
 resolution and `print(plan)` shows the real shapes.
 
+## Local checkpoints and custom providers
+
+A `.pth` file is a plain `state_dict`: it carries tensors, not a layout, and
+no `config.json` tells HNDL what to build. Point it at an architecture the
+host registered on its `Registry` as ordinary trusted Python. Registration is
+never configuration: a config may only *name* a provider that already exists,
+and providers belong to the registry they were added to, so one
+`Registry.builtins()` never sees another's.
+
+```python
+import hashlib
+
+import torch
+from torch import nn
+
+from hndl import Registry
+from hndl.torch import network
+
+
+class Encoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(),
+        )
+        self.head = nn.Linear(32, 10)
+
+    def forward(self, x):
+        return self.head(self.features(x).mean(dim=(2, 3)))
+
+
+# Whatever wrote the checkpoint, here a plain state_dict on disk.
+torch.save(Encoder().state_dict(), "encoder.pth")
+digest = hashlib.sha256(open("encoder.pth", "rb").read()).hexdigest()
+
+registry = Registry.builtins()
+registry.pretrained_provider("encoder", Encoder)   # trusted host code
+
+model = network(
+    f"""
+    pretrained("encoder.pth", provider="encoder", sha256="{digest}", layer="features.2", name="perceptual")
+    conv(8, kernel_size=3)
+    """,
+    input_shape=("B", 3, 32, 32),
+    output_shape=("B", 8, 32, 32),
+    registry=registry,
+    device="cuda:0",
+)
+```
+
+Compute the digest with `python -c 'import hashlib,sys;
+print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' encoder.pth`,
+or read it from the `E_PRETRAINED` message raised when `sha256=` is missing.
+
+- **`provider=`** names a zero-argument callable registered with
+  `registry.pretrained_provider(name, build)` that returns an `nn.Module`
+  with its architecture already defined. HNDL loads the checkpoint into it;
+  the builder itself must not read the file.
+- **`sha256=`** is required for a `.pth` source. It is verified when the plan
+  resolves and again immediately before the weights are read, so a file that
+  changed under a saved plan fails with `E_PRETRAINED` instead of loading
+  different weights. The plan also records the digest as its `revision`.
+- The file is read with `torch.load(path, map_location="cpu",
+  weights_only=True)` — tensors and plain containers only, never pickled
+  objects — and loaded with `strict=True`; missing or unexpected keys fail
+  with `E_PRETRAINED`.
+- **`layer=`** names a submodule by its dotted `named_modules()` path, such as
+  `"features.2"` or `"layer3.1.conv2"`. The node runs the model with a forward
+  hook on that submodule, returns its output, and stops the pass there, which
+  is what perceptual losses and feature matching want. An unknown name fails
+  with `E_PRETRAINED` listing the available submodules. Omit `layer` and the
+  node returns the model's own return value. `output=`, `component=` and
+  `config=` apply to transformers and timm checkpoints, not to providers.
+- The whole module is still constructed, so the layers after `layer=` are
+  registered (and counted by `parameter_counts`) even though they never run.
+  Return a truncated module from the builder if you want them gone.
+- The input contract is whatever the module accepts: HNDL fixes no channel
+  count or resolution, it only requires a floating-point input and traces the
+  architecture on the `meta` device with your declared shape to learn the
+  output shape. Resolution reads the file only to hash it; no weights are
+  loaded until the network is built, and `parameter_counts(plan)` does not
+  touch the file at all.
+
 ## Freezing and dtype
 
 The wrapped model is frozen (`requires_grad=False`) and stays in eval mode
 even when the surrounding network is in training mode, so dropout and batch
 statistics of the checkpoint do not move while you train new layers. Pass
 `trainable=True` to fine-tune it; `model.train()` then reaches the checkpoint
-as well.
+as well. Provider checkpoints behave the same way: the node freezes every
+parameter it loaded, `model.train()` leaves it in eval mode, and gradients
+still flow through it to earlier trainable layers.
 
 Weights are loaded in float32 and cast to the plan `dtype` (`float32`,
 `float16`, or `bfloat16`). Reduced precision is qualified on CUDA.
