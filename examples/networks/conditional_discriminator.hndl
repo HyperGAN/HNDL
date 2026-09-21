@@ -1,0 +1,20 @@
+# A conditional GAN discriminator for 28x28 grayscale digits. It takes two
+# external inputs: the image "x" and a one-hot class label "y".
+
+# Project the label onto its own 28x28 plane and stack it on the image as an
+# extra channel, the usual conditional-GAN trick.
+plane = linear(y, 784, name="label_projection")
+label = reshape(plane, 1, 28, 28, name="label_plane")
+concat(x, label, name="conditioned")     # [B, 2, 28, 28]
+
+# Two strided convolutions halve the image: 28 -> 14 -> 7.
+conv(64, policy="down2", name="stage1")
+leaky_relu(0.2)
+conv(128, policy="down2", bias=False, name="stage2")
+batch_norm()
+leaky_relu(0.2)
+
+# Both public outputs are named: the 128x7x7 map flattened into "features",
+# which a feature-matching loss can read, and the real/fake "logits".
+features = flatten(name="features")
+logits = linear(1, name="logits")
