@@ -49,6 +49,49 @@ index  name            operation  input shapes      output shapes
 
 Parameters: 209,968. Classic MNIST autoencoder with a 784-128-32-128-784 stack; 784·128+128 + 128·32+32 + 32·128+128 + 128·784+784 = 209,968 parameters, cross-checked against the equivalent torch.nn.Sequential.
 
+## Tiny GPT
+
+A 64-token GPT-2-style decoder: learned token and position embeddings, four causal pre-norm transformer blocks with a tanh-approximated GELU feed-forward, a final layer norm, and an untied language-model head whose width is inferred from the output contract.
+
+`examples/networks/gpt_tiny.hndl`
+
+```python
+# A tiny GPT-2-style decoder: 64 token ids in, one logit per vocabulary entry out.
+# Vocabulary 256, model width 128, four causal blocks.
+
+# Stem: a vector per token id, plus a learned absolute position for each of the 64 slots.
+embedding(256, 128, name="wte")
+pos_embed(64, name="wpe")
+
+# Four pre-norm causal blocks: 4 heads of width 32, 4x feed-forward, tanh-approximated GELU.
+transformer_block(4, activation="gelu_tanh", causal=True, name="block0")
+transformer_block(4, activation="gelu_tanh", causal=True, name="block1")
+transformer_block(4, activation="gelu_tanh", causal=True, name="block2")
+transformer_block(4, activation="gelu_tanh", causal=True, name="block3")
+
+# Final normalization, then the language-model head. Its width is the vocabulary
+# size, so the output contract determines it; GPT-2 ties it to wte, HNDL does not.
+layer_norm(name="ln_f")
+linear(bias=False, name="lm_head")
+```
+
+Input `['B', 64]` (`input_dtype="int64"`) → output `['B', 64, 256]`.
+
+```text
+Network: [B, 64] -> [B, 64, 256]  dtype=float32  input_dtype=int64
+index  name     operation          input shapes    output shapes
+0      wte      embedding          ids=[B, 64]     out=[B, 64, 128]
+1      wpe      pos_embed          x=[B, 64, 128]  out=[B, 64, 128]
+2      block0   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
+3      block1   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
+4      block2   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
+5      block3   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
+6      ln_f     layer_norm         x=[B, 64, 128]  out=[B, 64, 128]
+7      lm_head  linear             x=[B, 64, 128]  out=[B, 64, 256]
+```
+
+Parameters: 867,072. Block structure follows Radford et al. 2019, "Language Models are Unsupervised Multitask Learners" (GPT-2); the count was checked against the same architecture built in plain torch (256·128 + 64·128 + 4·(4·128 + 4·(128·128+128) + (512·128+512) + (128·512+128)) + 2·128 + 128·256 = 867,072), with the head untied rather than shared with the token embedding.
+
 ## Multilayer perceptron
 
 Flatten a 28×28 image and classify it with two ReLU hidden layers. The final width is inferred from the output contract.

@@ -1,0 +1,17 @@
+# A tiny GPT-2-style decoder: 64 token ids in, one logit per vocabulary entry out.
+# Vocabulary 256, model width 128, four causal blocks.
+
+# Stem: a vector per token id, plus a learned absolute position for each of the 64 slots.
+embedding(256, 128, name="wte")
+pos_embed(64, name="wpe")
+
+# Four pre-norm causal blocks: 4 heads of width 32, 4x feed-forward, tanh-approximated GELU.
+transformer_block(4, activation="gelu_tanh", causal=True, name="block0")
+transformer_block(4, activation="gelu_tanh", causal=True, name="block1")
+transformer_block(4, activation="gelu_tanh", causal=True, name="block2")
+transformer_block(4, activation="gelu_tanh", causal=True, name="block3")
+
+# Final normalization, then the language-model head. Its width is the vocabulary
+# size, so the output contract determines it; GPT-2 ties it to wte, HNDL does not.
+layer_norm(name="ln_f")
+linear(bias=False, name="lm_head")
