@@ -14,7 +14,7 @@ from .types import contract_header
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
 SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names",
-                             "_input_names", "_input_dtypes", "_output_dtypes"})
+                             "_input_names", "_input_dtypes", "_output_dtypes", "_build_dtype"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
           "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
@@ -75,6 +75,11 @@ class GraphModule(nn.Module):
         self.plan = plan
         self.nodes = _NodeModules(modules)
         self._runtime_device = device
+        # The compute dtype the plan was built at, and the one it runs at now:
+        # casting the module with .double(), .half() or .to(dtype=...) moves the
+        # second without rewriting the build-time declarations below.
+        self._build_dtype = DTYPES[plan.dtype]
+        self._runtime_dtype = self._build_dtype
         self._chain = _is_chain(plan)
         self._port_orders = port_orders
         self._input_names = tuple(plan.inputs)
@@ -136,12 +141,29 @@ class GraphModule(nn.Module):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
-        # An empty tensor also tracks device moves for parameterless graphs.
-        probe = fn(torch.empty(0, device=self._runtime_device))
+        # An empty tensor also tracks device moves and dtype casts for
+        # parameterless graphs, which hold no state of their own to follow.
+        probe = fn(torch.empty(0, device=self._runtime_device, dtype=self._runtime_dtype))
         self._runtime_device = probe.device
+        # ``.double()``, ``.half()`` and ``.to(dtype=...)`` cast floating state
+        # only; a probe that came back integral means no compute-dtype change.
+        if probe.is_floating_point() or probe.is_complex():
+            self._runtime_dtype = probe.dtype
         return self
 
+    def _effective_dtype(self, dtype):
+        """The dtype a port carries now, after any floating-point cast.
+
+        Ports declared at the plan's compute dtype follow the module through
+        ``.double()``, ``.half()`` and ``.to(dtype=...)``, exactly as its
+        parameters do. Integer and boolean ports --- token ids, masks --- and
+        ports declared ``any`` are untouched, because those casts leave
+        non-floating state alone.
+        """
+        return self._runtime_dtype if dtype is not None and dtype == self._build_dtype else dtype
+
     def _check(self, value, shape, batch, location, dtype):
+        dtype = self._effective_dtype(dtype)
         if not isinstance(value, torch.Tensor):
             raise HNDLError("E_RUNTIME", f"{location} must be a tensor")
         expected = tuple(batch if isinstance(d, str) else d for d in shape)

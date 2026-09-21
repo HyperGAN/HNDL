@@ -410,3 +410,67 @@ def test_immutable_records_are_shared_and_modules_refuse_to_pickle(tmp_path):
         pickle.dumps(model)
     with pytest.raises(TypeError, match="cannot be pickled.*state_dict"):
         torch.save(model, tmp_path / "model.pt")
+
+
+def _forward_or_skip(model, x):
+    """Reduced precision is not implemented for every CPU kernel."""
+    try:
+        return model(x)
+    except RuntimeError as error:  # pragma: no cover - host dependent
+        pytest.skip(f"{x.dtype} is unsupported on this host: {error}")
+
+
+@pytest.mark.parametrize("cast, dtype", [
+    (lambda m: m.double(), torch.float64),
+    (lambda m: m.half(), torch.float16),
+    (lambda m: m.to(torch.bfloat16), torch.bfloat16),
+    (lambda m: m.to(dtype=torch.float64), torch.float64),
+])
+def test_floating_point_casts_move_the_runtime_dtype_checks(cast, dtype):
+    model = cast(_mlp(device="cpu"))
+    assert all(p.dtype == dtype for p in model.parameters())
+    result = _forward_or_skip(model, torch.randn(3, 4, dtype=dtype))
+    assert result.dtype == dtype and result.shape == (3, 2)
+    with pytest.raises(HNDLError, match=f"E_RUNTIME.*expected dtype {dtype}, got torch.float32"):
+        model(torch.randn(3, 4))
+    restored = model.float()
+    assert restored is model
+    assert model(torch.randn(3, 4)).dtype == torch.float32
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float32, got torch.float64"):
+        model(torch.randn(3, 4, dtype=torch.float64))
+
+
+def test_double_tracks_parameterless_graphs_and_device_only_moves():
+    model = network("relu()", input_shape=("B", 4), output_shape=("B", 4), device="cpu").double()
+    assert model(torch.randn(2, 4, dtype=torch.float64)).dtype == torch.float64
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float64"):
+        model(torch.randn(2, 4))
+
+    unmoved = _mlp(device="cpu").to("cpu")
+    assert unmoved(torch.randn(2, 4)).dtype == torch.float32
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float32"):
+        unmoved(torch.randn(2, 4, dtype=torch.float64))
+
+
+def test_casts_leave_integer_and_declared_dtypes_alone():
+    model = network('embedding(20, 6); linear(3, name="head")', input_shape=("B", 5),
+                    output_shape=("B", 5, 3), input_dtype="int64", device="cpu").double()
+    tokens = torch.randint(0, 20, (2, 5))
+    assert model(tokens).dtype == torch.float64
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.int64, got torch.int32"):
+        model(tokens.to(torch.int32))
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.int64, got torch.float64"):
+        model(tokens.to(torch.float64))
+
+
+def test_deepcopy_carries_and_isolates_the_runtime_dtype():
+    model = _mlp(device="cpu")
+    clone = copy.deepcopy(model.double())
+    assert clone(torch.randn(2, 4, dtype=torch.float64)).dtype == torch.float64
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float64"):
+        clone(torch.randn(2, 4))
+
+    original = _mlp(device="cpu")
+    copy.deepcopy(original).double()
+    assert original(torch.randn(2, 4)).dtype == torch.float32
+    assert original._input_dtypes["x"] == torch.float32 and model._input_dtypes["x"] == torch.float32
