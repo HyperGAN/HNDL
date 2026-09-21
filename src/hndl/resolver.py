@@ -7,6 +7,7 @@ import re
 
 from .errors import HNDLError
 from .registry import Registry, normalize_arguments, preserves_shape
+from .schema import Dim, ShapeRule
 from .types import Graph, Node, ResolvedNode, ResolvedPlan
 
 
@@ -229,7 +230,13 @@ class _Solver:
         outs = {port: f"node:{node.id}/{port}" for port in node.outputs}
         x = ports.get("x")
         y = outs.get("out")
-        if spec.shape is preserves_shape or kind in ("relu", "leaky_relu", "tanh", "group_norm"):
+        if spec.shape is preserves_shape:
+            self.equal(ports[spec.input_ports[0]], outs[spec.output_ports[0]])
+            return
+        if type(spec.shape) is ShapeRule:
+            self.patterns(spec.shape, ports, outs)
+            return
+        if kind in ("relu", "leaky_relu", "tanh", "group_norm"):
             self.equal(x, y)
             if kind == "group_norm" and x in self.shapes:
                 channels = self.shapes[x][1]
@@ -355,6 +362,37 @@ class _Solver:
         else:
             self.error("E_UNRESOLVED", f"No pure shape rules for {node.op}")
 
+    def patterns(self, rule, inputs, outputs):
+        """Refine shared positive variables in two bounded linear passes.
+
+        Variables live only in this node invocation. Both input and output
+        facts participate equally; every shared occurrence is an equation.
+        """
+        entries = [(inputs[name], pattern) for name, pattern in rule.inputs.items()]
+        entries.extend((outputs[name], pattern) for name, pattern in rule.outputs.items())
+        values = {}
+        for ref, pattern in entries:
+            shape = self.rank(ref, len(pattern))
+            for axis, dimension in enumerate(pattern):
+                if axis == 0:
+                    continue  # Pattern validation fixes unscaled B here.
+                if type(dimension) is int:
+                    self.axis(ref, axis, dimension)
+                    continue
+                extent = shape[axis]
+                if extent is None:
+                    continue
+                if extent % dimension.scale:
+                    self.error("E_CONSTRAINT", f"Extent {extent} at {ref}[{axis}] is not divisible by scale {dimension.scale} of {dimension.name}")
+                value = extent // dimension.scale
+                if dimension.name in values and values[dimension.name] != value:
+                    self.error("E_CONSTRAINT", f"Shared dimension {dimension.name} requires incompatible values {values[dimension.name]} and {value}")
+                values[dimension.name] = value
+        for ref, pattern in entries:
+            for axis, dimension in enumerate(pattern):
+                if axis and isinstance(dimension, Dim) and dimension.name in values:
+                    self.axis(ref, axis, dimension.scale * values[dimension.name])
+
     def run(self):
         for _ in range(self.limits["max_iterations"]):
             self.changed = False
@@ -397,7 +435,7 @@ class _Solver:
 
     def state_bound(self, node, args):
         spec = self.specs[node.id]
-        if spec.shape is preserves_shape:
+        if spec.shape is preserves_shape or type(spec.shape) is ShapeRule:
             return spec.max_state_bytes
         if spec.identity == "linear":
             count = args["in_features"] * args["out_features"] + (args["out_features"] if args["bias"] else 0)

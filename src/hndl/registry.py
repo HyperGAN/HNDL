@@ -7,6 +7,7 @@ import re
 
 from .errors import HNDLError
 from .types import freeze
+from .schema import ShapeRule, argument_schema, validate_ports
 
 
 def preserves_shape(*args, **kwargs):
@@ -28,9 +29,12 @@ class OpSpec:
     state_version: int = 1
     variadic_inputs: bool = False
     required: tuple = ()
+    arguments: Mapping = field(default_factory=dict)
 
     def __post_init__(self):
         object.__setattr__(self, "defaults", freeze(self.defaults))
+        from types import MappingProxyType
+        object.__setattr__(self, "arguments", MappingProxyType(dict(self.arguments)))
 
     @property
     def key(self):
@@ -76,8 +80,8 @@ class Registry:
 
     def _add(self, spec):
         if (not isinstance(spec.alias, str) or not spec.alias.isidentifier()
-                or spec.alias in ("x", "out") or spec.alias.startswith("__")):
-            raise HNDLError("E_REGISTRY", "Operator alias must be an identifier other than x/out or a dunder name")
+                or spec.alias in ("x", "out") or spec.alias.startswith("_")):
+            raise HNDLError("E_REGISTRY", "Operator alias must be an identifier other than x/out without a leading underscore")
         import keyword
         if keyword.iskeyword(spec.alias):
             raise HNDLError("E_REGISTRY", f"Keyword cannot be an operator alias: {spec.alias}")
@@ -87,17 +91,34 @@ class Registry:
         self._identities[spec.key] = spec
         return spec
 
-    def register(self, alias, *, identity, version, shape, max_state_bytes, state_version=1):
+    def register(self, alias, *, identity, version, shape, max_state_bytes, state_version=1,
+                 arguments=None, input_ports=None, output_ports=None):
         if not isinstance(identity, str) or not re.fullmatch(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", identity):
             raise HNDLError("E_REGISTRY", "Custom identities must be namespaced, for example example.silu")
         if type(version) is not int or version < 1 or type(state_version) is not int or state_version < 1:
             raise HNDLError("E_REGISTRY", "Operator and state versions must be positive integers")
-        if shape is not preserves_shape:
-            raise HNDLError("E_UNRESOLVED", "This initial core admits custom unary preserves_shape providers only")
+        if type(shape) is ShapeRule:
+            inputs = tuple(shape.inputs) if input_ports is None else validate_ports(input_ports, inputs=True)
+            outputs = tuple(shape.outputs) if output_ports is None else validate_ports(output_ports, inputs=False)
+            if inputs != tuple(shape.inputs) or outputs != tuple(shape.outputs):
+                raise HNDLError("E_REGISTRY", "Explicit port declarations must exactly match ShapeRule port names and order")
+        elif shape is preserves_shape:
+            inputs = ("x",) if input_ports is None else validate_ports(input_ports, inputs=True)
+            outputs = ("out",) if output_ports is None else validate_ports(output_ports, inputs=False)
+            if len(inputs) != 1 or len(outputs) != 1:
+                raise HNDLError("E_REGISTRY", "preserves_shape requires exactly one input and one output port")
+        else:
+            raise HNDLError("E_REGISTRY", "Custom shapes require a declarative ShapeRule or preserves_shape; callbacks are unsupported")
         if type(max_state_bytes) is not int or max_state_bytes < 0:
             raise HNDLError("E_REGISTRY", "max_state_bytes must be an explicit nonnegative integer")
-        return self._add(OpSpec(alias, identity, version, shape=shape,
-                                max_state_bytes=max_state_bytes, state_version=state_version))
+        schemas = argument_schema(arguments, input_ports=inputs, output_ports=outputs)
+        return self._add(OpSpec(
+            alias, identity, version, input_ports=inputs, output_ports=outputs,
+            argument_names=tuple(schemas), arguments=schemas,
+            defaults={name: schema.default for name, schema in schemas.items() if schema.has_default},
+            required=tuple(name for name, schema in schemas.items() if schema.required),
+            shape=shape, max_state_bytes=max_state_bytes, state_version=state_version,
+        ))
 
     def get(self, alias):
         try:
@@ -184,6 +205,10 @@ def normalize_arguments(op, positional, kwargs, policy=None):
     for name in op.required:
         if name not in args:
             raise HNDLError("E_ARGUMENT", f"{op.alias} requires {name}; supply it or select an applicable policy")
+    # Custom argument names have no implicit built-in meaning: an extension's
+    # `axis`, `bias`, or `size` field follows only its declared scalar schema.
+    if op.shape is preserves_shape or type(op.shape) is ShapeRule:
+        return {name: op.arguments[name].validate(value, name) for name, value in args.items()}
     integer_fields = {"out_features", "in_features", "in_channels", "out_channels", "groups", "num_groups", "num_channels", "size", "dim", "input_count"}
     for name in integer_fields & args.keys():
         args[name] = _integer(args[name], name)
@@ -213,4 +238,3 @@ def normalize_arguments(op, positional, kwargs, policy=None):
         if any(o >= s and o >= d for o, s, d in zip(args["output_padding"], args["stride"], args["dilation"])):
             raise HNDLError("E_ARGUMENT", "output_padding must be smaller than stride or dilation on each axis")
     return args
-
