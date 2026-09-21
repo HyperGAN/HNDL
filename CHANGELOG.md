@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-09-21)
+
+A feature release driven by HyperGAN's migration to HNDL: networks copy
+with `copy.deepcopy`, graphs take named inputs and publish named outputs,
+GAN critics get spectral normalization and deterministic pooling, and
+local `.pth` checkpoints load through registered providers.
 
 - **`copy.deepcopy(model)` works.** A built network copies natively, which is
   what an exponential-moving-average model needs. The copy owns every
