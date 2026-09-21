@@ -91,7 +91,7 @@ def test_channel_count_is_inferred_forward_and_backward():
                        input_shape=("B", 4, 4, 4), output_shape=("B", 5))
     assert backward.nodes[0].args["out_channels"] == 9
     assert backward.nodes[1].input_shapes["x"] == ("B", 9, 8, 8)
-    sequence = resolve("instance_norm(0.01)\nflatten()\nlinear()", input_shape=("B", 7, 9), output_shape=("B", 2))
+    sequence = resolve("instance_norm(eps=0.01)\nflatten()\nlinear()", input_shape=("B", 7, 9), output_shape=("B", 2))
     assert sequence.nodes[0].args == {"eps": 0.01, "affine": False, "num_features": 7}
 
 
@@ -101,7 +101,7 @@ def test_invalid_arguments_and_shapes_report_their_codes():
     with pytest.raises(HNDLError, match="E_CONSTRAINT.*rank-2"):
         resolve("flatten()\ninstance_norm()\nlinear()", input_shape=("B", 6, 4, 5), output_shape=("B", 3))
     with pytest.raises(HNDLError, match="E_ARGUMENT"):
-        resolve("instance_norm(0.0)\nflatten()\nlinear()", input_shape=("B", 6, 5), output_shape=("B", 3))
+        resolve("instance_norm(eps=0.0)\nflatten()\nlinear()", input_shape=("B", 6, 5), output_shape=("B", 3))
     with pytest.raises(HNDLError, match="E_ARGUMENT"):
         resolve("instance_norm(num_features=-1)\nflatten()\nlinear()", input_shape=("B", 6, 5), output_shape=("B", 3))
     with pytest.raises(HNDLError, match="E_CONSTRAINT"):

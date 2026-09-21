@@ -81,7 +81,7 @@ def test_the_statistic_is_accumulated_in_float32_so_float16_does_not_overflow():
 @pytest.mark.parametrize("eps", [0.0, -1e-6])
 def test_non_positive_eps_is_an_argument_error(eps):
     with pytest.raises(HNDLError, match="E_ARGUMENT.*eps"):
-        resolve(f"rms_norm({eps})", input_shape=("B", 8), output_shape=("B", 8))
+        resolve(f"rms_norm(eps={eps})", input_shape=("B", 8), output_shape=("B", 8))
 
 
 def test_affine_false_has_no_parameters(device):

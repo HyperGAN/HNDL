@@ -30,7 +30,7 @@ def _reference(module):
     relation=_relation,
     shape_text="x and out share the shape; rank 3 [B, C, L] or rank 4 [B, C, H, W]",
     args={
-        "eps": Arg(float, 1e-5, min=0, exclusive_min=True, help="Added to the variance before the square root."),
+        "eps": Arg(float, 1e-5, min=0, exclusive_min=True, positional=False, help="Added to the variance before the square root."),
         "affine": Arg(bool, False, positional=False, help="Learn a per-channel scale and bias."),
         "num_features": Arg(int, inferable=True, dim="C", min=1, max=MAX_DIMENSION_LITERAL, positional=False,
                             help="Channels at axis 1. Inferred from the incoming tensor."),

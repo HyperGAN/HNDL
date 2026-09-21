@@ -8,7 +8,7 @@ from ..operator import Arg, Example, operator
     "adaptive_norm",
     summary="Instance-normalize features, then apply a per-example learned scale and bias.",
     shape="x[B, C, H, W], params[B, 2*C] -> out[B, C, H, W]",
-    args={"eps": Arg(float, 1e-5, min=0, exclusive_min=True, help="Added to the variance for stability.")},
+    args={"eps": Arg(float, 1e-5, min=0, exclusive_min=True, positional=False, help="Added to the variance for stability.")},
     examples=[
         Example("z1, z2 = split(64)\nlinear(z1)\nfeatures = reshape(32, 4, 4)\nadaptive_norm(features, z2)",
                 ("B", 128), ("B", 32, 4, 4), "32 channels need 64 style values; the projection resolves to 512."),

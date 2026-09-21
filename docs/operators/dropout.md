@@ -2,7 +2,7 @@
 
 Randomly zero elements during training and rescale the rest.
 
-**Category:** activation · **Identity:** `dropout@1`
+**Category:** regularization · **Identity:** `dropout@1`
 
 ## Shape
 

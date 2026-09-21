@@ -19,7 +19,7 @@ x[B, ..., D] -> out[B, ..., D]
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `eps` (positional) | float | `1e-06` | > 0 | Added to the mean square before the reciprocal square root; must be positive. |
+| `eps` | float | `1e-06` | > 0 | Added to the mean square before the reciprocal square root; must be positive. |
 | `affine` | bool | `True` | — | Learn a per-feature gain of width D. When false the layer has no parameters. |
 
 ## Description
@@ -102,7 +102,7 @@ Parameters: 2,826
 A parameter-free variant, useful directly on the network input.
 
 ```python
-rms_norm(0.0001, affine=False)
+rms_norm(eps=0.0001, affine=False)
 linear()
 ```
 

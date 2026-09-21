@@ -34,7 +34,7 @@ def _reference(module):
         Example("linear(8)\nclamp(0.0, 1.0)\nlinear()", ("B", 4, 6), ("B", 4, 3),
                 "On a [B, T, D] sequence the bounds apply to every element."),
     ],
-    category="activation",
+    category="arithmetic",
 )
 class Clamp(nn.Module):
     """Elementwise ``out = min(max(x, min), max)``, computed as

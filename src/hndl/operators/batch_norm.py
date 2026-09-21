@@ -24,7 +24,7 @@ def _reference(module):
     summary="Normalize each channel over the batch and spatial axes, tracking running statistics.",
     shape="x[B, C, ...] -> out[B, C, ...]",
     args={
-        "eps": Arg(float, 1e-5, min=0, exclusive_min=True, help="Added to the variance before the square root."),
+        "eps": Arg(float, 1e-5, min=0, exclusive_min=True, positional=False, help="Added to the variance before the square root."),
         "momentum": Arg(float, 0.1, min=0, max=1, positional=False,
                         help="Weight of the current batch in the running-statistics update."),
         "affine": Arg(bool, True, positional=False, help="Learn a per-channel scale and bias."),

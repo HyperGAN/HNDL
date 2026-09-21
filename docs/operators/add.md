@@ -2,7 +2,7 @@
 
 Elementwise sum of two tensors with identical shapes.
 
-**Category:** join · **Identity:** `add@1`
+**Category:** arithmetic · **Identity:** `add@1`
 
 ## Shape
 

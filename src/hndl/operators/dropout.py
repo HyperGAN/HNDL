@@ -26,7 +26,7 @@ def _reference(module):
         Example("linear(16)\ndropout(0.0)\nlinear()", ("B", 4, 8), ("B", 4, 3),
                 "On a [B, T, D] sequence each position and feature is dropped independently."),
     ],
-    category="activation",
+    category="regularization",
 )
 class Dropout(nn.Dropout):
     """Elementwise dropout, computed out of place so shared branches are never

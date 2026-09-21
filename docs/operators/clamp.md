@@ -2,7 +2,7 @@
 
 Saturate every element into the closed interval [min, max].
 
-**Category:** activation · **Identity:** `clamp@1`
+**Category:** arithmetic · **Identity:** `clamp@1`
 
 ## Shape
 

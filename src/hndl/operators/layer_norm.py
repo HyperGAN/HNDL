@@ -20,7 +20,7 @@ def _reference(module):
     summary="Normalize the last axis of every position with a learned scale and bias.",
     shape="x[B, ..., D] -> out[B, ..., D]",
     args={
-        "eps": Arg(float, 1e-5, min=0, exclusive_min=True,
+        "eps": Arg(float, 1e-5, min=0, exclusive_min=True, positional=False,
                    help="Added to the variance before the square root; must be positive."),
         "affine": Arg(bool, True, positional=False,
                       help="Learn a per-feature scale and bias of width D. When false the layer has no parameters."),
@@ -31,7 +31,7 @@ def _reference(module):
                 "The usual placement: normalize the hidden width before the activation."),
         Example("linear(64)\nlayer_norm()\nlinear()", ("B", 12, 32), ("B", 12, 10),
                 "On a [B, T, D] sequence each of the 12 positions is normalized independently."),
-        Example("layer_norm(0.001, affine=False)\nlinear()", ("B", 16), ("B", 4),
+        Example("layer_norm(eps=0.001, affine=False)\nlinear()", ("B", 16), ("B", 4),
                 "A parameter-free normalization of the incoming features."),
     ],
     category="normalization",

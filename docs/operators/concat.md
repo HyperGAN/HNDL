@@ -2,7 +2,7 @@
 
 Join two or more tensors along one axis.
 
-**Category:** join · **Identity:** `concat@1`
+**Category:** shape · **Identity:** `concat@1`
 
 ## Shape
 
