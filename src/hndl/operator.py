@@ -28,7 +28,9 @@ MAX_NAME_LENGTH = 64
 MAX_DIMENSION_LITERAL = 2**31 - 1
 MAX_INTEGER_ARGUMENT = 2**63 - 1
 MAX_STRING_BYTES = 16_384
-SUPPORTED_RANKS = (2, 4)
+SUPPORTED_RANKS = (2, 3, 4)
+COMPUTE_DTYPES = ("float32", "float16", "bfloat16")
+INDEX_DTYPES = ("int64", "int32", "bool")
 RESERVED = frozenset({"name", "policy", "init", "trainable"})
 PAIR = "pair"
 INTS = "ints"
@@ -36,7 +38,7 @@ _TYPES = {int: "int", float: "float", bool: "bool", str: "str", PAIR: "pair", IN
 _IDENT = re.compile(r"[a-z][a-z0-9_]*\Z")
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
 _PORT_SPEC = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)(\*?)\s*(?:\[([^\]]*)\])?\s*(?::\s*([A-Za-z0-9_]+))?\s*\Z")
-_DTYPES = ("compute", "float32", "float16", "bfloat16", "int64", "int32", "bool")
+_DTYPES = ("compute",) + COMPUTE_DTYPES + INDEX_DTYPES
 
 
 def _registry_error(message):
@@ -407,6 +409,14 @@ class Operator:
             return self.input_ports
         return tuple(f"{self.variadic}{i}" for i in range(args["input_count"]))
 
+    def port_dtype(self, port, compute):
+        """The concrete dtype name of a port given the plan's compute dtype."""
+        if self.variadic is not None and port.startswith(self.variadic) and port[len(self.variadic):].isdigit():
+            declared = self.inputs[0].dtype
+        else:
+            declared = next((p.dtype for p in (*self.inputs, *self.outputs) if p.name == port), "compute")
+        return compute if declared == "compute" else declared
+
     @property
     def positional_names(self):
         return tuple(name for name, arg in self.args.items() if arg.positional)
@@ -598,4 +608,4 @@ class NodeView:
 
 
 __all__ = ["Arg", "Example", "NodeView", "Operator", "Policy", "Port", "Sym", "operator", "parse_shape",
-           "make_operator", "REQUIRED", "PAIR", "INTS", "ELLIPSIS", "SUPPORTED_RANKS"]
+           "make_operator", "REQUIRED", "PAIR", "INTS", "ELLIPSIS", "SUPPORTED_RANKS", "COMPUTE_DTYPES", "INDEX_DTYPES"]

@@ -51,11 +51,12 @@ class Capture:
     """One scoped authoring transaction, shared by the two frontends."""
 
     def __init__(self, *, input_shape, output_shape, dtype="float32", registry=None,
-                 frontend="python_callable@1", limits=None):
+                 frontend="python_callable@1", limits=None, input_dtype=None):
         self.registry = Registry.builtins() if registry is None else registry
         self.input_shape = tuple(input_shape)
         self.output_shape = tuple(output_shape)
         self.dtype = dtype
+        self.input_dtype = input_dtype
         self.frontend = frontend
         self.nodes: list[Node] = []
         self._ids: set[str] = set()
@@ -188,7 +189,7 @@ class Capture:
         self._symbol(selected)
         return Graph(nodes=tuple(self.nodes), input_shape=self.input_shape,
                      output_shape=self.output_shape, output_ref=selected.ref,
-                     dtype=self.dtype, frontend=self.frontend)
+                     dtype=self.dtype, frontend=self.frontend, input_dtype=self.input_dtype)
 
 
 class OperatorNamespace:
@@ -216,20 +217,22 @@ class OperatorNamespace:
 ops = OperatorNamespace()
 
 
-def capture_callable(fn, *, input_shape, output_shape, dtype="float32", registry=None, limits=None):
+def capture_callable(fn, *, input_shape, output_shape, dtype="float32", registry=None, limits=None,
+                     input_dtype=None):
     """Invoke trusted Python exactly once and return its finite author graph."""
     if not callable(fn):
         raise TypeError("resolve_callable requires a callable, not source text")
     with Capture(input_shape=input_shape, output_shape=output_shape, dtype=dtype,
-                 registry=registry, limits=limits) as capture:
+                 registry=registry, limits=limits, input_dtype=input_dtype) as capture:
         result = fn(capture.input)
         return capture.finish(_DEFAULT if result is None else result)
 
 
-def resolve_callable(fn, *, input_shape, output_shape, dtype="float32", registry=None, limits=None):
+def resolve_callable(fn, *, input_shape, output_shape, dtype="float32", registry=None, limits=None,
+                     input_dtype=None):
     from .resolver import resolve_graph
 
     registry = Registry.builtins() if registry is None else registry
     graph = capture_callable(fn, input_shape=input_shape, output_shape=output_shape,
-                             dtype=dtype, registry=registry, limits=limits)
+                             dtype=dtype, registry=registry, limits=limits, input_dtype=input_dtype)
     return resolve_graph(graph, registry=registry, limits=limits)

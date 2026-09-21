@@ -96,6 +96,22 @@ def test_example_builds_runs_and_is_deterministic(spec, example, device):
     torch.testing.assert_close(again(x=x.detach())["output"], output.detach())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="reduced precision kernels are qualified on CUDA")
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+@pytest.mark.parametrize("spec,example", operator_examples())
+def test_example_runs_in_reduced_precision_on_cuda(spec, example, dtype):
+    plan = resolve(example.source, input_shape=example.input_shape, output_shape=example.output_shape, dtype=dtype)
+    model = build(plan, device="cuda:0", initialization_seed=3)
+    torch_dtype = DTYPES[dtype]
+    assert all(p.dtype == torch_dtype for p in model.parameters())
+    x = torch.randn(2, *example.input_shape[1:], device="cuda:0", dtype=torch_dtype, requires_grad=True)
+    output = model(x=x)["output"]
+    assert output.dtype == torch_dtype and tuple(output.shape) == (2, *example.output_shape[1:])
+    assert output.isfinite().all()
+    output.float().square().mean().backward()
+    assert x.grad.isfinite().all()
+
+
 @pytest.mark.parametrize("spec,example", operator_examples())
 def test_reference_implementation_matches(spec, example, device):
     if spec.reference is None:
