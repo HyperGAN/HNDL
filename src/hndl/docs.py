@@ -55,6 +55,19 @@ def _shape_table(plan):
     return "\n".join(line for line in repr(plan).splitlines())
 
 
+def contract_value(value):
+    """A sidecar contract is one shape or a mapping of named shapes."""
+    if isinstance(value, dict):
+        return {name: tuple(shape) for name, shape in value.items()}
+    return tuple(value)
+
+
+def _contract_text(value):
+    if isinstance(value, dict):
+        return ", ".join(f"`{name}={shape}`" for name, shape in value.items())
+    return f"`{value}`"
+
+
 def render_operator(spec, registry):
     from .torch import parameter_counts
     from .config import resolve
@@ -142,13 +155,13 @@ def render_networks(directory, registry=None):
         meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
         source = path.read_text(encoding="utf-8").strip("\n")
         kwargs = {key: meta[key] for key in ("input_dtype", "dtype") if key in meta}
-        plan = resolve(source, input_shape=tuple(meta["input_shape"]), output_shape=tuple(meta["output_shape"]),
-                       registry=registry, **kwargs)
+        plan = resolve(source, input_shape=contract_value(meta["input_shape"]),
+                       output_shape=contract_value(meta["output_shape"]), registry=registry, **kwargs)
         total = sum(count for count in parameter_counts(plan, registry=registry).values() if count is not None)
-        contract = f"Input `{meta['input_shape']}`"
+        contract = "Input " + _contract_text(meta["input_shape"])
         if "input_dtype" in meta:
             contract += f" (`input_dtype=\"{meta['input_dtype']}\"`)"
-        contract += f" → output `{meta['output_shape']}`"
+        contract += " → output " + _contract_text(meta["output_shape"])
         if "dtype" in meta:
             contract += f", `dtype=\"{meta['dtype']}\"`"
         lines += [f"## {meta['title']}", "", meta["description"], "", f"`examples/networks/{path.name}`", "",

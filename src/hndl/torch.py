@@ -9,10 +9,12 @@ import torch
 from torch import nn
 
 from .errors import HNDLError
+from .types import contract_header
 
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
-SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names"})
+SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names",
+                             "_input_names", "_input_dtypes", "_output_dtypes"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
           "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
@@ -53,7 +55,10 @@ def _shape_text(shape):
 
 
 def _is_chain(plan):
-    previous = "input:x"
+    """A chain has one external input feeding one unary node after another."""
+    if len(plan.inputs) != 1 or len(plan.outputs) != 1:
+        return False
+    previous = f"input:{next(iter(plan.inputs))}"
     for node in plan.nodes:
         if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
                 or len(node.outputs) != 1):
@@ -72,16 +77,19 @@ class GraphModule(nn.Module):
         self._runtime_device = device
         self._chain = _is_chain(plan)
         self._port_orders = port_orders
-        self._input_dtype = DTYPES[plan.input_dtype]
+        self._input_names = tuple(plan.inputs)
+        self._input_dtypes = MappingProxyType(
+            {name: DTYPES[entry["dtype"]] for name, entry in plan.inputs.items()})
         self._port_dtypes = {}
-        produced = {"input:x": plan.input_dtype}
+        produced = {f"input:{name}": entry["dtype"] for name, entry in plan.inputs.items()}
         for node in plan.nodes:
             spec = plan.registry.by_identity(node.op)
             declared = {port: spec.port_dtype(port, plan.dtype) for port in (*node.inputs, *node.outputs)}
             self._port_dtypes[node.id] = {port: None if name == "any" else DTYPES[name] for port, name in declared.items()}
             for port in node.outputs:
                 produced[f"node:{node.id}/{port}"] = plan.dtype if declared[port] == "any" else declared[port]
-        self._output_dtype = DTYPES[produced[plan.output_ref]]
+        self._output_dtypes = MappingProxyType(
+            {name: DTYPES[produced[entry["ref"]]] for name, entry in plan.outputs.items()})
         self._state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
         self.build_receipt = MappingProxyType(receipt)
 
@@ -144,10 +152,15 @@ class GraphModule(nn.Module):
         if value.device != self._runtime_device:
             raise HNDLError("E_RUNTIME", f"{location}: expected device {self._runtime_device}, got {value.device}")
 
-    def _execute(self, x):
-        batch = x.shape[0] if isinstance(x, torch.Tensor) and x.ndim else None
-        self._check(x, self.plan.input_shape, batch, "input:x", self._input_dtype)
-        values = {"input:x": x}
+    def _execute(self, inputs):
+        leading = inputs[self._input_names[0]]
+        batch = leading.shape[0] if isinstance(leading, torch.Tensor) and leading.ndim else None
+        values = {}
+        for name in self._input_names:
+            value = inputs[name]
+            self._check(value, self.plan.inputs[name]["shape"], batch, f"input:{name}",
+                        self._input_dtypes[name])
+            values[f"input:{name}"] = value
         for node in self.plan.nodes:
             bound = []
             dtypes = self._port_dtypes[node.id]
@@ -168,17 +181,33 @@ class GraphModule(nn.Module):
             for port, value in zip(node.outputs, results):
                 self._check(value, node.output_shapes[port], batch, f"{node.id}/{port}", dtypes[port])
                 values[f"node:{node.id}/{port}"] = value
-        result = values[self.plan.output_ref]
-        self._check(result, self.plan.output_shape, batch, "output", self._output_dtype)
+        outputs = {}
+        for name, entry in self.plan.outputs.items():
+            value = values[entry["ref"]]
+            self._check(value, entry["shape"], batch, name, self._output_dtypes[name])
+            outputs[name] = value
         state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
         if state_names != self._state_names:
             raise HNDLError("E_RUNTIME", "A module created or removed registered state during forward")
-        return result
+        return outputs
+
+    def _bind(self, args, kwargs):
+        """Bind runtime tensors to the declared external inputs, in order."""
+        names = self._input_names
+        expected = "Expected exactly the external tensor inputs " + ", ".join(repr(n) for n in names)
+        if len(args) > len(names):
+            raise HNDLError("E_BINDING", expected)
+        bound = dict(zip(names, args))
+        for name, value in kwargs.items():
+            if name in bound:
+                raise HNDLError("E_BINDING", f"Input {name!r} was supplied twice")
+            bound[name] = value
+        if set(bound) != set(names):
+            raise HNDLError("E_BINDING", expected)
+        return bound
 
     def forward(self, **inputs):
-        if set(inputs) != {"x"}:
-            raise HNDLError("E_BINDING", "Expected exactly the external tensor input 'x'")
-        return {"output": self._execute(inputs["x"])}
+        return self._execute(self._bind((), inputs))
 
     def __getitem__(self, key):
         if isinstance(key, str):
@@ -214,11 +243,7 @@ class GraphModule(nn.Module):
             return op.split("@")[0]
 
     def __repr__(self):
-        header = (f"{type(self).__name__}: {_shape_text(self.plan.input_shape)} -> "
-                  f"{_shape_text(self.plan.output_shape)}  dtype={self.plan.dtype}")
-        if self.plan.input_dtype != self.plan.dtype:
-            header += f"  input_dtype={self.plan.input_dtype}"
-        lines = [header]
+        lines = [contract_header(self.plan, type(self).__name__)]
         rows = [("index", "name", "operation", "input shape", "output shape")
                 if self._chain else ("name", "operation", "input shapes", "output shapes")]
         for i, node in enumerate(self.plan.nodes):
@@ -238,10 +263,13 @@ class GraphModule(nn.Module):
 
 
 class Network(GraphModule):
-    """Single-input, single-output tensor facade with shared graph state."""
+    """Tensor facade over the graph: one tensor out, or a dict of named outputs."""
 
-    def forward(self, x):
-        return self._execute(x)
+    def forward(self, *inputs, **named):
+        results = self._execute(self._bind(inputs, named))
+        if len(results) == 1:
+            return next(iter(results.values()))
+        return results
 
 
 @contextmanager

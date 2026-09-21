@@ -49,6 +49,54 @@ index  name            operation  input shapes      output shapes
 
 Parameters: 209,968. Classic MNIST autoencoder with a 784-128-32-128-784 stack; 784·128+128 + 128·32+32 + 32·128+128 + 128·784+784 = 209,968 parameters, cross-checked against the equivalent torch.nn.Sequential.
 
+## Conditional GAN discriminator
+
+A conditional discriminator with two named inputs and two named outputs. The one-hot label `y` is projected onto a 28×28 plane and stacked on the image `x` as a second channel; two "down2" convolutions reduce the result to a 128×7×7 map. The flattened map is published as `features` for a feature-matching loss, and the head produces raw `logits` — apply a sigmoid, or use BCEWithLogitsLoss, in the loss rather than in the network.
+
+`examples/networks/conditional_discriminator.hndl`
+
+```python
+# A conditional GAN discriminator for 28x28 grayscale digits. It takes two
+# external inputs: the image "x" and a one-hot class label "y".
+
+# Project the label onto its own 28x28 plane and stack it on the image as an
+# extra channel, the usual conditional-GAN trick.
+plane = linear(y, 784, name="label_projection")
+label = reshape(plane, 1, 28, 28, name="label_plane")
+concat(x, label, name="conditioned")     # [B, 2, 28, 28]
+
+# Two strided convolutions halve the image: 28 -> 14 -> 7.
+conv(64, policy="down2", name="stage1")
+leaky_relu(0.2)
+conv(128, policy="down2", bias=False, name="stage2")
+batch_norm()
+leaky_relu(0.2)
+
+# Both public outputs are named: the 128x7x7 map flattened into "features",
+# which a feature-matching loss can read, and the real/fake "logits".
+features = flatten(name="features")
+logits = linear(1, name="logits")
+```
+
+Input `x=['B', 1, 28, 28]`, `y=['B', 10]` → output `logits=['B', 1]`, `features=['B', 6272]`.
+
+```text
+Network: x=[B, 1, 28, 28], y=[B, 10] -> logits=[B, 1], features=[B, 6272]  dtype=float32
+index  name              operation   input shapes                          output shapes
+0      label_projection  linear      x=[B, 10]                             out=[B, 784]
+1      label_plane       reshape     x=[B, 784]                            out=[B, 1, 28, 28]
+2      conditioned       concat      x0=[B, 1, 28, 28], x1=[B, 1, 28, 28]  out=[B, 2, 28, 28]
+3      stage1            conv        x=[B, 2, 28, 28]                      out=[B, 64, 14, 14]
+4      n4                leaky_relu  x=[B, 64, 14, 14]                     out=[B, 64, 14, 14]
+5      stage2            conv        x=[B, 64, 14, 14]                     out=[B, 128, 7, 7]
+6      n6                batch_norm  x=[B, 128, 7, 7]                      out=[B, 128, 7, 7]
+7      n7                leaky_relu  x=[B, 128, 7, 7]                      out=[B, 128, 7, 7]
+8      features          flatten     x=[B, 128, 7, 7]                      out=[B, 6272]
+9      logits            linear      x=[B, 6272]                           out=[B, 1]
+```
+
+Parameters: 148,337. Mirza & Osindero, "Conditional Generative Adversarial Nets" (2014), in the usual DCGAN form; 10·784+784 + 2·64·4·4+64 + 64·128·4·4 + 2·128 + 6272+1 = 148,337 parameters.
+
 ## DCGAN discriminator
 
 The DCGAN discriminator for 64×64 RGB images: four "down2" convolutions with leaky ReLU, batch-normalized after the first stage, reduce the image to a 512×4×4 map that is flattened and projected to a single logit. The output is a raw score — apply a sigmoid, or use BCEWithLogitsLoss, in the loss rather than in the network.

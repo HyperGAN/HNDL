@@ -50,7 +50,9 @@ A tensor contract is an ordered tuple of dimensions including batch, interpreted
 
 A plan carries a compute `dtype` of `float32` (the default), `float16`, or `bfloat16`, and an `input_dtype` that defaults to the compute dtype. The graph input may instead be an integer contract — `int64`, `int32`, or `bool` — for token ids and masks; a floating-point `input_dtype` must equal the compute dtype. Operator ports may declare their own dtype, including `any` for a port that accepts whatever its producer carries. Every edge's dtype is checked once during resolution and a mismatch fails with `E_DTYPE`, so an integer tensor cannot reach a floating-point port. The backend constructs parameters in the compute dtype and checks each port's dtype, shape, and device at runtime.
 
-Both single-input frontend APIs accept `input_shape` and `output_shape`, both including batch, plus optional `dtype` and `input_dtype` keywords. Structured graph contracts use the same tuples.
+Both frontend APIs accept `input_shape` and `output_shape`, both including batch, plus optional `dtype` and `input_dtype` keywords. Structured graph contracts use the same tuples.
+
+A contract is either one tuple or an ordered mapping of named contracts. `input_shape=("B", 128)` declares the single external input `x`; `input_shape={"z": ("B", 128), "y": ("B", 10)}` declares the external inputs `z` and `y` in that order. `output_shape` behaves the same way: a tuple declares the single public output `output`, and `output_shape={"logits": ("B", 1), "features": ("B", 256)}` declares two. `input_dtype` is either one dtype for every input or a mapping naming some of them, each defaulting to the compute dtype and following the integer/floating rules above per input. Port names match `[a-z][a-z0-9_]*`, are at most 32 per side, and may not collide with a registered operator alias (`E_NAME`). Every declared contract shares one batch symbol, inputs and outputs alike; a disagreement fails with `E_CONSTRAINT`. Every declared input must be consumed by the resolved graph or be selected as an output; an input no node reads fails with `E_BINDING` rather than being silently ignored. A mapping naming exactly `x` or exactly `output` is identical to the corresponding tuple contract, including in the saved plan.
 
 Omitting an inferable dimension creates a fresh unknown. For example, `linear()` leaves output width to resolution, while `linear(64)` fixes it at 64. Both consume the current tensor unless one is supplied explicitly, as in `linear(x, 64)`. The operator declaration identifies inferable arguments; omission does not make every argument inferable. Structured JSON likewise omits such fields rather than storing a special sentinel. No public unknown-value helper is required.
 
@@ -69,15 +71,15 @@ Activations are separate explicit graph operations in both frontends. Built-in `
 
 ## 4. Author specification and graph
 
-The canonical internal model is a finite directed acyclic graph. Both frontends produce this graph before resolution. It can represent named ports and multiple outputs internally; public authoring remains focused on the two Python frontends.
+The canonical internal model is a finite directed acyclic graph. Both frontends produce this graph before resolution. It represents named external inputs and multiple named public outputs, which both Python frontends declare through their contract arguments (§3); public authoring remains focused on those two frontends.
 
 | Field | Contract |
 | --- | --- |
 | `schema_version` | Author data-format version; initially `1` |
-| `input_shape`, `input_dtype` | The external `x` contract, including batch |
+| `inputs` | Ordered external inputs, each a name, a contract including batch, and a dtype. `input_shape`/`input_dtype` restate the first one |
 | `dtype` | The compute dtype every floating port carries |
 | `nodes` | Ordered node declarations with stable `id`, versioned `op`, `args`, input-port `inputs` bindings, and construction metadata |
-| `output_shape`, `output_ref` | The selected public output and its required contract |
+| `outputs` | Ordered public outputs, each a name, the selected reference, and its required contract. `output_shape`/`output_ref` restate the first one |
 | `frontend` | `python_config@1` or `python_callable@1`, with source provenance |
 | `source` | Per-node annotations — location, selected policy identity, argument origins — excluded from numerical identity |
 
@@ -117,11 +119,11 @@ The following conceptual internal JSON encoding describes a two-layer perceptron
 }
 ```
 
-Validation must reject duplicate IDs, missing references, undeclared ports, missing required bindings, cycles, and nodes that cannot reach the selected output. Unused output ports of an otherwise reachable node are allowed. The internal graph can represent multiple outputs; both public authoring frontends select one. Graph values are tensors; an operator returning a Python tuple or dictionary must map it onto its declared tensor ports.
+Validation must reject duplicate IDs, missing references, undeclared ports, missing required bindings, cycles, nodes that cannot reach any selected output, and declared inputs that nothing reads. Unused output ports of an otherwise reachable node are allowed. Two public outputs may select the same reference, and a public output may select an external input directly. Graph values are tensors; an operator returning a Python tuple or dictionary must map it onto its declared tensor ports.
 
 Each node owns an independent module instance and executes once per forward. Fan-out reuses a computed tensor. It does not clone the source module, repeat its invocation, or tie parameters between nodes. Explicit weight tying between graph nodes is deferred and must fail if requested. External reuse of built modules through sequence slices is supported as described in §7.
 
-Both frontends lower to external input `x` and one public output. Declarative configuration selects its final `out` binding when present and otherwise selects current. A native callable may explicitly return a symbol or select current by returning `None`/falling through. Current initially refers to the external input; its transitions are defined in §7. Every operator call creates one node in capture order. Explicit `name=` selects its stable node ID. Otherwise the ID is `n0`, `n1`, and so on, using the zero-based ordinal of that call among all operator calls, including explicitly named calls. Nested calls create their nodes in Python argument evaluation order. Duplicate explicit/generated IDs fail. Comments, local variable names, and assignment statements without new calls do not affect IDs. Inserting an operator call can change subsequent generated IDs; stable names are recommended for persisted models. Local variables refer to tensors and never infer node names.
+Both frontends lower to the declared external inputs and public outputs. With a single unnamed output, declarative configuration selects its final `out` binding when present and otherwise selects current, and a native callable may explicitly return a symbol or select current by returning `None`/falling through. With named outputs there is no default selection: configuration binds each declared name as a local and a callable returns a mapping of every declared name to one symbol (§7). Current initially refers to the first declared external input; its transitions are defined in §7. Every operator call creates one node in capture order. Explicit `name=` selects its stable node ID. Otherwise the ID is `n0`, `n1`, and so on, using the zero-based ordinal of that call among all operator calls, including explicitly named calls. Nested calls create their nodes in Python argument evaluation order. Duplicate explicit/generated IDs fail. Comments, local variable names, and assignment statements without new calls do not affect IDs. Inserting an operator call can change subsequent generated IDs; stable names are recommended for persisted models. Local variables refer to tensors and never infer node names.
 
 ## 5. Resolution algorithm
 
@@ -236,7 +238,7 @@ print(model)
 # scores = model(x)
 ```
 
-The external symbolic input is prebound as `x` and is initially current. Calls with one input port may omit its tensor, and each single-output call makes its result current. This example needs no local assignments. An optional final `out` binding overrides the default current output; assignment never infers a module name.
+The external symbolic input is prebound as `x` and is initially current. Every declared external input is prebound under its own name, so `input_shape={"z": ("B", 128), "y": ("B", 10)}` prebinds the locals `z` and `y`, and the first one is initially current. Calls with one input port may omit its tensor, and each single-output call makes its result current. This example needs no local assignments. An optional final `out` binding overrides the default current output; assignment never infers a module name. With named outputs `out` has no special meaning: each declared output name must be bound as a local holding one tensor symbol, as in `logits = linear(1)` and `features = h`, and a name that is never bound fails with `E_OUTPUT`.
 
 `print(model)` uses the module's `__repr__`, following the standard PyTorch inspection convention, to display network input/output shapes and dtype followed by every layer's index, name, operation alias, and resolved input/output shapes in aligned columns. `repr(model)` returns the same representation. Inspection performs no forward pass, tensor allocation, or random draws:
 
@@ -271,7 +273,9 @@ model = network_from_callable(
 )
 ```
 
-`from hndl import ops` exposes built-in symbolic operators with fixed version bindings. `registry.ops.<alias>` exposes operators bound in an explicit registry, including custom operations. These calls capture graph nodes, not numerical torch operations. Native Python variables follow ordinary Python rules and never name modules. The callable is invoked exactly once with one symbolic input per API call, even if its body never refers to that parameter. A returned symbolic tensor selects the output; `None` or ordinary fallthrough selects current. Any other return value fails without falling back to current. Zero-argument callables are not a separate supported convention. A symbolic tensor cannot be used as a Python truth value or substituted with an eager tensor. Ordinary Python helpers and loops may construct a finite static graph; they do not become runtime graph control flow.
+A callable with named inputs receives one keyword argument per declared input, so a two-input generator is written `def generator(*, z, y)`, and with named outputs it returns a mapping of every declared output name to one symbol. A plain tuple contract keeps the single positional parameter and the single returned symbol.
+
+`from hndl import ops` exposes built-in symbolic operators with fixed version bindings. `registry.ops.<alias>` exposes operators bound in an explicit registry, including custom operations. These calls capture graph nodes, not numerical torch operations. Native Python variables follow ordinary Python rules and never name modules. The callable is invoked exactly once per API call, with one symbolic tensor for every declared external input, even if its body never refers to those parameters. With one unnamed output a returned symbolic tensor selects it; `None` or ordinary fallthrough selects current; any other return value fails without falling back to current. With named outputs the callable must return a mapping whose keys are exactly the declared names and whose values are symbols of this capture; `None`, a bare symbol, a missing name, and an undeclared name all fail with `E_OUTPUT`. Zero-argument callables are not a separate supported convention. A symbolic tensor cannot be used as a Python truth value or substituted with an eager tensor. Ordinary Python helpers and loops may construct a finite static graph; they do not become runtime graph control flow.
 
 Symbolic factories allocate nothing. Capture context is scoped to that call, isolated across concurrent captures, and cleaned up after success or exceptions; it is not a mutable global registry. Symbols from another capture fail. Coercion to an integer, boolean, iterable tensor values, or raw eager torch execution is unsupported and must fail rather than sample concrete values. Iterating a declared tuple of output symbols is ordinary tuple handling, not iteration over a symbolic tensor. The function is never invoked during forward execution, printing, serialization, or restoration; function source inspection is unnecessary.
 
@@ -286,7 +290,7 @@ Every entry point below also accepts `limits=None`, the bounded resource mapping
 | `resolve(source: str, *, input_shape, output_shape, dtype="float32", input_dtype=None, registry=None)` | Interpret declarative configuration and return an immutable `ResolvedPlan` |
 | `resolve_file(path, *, input_shape, output_shape, dtype="float32", input_dtype=None, registry=None)` | Bounded UTF-8 file loading followed by the same declarative resolution pipeline |
 | `resolve_callable(fn, *, input_shape, output_shape, dtype="float32", input_dtype=None, registry=None)` | Invoke trusted capture once, then resolve the captured graph |
-| `network(source: str, *, input_shape, output_shape, device, dtype="float32", input_dtype=None, registry=None, initialization_seed=None)` | Declarative resolution plus construction; tensor-returning `forward(x)` |
+| `network(source: str, *, input_shape, output_shape, device, dtype="float32", input_dtype=None, registry=None, initialization_seed=None)` | Declarative resolution plus construction; `forward(x)` returns a tensor, and `forward(**inputs)` returns a tensor or a dictionary of named outputs |
 | `network_file(path, ...)` | Bounded UTF-8 loading followed by the same declarative construction pipeline |
 | `network_from_callable(fn, ...)` | Trusted capture, resolution, and construction with the same runtime interface |
 | `model.plan` | Immutable resolved plan used to construct the module |
@@ -297,13 +301,13 @@ Every entry point below also accepts `limits=None`, the bounded resource mapping
 | `hndl.torch.build(plan, *, device, initialization_seed=None, registry=None)` | Lower-level construction returning a dictionary-output `GraphModule` |
 | `hndl.torch.parameter_counts(plan, *, registry=None)` | Per-node parameter counts from an allocation-free meta-device construction; `None` for a node that cannot be probed |
 
-`resolve`, `resolve_file`, `resolve_callable`, `ops`, `Registry`, `ResolvedPlan`, `HNDLError`, and the declaration types `operator`, `Arg`, `Example`, and `Policy` are exported by `hndl`; construction functions are exported by `hndl.torch`. A string always means source, never a filename or function to execute. File paths are supplied only by the host through the explicit file APIs. A missing registry selects an independent built-in registry. Explicit registry objects supply extensions without a mutable global singleton. Built-in `ops` and explicit `registry.ops` calls capture exact operator identities; a capture using an identity unavailable in the selected resolution registry fails. Both modes use identical operator/policy rules and output contracts. Their graph has external input `x` and public output `output`; `output_shape` constrains the selected tensor. When a configuration binds `out`, its final value must be one tensor symbol and takes precedence over current; otherwise current is selected. Native `None`/fallthrough selects current, while an explicit symbol selects itself and any other value fails. An unset current fails when default selection requires it; an invalid explicit selection always fails. Empty source or a callable with no operator calls using default selection chooses the external input, subject to matching input/output contracts.
+`resolve`, `resolve_file`, `resolve_callable`, `ops`, `Registry`, `ResolvedPlan`, `HNDLError`, and the declaration types `operator`, `Arg`, `Example`, and `Policy` are exported by `hndl`; construction functions are exported by `hndl.torch`. A string always means source, never a filename or function to execute. File paths are supplied only by the host through the explicit file APIs. A missing registry selects an independent built-in registry. Explicit registry objects supply extensions without a mutable global singleton. Built-in `ops` and explicit `registry.ops` calls capture exact operator identities; a capture using an identity unavailable in the selected resolution registry fails. Both modes use identical operator/policy rules and output contracts. Their graph has the external inputs and public outputs the contracts declare, defaulting to input `x` and output `output`; each output's contract constrains the tensor it selects. When a configuration with one unnamed output binds `out`, its final value must be one tensor symbol and takes precedence over current; otherwise current is selected. Native `None`/fallthrough selects current, while an explicit symbol selects itself and any other value fails. An unset current fails when default selection requires it; an invalid explicit selection always fails. Empty source or a callable with no operator calls using default selection chooses the external input, subject to matching input/output contracts.
 
-Both network constructors accept one runtime tensor and return one tensor, even for branched graphs. Printed graphs include all input/output ports, including both split results; a shared producer appears once. The lower-level `build(plan)` builder provides named-input/dictionary-output behavior for resolved plans.
+Both network constructors accept one runtime tensor per declared external input — positionally in declaration order, by keyword, or a mix — and return one tensor for a single public output, or a dictionary keyed by the declared output names in declaration order for several. A single-input, single-output network is therefore still `model(x)` returning a tensor, even for a branched graph. Printed graphs include all input/output ports, including both split results; a shared producer appears once. The lower-level `build(plan)` builder always returns the dictionary keyed by public output names.
 
 ### Current input and output selection
 
-Each capture starts with current pointing to its external input symbol. Current is one reference, not an operand stack: `add()` never retrieves or pops earlier results and fails for missing explicit inputs. The current reference is capture-local authoring state, not a runtime tensor stored on the module. It is isolated across concurrent captures and restored correctly around nested captures and exceptions along with the registry context.
+Each capture starts with current pointing to its first declared external input symbol. Current is one reference, not an operand stack: `add()` never retrieves or pops earlier results and fails for missing explicit inputs. The current reference is capture-local authoring state, not a runtime tensor stored on the module. It is isolated across concurrent captures and restored correctly around nested captures and exceptions along with the registry context.
 
 A one-input operator accepts an explicit leading symbolic tensor or its declared port keyword; otherwise it uses current. The declaration distinguishes that symbolic port from ordinary author values. For example, `linear(64)` uses current with width 64, `linear(z1, 64)` uses `z1`, and `linear(64, x=z1)` is the equivalent keyword binding. `linear(z1, x=z2)` duplicates the tensor binding and fails. Multi-input operators require every tensor port explicitly, even if only one is missing; there is no partial current default. A variadic operator requires contiguous bindings starting at `x0` and at least two tensors.
 
@@ -313,7 +317,52 @@ Python argument expressions evaluate in ordinary order before an omitted input p
 
 Assignments only store references; they never change current by themselves. `saved = x` preserves a reference, and `x = saved` rebinds a local without changing current. `out = saved` selects the configuration output without changing current for later calls. If `out` is present but invalid, fail instead of using current. In native entry callables, explicit symbol returns override current; only `None`/fallthrough uses current, and tuple/other returns fail. These output conventions apply to the entry point, not arbitrary Python helper functions. Passing a symbol to a native helper does not select current: its first operator must explicitly use that parameter if it is meant to start a different branch.
 
-If default output selection finds no current, report `E_CURRENT`. Empty configuration or a callable with no operator calls using default selection chooses the unchanged input; identity is valid only when the supplied input/output contracts agree. No nodes or state entries are needed for that identity plan. Selected outputs do not excuse dead nodes: every constructed node must still reach the selected tensor.
+If default output selection finds no current, report `E_CURRENT`. Empty configuration or a callable with no operator calls using default selection chooses the unchanged input; identity is valid only when the supplied input/output contracts agree. No nodes or state entries are needed for that identity plan. Selected outputs do not excuse dead nodes: every constructed node must still reach a selected tensor.
+
+### Named external inputs and outputs
+
+A mapping contract (§3) declares several external inputs, several public outputs, or both. A conditional GAN discriminator reads an image and a label and publishes a score and the features behind it:
+
+```python
+from hndl.torch import network
+
+source = """
+plane = linear(y, 784, name="label_projection")
+label = reshape(plane, 1, 28, 28, name="label_plane")
+concat(x, label, name="conditioned")
+conv(64, policy="down2", name="stage1")
+leaky_relu(0.2)
+features = flatten(name="features")
+logits = linear(1, name="logits")
+"""
+model = network(
+    source,
+    input_shape={"x": ("B", 1, 28, 28), "y": ("B", 10)},
+    output_shape={"logits": ("B", 1), "features": ("B", 12544)},
+    device="cpu",
+)
+scores = model(image, label)          # {"logits": ..., "features": ...}
+```
+
+The equivalent callable takes the inputs as keyword arguments and returns the outputs as a mapping:
+
+```python
+def discriminator(*, x, y):
+    label = ops.reshape(ops.linear(y, 784), 1, 28, 28)
+    ops.concat(x, label)
+    ops.conv(64, policy="down2")
+    ops.leaky_relu(0.2)
+    features = ops.flatten()
+    return {"logits": ops.linear(1), "features": features}
+```
+
+The rules are the same in both frontends:
+
+- Each declared input is one prebound tensor symbol named by the contract, and current starts at the first of them. A declared input that no reachable node reads and that no output selects fails with `E_BINDING`.
+- Each declared output selects one symbol of that capture. Configuration binds the output's name as a local; a callable returns the mapping. Two outputs may select the same symbol, and an output may select an external input.
+- Named outputs replace default selection entirely. `out`, a bare returned symbol, `None`, and fallthrough do not select a named output, and every declared name must be selected (`E_OUTPUT`).
+- Printed shape tables and the header show every external port by name. A graph with one input and one output prints exactly as before.
+- The header of a multi-port network reads `Network: x=[B, 1, 28, 28], y=[B, 10] -> logits=[B, 1], features=[B, 12544]  dtype=float32`, and `input_dtype=` names only the inputs whose dtype differs from the compute dtype.
 
 ### Declarative grammar and trust boundary
 
@@ -395,7 +444,7 @@ features = model[:2]
 
 Module lookup uses explicit or generated node IDs, never local variable names. Unknown IDs raise `KeyError`; out-of-range integer indexes raise `IndexError`. A slice returns ordinary `torch.nn.Sequential` over the existing module objects, sharing parameters, buffers, mode, and device moves. It carries no resolved-plan guarantees. Slicing requires adapters compatible with direct tensor-in/tensor-out chaining; otherwise reject it explicitly. Creating a slice does not alter registrations/state keys on the original model.
 
-Registration remains once under `nodes.n_<node_id>`, without a facade prefix or duplicate registrations. Structural replacement/insertion/deletion through the HNDL container is rejected; ordinary parameter updates remain supported. Architecture changes require a new resolution/build. Actual split/fan-out/join graphs support node-name lookup only, regardless of which frontend authored them. Both network constructors still return the single selected tensor at runtime; `build(plan)` returns a dictionary-output GraphModule.
+Registration remains once under `nodes.n_<node_id>`, without a facade prefix or duplicate registrations. Structural replacement/insertion/deletion through the HNDL container is rejected; ordinary parameter updates remain supported. Architecture changes require a new resolution/build. Actual split/fan-out/join graphs support node-name lookup only, regardless of which frontend authored them. Both network constructors still return the single selected tensor at runtime when the graph declares one public output; `build(plan)` returns a dictionary-output GraphModule. Indexing, slicing, iteration, and `len` require a consecutive unary chain, which means exactly one external input and one public output; a graph with named ports on either side supports node-name lookup only.
 
 ### Worked generator resolution
 
@@ -631,7 +680,8 @@ The wrapped model is frozen (`requires_grad=False`) and stays in eval mode even 
 A `ResolvedPlan` must be immutable and include:
 
 - `schema_version` and `resolution_version`; exact operator identities and versions; `frontend` provenance for configuration or callable capture.
-- `input_shape`, `output_shape`, `output_ref`, `dtype`, and `input_dtype`.
+- `input_shape`, `output_shape`, `output_ref`, `dtype`, and `input_dtype`, restating the first external input and the first public output.
+- The ordered external `inputs` (name, contract, dtype) and public `outputs` (name, reference, contract) whenever they are not exactly the single input `x` and the single output `output`. A plan with only those two omits both fields, so its encoding and digests are unchanged.
 - Concrete nodes in stable execution order, each with `id`, `op`, resolved `args`, `inputs` bindings, `outputs`, `input_shapes`, `output_shapes`, and the canonical `initialization`/`trainability` records.
 - Per-node `source` (locations, selected policy identity) and `provenance` (each argument's origin).
 - Semantic and artifact digests.
@@ -650,7 +700,7 @@ The **artifact digest** covers the complete saved plan except its own digest fie
 
 - Construction revalidates the plan, then runs an allocation-free `meta` pass over every node to bound registered storage before allocating anything (§7). The build receipt records `torch_version`, `device`, `dtype`, `initialization_seed`, `seed_mode`, and `state_bytes`.
 - Parameters and buffers are constructed in the plan's compute dtype. A node is constructed under the target device so constructors may allocate normally.
-- A `GraphModule` validates declared external input contracts in `forward(**inputs)` and returns a dictionary keyed by public output names, including for a single output. Both network facades instead accept `forward(x)` and return the selected output tensor, preserving the same contract checks even for a branched graph.
+- A `GraphModule` validates declared external input contracts in `forward(**inputs)`, which accepts exactly the declared input names, and returns a dictionary keyed by public output names in declaration order, including for a single output. A missing, repeated, or undeclared runtime input fails with `E_BINDING` before any node runs. Both network facades instead accept the declared inputs positionally in declaration order, by keyword, or both, and return the selected output tensor for a single public output or the same dictionary for several, preserving the contract checks even for a branched graph.
 - Every port is checked for shape, dtype, and device before and after applying its node, and a module that creates or removes registered state during forward fails with `E_RUNTIME`.
 - Modules register once under `nodes.n_<node_id>`; the prefix avoids collisions with module attribute names. Stateless nodes keep execution/diagnostic identities without state entries. Two nodes sharing a module instance, tensor, or storage fail with `E_REGISTRY`.
 - Nodes run in stable topological order, breaking ties by declaration order. The order is saved in the plan.
@@ -766,6 +816,7 @@ Each gate is required evidence for the contract above; IMPLEMENTATION.md records
 | Backend equivalence | Handwritten PyTorch comparison from identical state: forward values, input/parameter gradients, optimizer updates |
 | Public sequence API | Tensor forward result; complete shape table from `print(model)` without allocation/RNG draws; integer/negative/name lookup and iteration; shared-module slices; stable state keys without double registration; structural assignment rejected |
 | Graph authoring | Single-input current propagation and explicit multi-input ports; branches/joins execute each node once; old tensor references survive rebinding; selected output receives its contract; unused ports allowed but dead nodes fail; node lookup only for branched models |
+| Named external ports | Both frontends declare several named inputs and outputs with one shared batch symbol and per-input dtypes; each declared output receives its contract; unused inputs, unselected outputs, alias collisions, and batch disagreement fail with their codes; multi-port plans round-trip through JSON while a single `x` -> `output` plan keeps its previous encoding and digests; runtime binding by position and keyword, and dictionary results, execute and differentiate |
 | Split | `128 → 64+64` and `160 → 64+96`; inverse size inference; omitted ambiguous size rejected; non-batch positive axis and nonempty sections validated; both outputs preserve autograd |
 | Custom operators | A registry-declared operator resolves through bidirectional shape equality; the DSL's shared symbols, `2*C` scales, literals, ellipsis, variadic inputs, and port dtypes each constrain in both directions; a relation function refines and fails with stable codes; resolution constructs no module; exact identity and version survive persistence |
 | Custom graph | Resolve `2*C`; fan-out works; feature/style gradients are correct; reject incorrect batch/channel contracts |

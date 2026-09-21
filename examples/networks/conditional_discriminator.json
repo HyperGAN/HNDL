@@ -1,0 +1,8 @@
+{
+  "title": "Conditional GAN discriminator",
+  "description": "A conditional discriminator with two named inputs and two named outputs. The one-hot label `y` is projected onto a 28×28 plane and stacked on the image `x` as a second channel; two \"down2\" convolutions reduce the result to a 128×7×7 map. The flattened map is published as `features` for a feature-matching loss, and the head produces raw `logits` — apply a sigmoid, or use BCEWithLogitsLoss, in the loss rather than in the network.",
+  "input_shape": {"x": ["B", 1, 28, 28], "y": ["B", 10]},
+  "output_shape": {"logits": ["B", 1], "features": ["B", 6272]},
+  "parameters": 148337,
+  "reference": "Mirza & Osindero, \"Conditional Generative Adversarial Nets\" (2014), in the usual DCGAN form; 10·784+784 + 2·64·4·4+64 + 64·128·4·4 + 2·128 + 6272+1 = 148,337 parameters."
+}

@@ -4,12 +4,19 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import math
+import re
 from types import MappingProxyType
 from collections.abc import Mapping
 
 from .errors import HNDLError
 from .settings import (normalize_initialization, normalize_trainability,
                        validate_initialization, validate_trainability)
+
+
+EXTERNAL_INPUT = "x"
+EXTERNAL_OUTPUT = "output"
+MAX_EXTERNAL_PORTS = 32
+_PORT_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 
 class Immutable:
@@ -57,6 +64,128 @@ def digest(value):
     return sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def named_contracts(value, label, default_name):
+    """Accept one shape tuple or a mapping of named shapes; keep author order.
+
+    Returns the ordered mapping and whether the author named the ports.
+    """
+    if isinstance(value, Mapping):
+        if not value or len(value) > MAX_EXTERNAL_PORTS:
+            raise HNDLError("E_SCHEMA", f"{label} must name between 1 and {MAX_EXTERNAL_PORTS} tensors")
+        names = tuple(value)
+        for name in names:
+            if type(name) is not str or _PORT_NAME.fullmatch(name) is None:
+                raise HNDLError("E_SCHEMA", f"{label} names must match [a-z][a-z0-9_]*")
+        return {name: _shape(value[name], f"{label}[{name}]") for name in names}, True
+    return {default_name: _shape(value, label)}, False
+
+
+def named_dtypes(value, names, label="input_dtype"):
+    """Accept one dtype for every input or a mapping naming some of them."""
+    if isinstance(value, Mapping):
+        unknown = sorted(set(value) - set(names))
+        if unknown:
+            raise HNDLError("E_SCHEMA", f"{label} names undeclared inputs: {', '.join(unknown)}")
+        return {name: value.get(name) for name in names}
+    return {name: value for name in names}
+
+
+def _shape(value, label):
+    if not isinstance(value, (tuple, list)):
+        raise HNDLError("E_SCHEMA", f"{label} must be a shape tuple including batch, or a mapping of named shapes")
+    return tuple(value)
+
+
+def _external_ports(record):
+    """Derive the canonical port mappings; a single x -> output graph keeps its
+    original fields, so ``named_inputs``/``named_outputs`` stay ``None`` and the
+    saved encoding is unchanged."""
+    if record.input_dtype is None:
+        object.__setattr__(record, "input_dtype", record.dtype)
+    if record.named_inputs is None:
+        inputs = {EXTERNAL_INPUT: {"shape": _shape(record.input_shape, "input_shape"),
+                                   "dtype": record.input_dtype}}
+    else:
+        inputs = {}
+        for name, entry in _entries(record.named_inputs, "inputs", ("shape",), ("dtype",)):
+            inputs[name] = {"shape": _shape(entry["shape"], f"input_shape[{name}]"),
+                            "dtype": entry.get("dtype") or record.dtype}
+    leading = next(iter(inputs.values()))
+    object.__setattr__(record, "input_shape", leading["shape"])
+    object.__setattr__(record, "input_dtype", leading["dtype"])
+    frozen = _frozen_ports(inputs)
+    object.__setattr__(record, "named_inputs", None if tuple(inputs) == (EXTERNAL_INPUT,) else frozen)
+    object.__setattr__(record, "_inputs", frozen)
+    if record.named_outputs is None:
+        outputs = {EXTERNAL_OUTPUT: {"ref": record.output_ref,
+                                     "shape": _shape(record.output_shape, "output_shape")}}
+    else:
+        outputs = {}
+        for name, entry in _entries(record.named_outputs, "outputs", ("ref", "shape"), ()):
+            if not isinstance(entry["ref"], str):
+                raise HNDLError("E_SCHEMA", f"Output {name} must name one tensor reference")
+            outputs[name] = {"ref": entry["ref"], "shape": _shape(entry["shape"], f"output_shape[{name}]")}
+    leading = next(iter(outputs.values()))
+    object.__setattr__(record, "output_ref", leading["ref"])
+    object.__setattr__(record, "output_shape", leading["shape"])
+    frozen = _frozen_ports(outputs)
+    object.__setattr__(record, "named_outputs", None if tuple(outputs) == (EXTERNAL_OUTPUT,) else frozen)
+    object.__setattr__(record, "_outputs", frozen)
+
+
+def _entries(mapping, label, required, optional):
+    if not isinstance(mapping, Mapping) or not mapping or len(mapping) > MAX_EXTERNAL_PORTS:
+        raise HNDLError("E_SCHEMA", f"Graph {label} must be a mapping of 1 to {MAX_EXTERNAL_PORTS} named contracts")
+    for name, entry in mapping.items():
+        if type(name) is not str or _PORT_NAME.fullmatch(name) is None:
+            raise HNDLError("E_SCHEMA", f"External {label} names must match [a-z][a-z0-9_]*")
+        if (not isinstance(entry, Mapping) or set(required) - set(entry)
+                or set(entry) - set(required) - set(optional)):
+            raise HNDLError("E_SCHEMA", f"Each external {label[:-1]} declares {', '.join(required)}")
+        yield name, entry
+
+
+def _saved_ports(items, label, fields):
+    """Restore the ordered named-port arrays a multi-port plan stores."""
+    if type(items) is not list or not items or len(items) > MAX_EXTERNAL_PORTS:
+        raise HNDLError("E_SCHEMA", f"Saved {label} must be an ordered array of named contracts")
+    restored = {}
+    for item in items:
+        if type(item) is not dict or set(item) != set(fields):
+            raise HNDLError("E_SCHEMA", f"Saved {label} require the fields {', '.join(fields)}")
+        entry = dict(item)
+        name = entry.pop("name")
+        if type(name) is not str or name in restored:
+            raise HNDLError("E_SCHEMA", f"Saved {label} names must be unique strings")
+        restored[name] = entry
+    return restored
+
+
+def _frozen_ports(mapping):
+    return MappingProxyType({name: MappingProxyType(dict(entry)) for name, entry in mapping.items()})
+
+
+def contract_header(plan, label):
+    """The one-line contract header shared by plans and built modules."""
+    def shape(value):
+        return "[" + ", ".join(str(part) for part in value) + "]"
+
+    def side(ports, default):
+        if tuple(ports) == (default,):
+            return shape(ports[default]["shape"])
+        return ", ".join(f"{name}={shape(entry['shape'])}" for name, entry in ports.items())
+
+    header = (f"{label}: {side(plan.inputs, EXTERNAL_INPUT)} -> "
+              f"{side(plan.outputs, EXTERNAL_OUTPUT)}  dtype={plan.dtype}")
+    differing = {name: entry["dtype"] for name, entry in plan.inputs.items() if entry["dtype"] != plan.dtype}
+    if differing:
+        if tuple(plan.inputs) == (EXTERNAL_INPUT,):
+            header += f"  input_dtype={plan.input_dtype}"
+        else:
+            header += "  input_dtype=" + ", ".join(f"{name}={value}" for name, value in differing.items())
+    return header
+
+
 @dataclass(frozen=True)
 class Node(Immutable):
     id: str
@@ -86,13 +215,15 @@ class Graph(Immutable):
     dtype: str = "float32"
     frontend: str = "python_config@1"
     input_dtype: object = None
+    named_inputs: object = None
+    named_outputs: object = None
 
     def __post_init__(self):
         object.__setattr__(self, "nodes", tuple(self.nodes))
-        object.__setattr__(self, "input_shape", tuple(self.input_shape))
-        object.__setattr__(self, "output_shape", tuple(self.output_shape))
-        if self.input_dtype is None:
-            object.__setattr__(self, "input_dtype", self.dtype)
+        _external_ports(self)
+
+    inputs = property(lambda self: self._inputs)
+    outputs = property(lambda self: self._outputs)
 
 
 @dataclass(frozen=True)
@@ -129,13 +260,15 @@ class ResolvedPlan(Immutable):
     schema_version: int = 1
     resolution_version: int = 1
     input_dtype: object = None
+    named_inputs: object = None
+    named_outputs: object = None
 
     def __post_init__(self):
         object.__setattr__(self, "nodes", tuple(self.nodes))
-        object.__setattr__(self, "input_shape", tuple(self.input_shape))
-        object.__setattr__(self, "output_shape", tuple(self.output_shape))
-        if self.input_dtype is None:
-            object.__setattr__(self, "input_dtype", self.dtype)
+        _external_ports(self)
+
+    inputs = property(lambda self: self._inputs)
+    outputs = property(lambda self: self._outputs)
 
     def _data(self, *, semantic=False):
         data = {
@@ -145,6 +278,14 @@ class ResolvedPlan(Immutable):
             "input_shape": list(self.input_shape), "output_shape": list(self.output_shape),
             "output_ref": self.output_ref, "dtype": self.dtype, "input_dtype": self.input_dtype,
         }
+        # Named ports are extra fields, so a single x -> output plan keeps the
+        # original encoding and digests byte for byte.
+        if self.named_inputs is not None:
+            data["inputs"] = [{"name": name, "shape": list(entry["shape"]), "dtype": entry["dtype"]}
+                              for name, entry in self.inputs.items()]
+        if self.named_outputs is not None:
+            data["outputs"] = [{"name": name, "ref": entry["ref"], "shape": list(entry["shape"])}
+                               for name, entry in self.outputs.items()]
         if not semantic:
             data["frontend"] = self.frontend
         return data
@@ -177,7 +318,7 @@ class ResolvedPlan(Immutable):
                 raise ValueError("plan must be an object")
             expected = {"schema_version", "resolution_version", "nodes", "input_shape", "output_shape",
                         "output_ref", "dtype", "input_dtype", "frontend", "semantic_digest", "artifact_digest"}
-            if set(data) != expected:
+            if set(data) - {"inputs", "outputs"} != expected:
                 raise ValueError("unexpected or missing plan fields")
             if (type(data["schema_version"]) is not int or data["schema_version"] != 1
                     or type(data["resolution_version"]) is not int or data["resolution_version"] != 1):
@@ -197,6 +338,9 @@ class ResolvedPlan(Immutable):
             if any(type(item) is not dict or set(item) != required_node_fields for item in serialized_nodes):
                 raise HNDLError("E_SCHEMA", "Saved schema 1 nodes require all canonical fields, including initialization and trainability")
             nodes = tuple(ResolvedNode(**item) for item in serialized_nodes)
+            for key, fields in (("inputs", ("name", "shape", "dtype")), ("outputs", ("name", "ref", "shape"))):
+                if key in data:
+                    data[f"named_{key}"] = _saved_ports(data.pop(key), key, fields)
             plan = cls(nodes=nodes, registry=registry, **data)
             if semantic != plan.semantic_digest:
                 raise HNDLError("E_INTEGRITY", "Saved plan semantic digest does not match its contents")
@@ -218,10 +362,7 @@ class ResolvedPlan(Immutable):
     def __repr__(self):
         def shape(value):
             return "[" + ", ".join(str(part) for part in value) + "]"
-        header = f"Network: {shape(self.input_shape)} -> {shape(self.output_shape)}  dtype={self.dtype}"
-        if self.input_dtype != self.dtype:
-            header += f"  input_dtype={self.input_dtype}"
-        lines = [header]
+        lines = [contract_header(self, "Network")]
         rows = [("index", "name", "operation", "input shapes", "output shapes")]
         for index, node in enumerate(self.nodes):
             inputs = ", ".join(f"{key}={shape(value)}" for key, value in node.input_shapes.items())

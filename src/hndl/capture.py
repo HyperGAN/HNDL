@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextvars import ContextVar
 import re
 
 from .errors import HNDLError
 from .registry import Registry, normalize_arguments
 from .settings import normalize_settings
-from .types import Graph, Node
+from .types import (EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, named_contracts,
+                    named_dtypes)
 
 
 _ACTIVE: ContextVar[Capture | None] = ContextVar("hndl_capture", default=None)
@@ -53,14 +55,23 @@ class Capture:
     def __init__(self, *, input_shape, output_shape, dtype="float32", registry=None,
                  frontend="python_callable@1", limits=None, input_dtype=None):
         self.registry = Registry.builtins() if registry is None else registry
-        self.input_shape = tuple(input_shape)
-        self.output_shape = tuple(output_shape)
+        shapes, self.named_inputs = named_contracts(input_shape, "input_shape", EXTERNAL_INPUT)
+        dtypes = named_dtypes(input_dtype, tuple(shapes))
+        self.input_contracts = {name: {"shape": shape, "dtype": dtypes[name] or dtype}
+                                for name, shape in shapes.items()}
+        self.output_contracts, self.named_outputs = named_contracts(output_shape, "output_shape", EXTERNAL_OUTPUT)
+        reserved = sorted((set(self.input_contracts) | set(self.output_contracts)) & set(self.registry.aliases))
+        if reserved:
+            raise HNDLError("E_NAME", f"External port names collide with operator aliases: {', '.join(reserved)}")
+        self.input_shape = next(iter(self.input_contracts.values()))["shape"]
+        self.output_shape = next(iter(self.output_contracts.values()))
         self.dtype = dtype
         self.input_dtype = input_dtype
         self.frontend = frontend
         self.nodes: list[Node] = []
         self._ids: set[str] = set()
-        self.input = Symbol(self, "input:x")
+        self.inputs = {name: Symbol(self, f"input:{name}") for name in self.input_contracts}
+        self.input = next(iter(self.inputs.values()))
         self.current: Symbol | None = self.input
         self.max_nodes = 4096 if limits is None else limits.get("max_nodes", 4096)
         if type(self.max_nodes) is not int or self.max_nodes < 1:
@@ -180,16 +191,41 @@ class Capture:
         return outputs[0] if len(outputs) == 1 else outputs
 
     def finish(self, selected=_DEFAULT):
-        if selected is _DEFAULT:
-            if self.current is None:
-                raise HNDLError("E_CURRENT", "The final operation has no current tensor; select one output explicitly")
-            selected = self.current
-        if not isinstance(selected, Symbol):
-            raise HNDLError("E_OUTPUT", "The selected output must be one symbolic tensor")
-        self._symbol(selected)
+        if self.named_outputs:
+            if not isinstance(selected, Mapping):
+                raise HNDLError("E_OUTPUT", "Named outputs require one symbolic tensor per declared name: "
+                                            + ", ".join(self.output_contracts))
+            declared, supplied = set(self.output_contracts), set(selected)
+            if declared != supplied:
+                details = []
+                if declared - supplied:
+                    details.append("never selected: " + ", ".join(sorted(declared - supplied)))
+                if supplied - declared:
+                    details.append("undeclared: " + ", ".join(sorted(supplied - declared)))
+                raise HNDLError("E_OUTPUT", f"Declared outputs are {', '.join(self.output_contracts)}; "
+                                            + "; ".join(details))
+            chosen = {}
+            for name in self.output_contracts:
+                value = selected[name]
+                if not isinstance(value, Symbol):
+                    raise HNDLError("E_OUTPUT", f"Output {name!r} must be one symbolic tensor")
+                chosen[name] = self._symbol(value)
+        else:
+            if selected is _DEFAULT:
+                if self.current is None:
+                    raise HNDLError("E_CURRENT", "The final operation has no current tensor; select one output explicitly")
+                selected = self.current
+            if not isinstance(selected, Symbol):
+                raise HNDLError("E_OUTPUT", "The selected output must be one symbolic tensor")
+            chosen = {EXTERNAL_OUTPUT: self._symbol(selected)}
+        outputs = {name: {"ref": symbol.ref, "shape": self.output_contracts[name]}
+                   for name, symbol in chosen.items()}
         return Graph(nodes=tuple(self.nodes), input_shape=self.input_shape,
-                     output_shape=self.output_shape, output_ref=selected.ref,
-                     dtype=self.dtype, frontend=self.frontend, input_dtype=self.input_dtype)
+                     output_shape=next(iter(outputs.values()))["shape"],
+                     output_ref=next(iter(outputs.values()))["ref"],
+                     dtype=self.dtype, frontend=self.frontend,
+                     input_dtype=next(iter(self.input_contracts.values()))["dtype"],
+                     named_inputs=self.input_contracts, named_outputs=outputs)
 
 
 class OperatorNamespace:
@@ -224,7 +260,11 @@ def capture_callable(fn, *, input_shape, output_shape, dtype="float32", registry
         raise TypeError("resolve_callable requires a callable, not source text")
     with Capture(input_shape=input_shape, output_shape=output_shape, dtype=dtype,
                  registry=registry, limits=limits, input_dtype=input_dtype) as capture:
-        result = fn(capture.input)
+        # A plain contract keeps the single positional symbol; named contracts
+        # hand every input to its own keyword parameter.
+        result = fn(**capture.inputs) if capture.named_inputs else fn(capture.input)
+        if capture.named_outputs:
+            return capture.finish(result)
         return capture.finish(_DEFAULT if result is None else result)
 
 

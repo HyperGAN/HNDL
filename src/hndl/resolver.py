@@ -8,7 +8,7 @@ import re
 from .errors import HNDLError
 from .operator import COMPUTE_DTYPES, ELLIPSIS, INDEX_DTYPES, NodeView, SUPPORTED_RANKS, Sym
 from .registry import Registry, normalize_arguments
-from .types import Graph, Node, ResolvedNode, ResolvedPlan
+from .types import EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, ResolvedNode, ResolvedPlan
 
 
 DEFAULT_LIMITS = {
@@ -85,10 +85,12 @@ def _ordered_nodes(graph, registry, limits):
         lookup[node.id] = replace(node, args=args, source=source)
         specs[node.id] = spec
         declarations[node.id] = index
-    refs = {"input:x"}
+    external = {f"input:{name}" for name in graph.inputs}
+    refs = set(external)
     refs.update(f"node:{node.id}/{port}" for node in lookup.values() for port in node.outputs)
-    if not isinstance(graph.output_ref, str) or graph.output_ref not in refs:
-        raise HNDLError("E_BINDING", f"Unknown public output reference {graph.output_ref!r}")
+    for entry in graph.outputs.values():
+        if not isinstance(entry["ref"], str) or entry["ref"] not in refs:
+            raise HNDLError("E_BINDING", f"Unknown public output reference {entry['ref']!r}")
     dependencies = {}
     consumers = {node_id: [] for node_id in lookup}
     for node in lookup.values():
@@ -96,7 +98,7 @@ def _ordered_nodes(graph, registry, limits):
         for ref in node.inputs.values():
             if not isinstance(ref, str) or ref not in refs:
                 raise HNDLError("E_BINDING", f"Unknown input reference {ref!r}", node=node.id)
-            if ref != "input:x":
+            if ref not in external:
                 deps.add(ref[5:].split("/", 1)[0])
         dependencies[node.id] = deps
         for dep in deps:
@@ -115,7 +117,8 @@ def _ordered_nodes(graph, registry, limits):
     if len(ordered) != len(lookup):
         raise HNDLError("E_BINDING", "Graph contains a cycle")
     reachable = set()
-    queue = [] if graph.output_ref == "input:x" else [graph.output_ref[5:].split("/", 1)[0]]
+    queue = [entry["ref"][5:].split("/", 1)[0] for entry in graph.outputs.values()
+             if entry["ref"] not in external]
     while queue:
         key = queue.pop()
         if key not in reachable:
@@ -124,8 +127,15 @@ def _ordered_nodes(graph, registry, limits):
     dead = set(lookup) - reachable
     if dead:
         raise HNDLError("E_BINDING", f"Nodes do not reach the selected output: {', '.join(sorted(dead))}")
+    # Every declared input must reach the graph; a silently ignored contract is
+    # an author error, not an implicit optional input.
+    used = {ref for node_id in reachable for ref in lookup[node_id].inputs.values()}
+    used.update(entry["ref"] for entry in graph.outputs.values())
+    unused = [name for name in graph.inputs if f"input:{name}" not in used]
+    if unused:
+        raise HNDLError("E_BINDING", f"Declared inputs are never used: {', '.join(unused)}")
     # Port dtypes are static per operator; check every edge once.
-    dtypes = {"input:x": graph.input_dtype}
+    dtypes = {f"input:{name}": entry["dtype"] for name, entry in graph.inputs.items()}
     for node in ordered:
         spec = specs[node.id]
         for port, ref in node.inputs.items():
@@ -143,12 +153,13 @@ class _Solver:
         self.graph, self.nodes, self.specs, self.limits = graph, nodes, specs, limits
         self.dtypes = {} if dtypes is None else dtypes
         self.batch = graph.input_shape[0]
-        self.shapes = {"input:x": list(graph.input_shape)}
+        self.shapes = {f"input:{name}": list(entry["shape"]) for name, entry in graph.inputs.items()}
         self.args = {node.id: dict(node.args) for node in nodes}
         self.changed = False
         self.node = None
         self.intervals = {}
-        self.set_shape(graph.output_ref, graph.output_shape)
+        for entry in graph.outputs.values():
+            self.set_shape(entry["ref"], entry["shape"])
 
     def error(self, code, message):
         source = self.node.source if self.node and self.node.source else {}
@@ -368,23 +379,37 @@ def resolve_graph(graph, registry=None, limits=None):
     limits = _limits(limits)
     if graph.dtype not in COMPUTE_DTYPES:
         raise HNDLError("E_SCHEMA", f"dtype must be one of {', '.join(COMPUTE_DTYPES)}")
-    if graph.input_dtype not in COMPUTE_DTYPES + INDEX_DTYPES:
-        raise HNDLError("E_SCHEMA", f"input_dtype must be one of {', '.join(COMPUTE_DTYPES + INDEX_DTYPES)}")
-    if graph.input_dtype in COMPUTE_DTYPES and graph.input_dtype != graph.dtype:
-        raise HNDLError("E_SCHEMA", "A floating-point input_dtype must equal the plan dtype")
     if not isinstance(graph.frontend, str) or len(graph.frontend) > 256:
         raise HNDLError("E_SCHEMA", "Frontend provenance must be a bounded string")
-    input_shape = _contract(graph.input_shape, "input_shape", limits)
-    output_shape = _contract(graph.output_shape, "output_shape", limits)
-    if input_shape[0] != output_shape[0]:
+    single_input = tuple(graph.inputs) == (EXTERNAL_INPUT,)
+    inputs = {}
+    for name, entry in graph.inputs.items():
+        label = "input_shape" if single_input else f"input_shape[{name}]"
+        dtype_label = "input_dtype" if single_input else f"input_dtype[{name}]"
+        if entry["dtype"] not in COMPUTE_DTYPES + INDEX_DTYPES:
+            raise HNDLError("E_SCHEMA", f"{dtype_label} must be one of {', '.join(COMPUTE_DTYPES + INDEX_DTYPES)}")
+        if entry["dtype"] in COMPUTE_DTYPES and entry["dtype"] != graph.dtype:
+            raise HNDLError("E_SCHEMA", "A floating-point input_dtype must equal the plan dtype")
+        inputs[name] = {"shape": _contract(entry["shape"], label, limits), "dtype": entry["dtype"]}
+    single_output = tuple(graph.outputs) == (EXTERNAL_OUTPUT,)
+    outputs = {}
+    for name, entry in graph.outputs.items():
+        label = "output_shape" if single_output else f"output_shape[{name}]"
+        outputs[name] = {"ref": entry["ref"], "shape": _contract(entry["shape"], label, limits)}
+    # One shared batch symbol ties every external contract together.
+    batches = {entry["shape"][0] for entry in (*inputs.values(), *outputs.values())}
+    if len(batches) > 1:
         raise HNDLError("E_CONSTRAINT", "Input and output must declare the same batch dimension")
     nodes, specs, dtypes = _ordered_nodes(graph, registry, limits)
     solver = _Solver(graph, nodes, specs, limits, dtypes)
     # Relations that look up host-registered providers see this registry, never a global.
     with registry.activated():
         resolved = solver.run()
-    return ResolvedPlan(resolved, input_shape, output_shape, graph.output_ref, graph.dtype, graph.frontend, registry,
-                        input_dtype=graph.input_dtype)
+    leading_input = next(iter(inputs.values()))
+    leading_output = next(iter(outputs.values()))
+    return ResolvedPlan(resolved, leading_input["shape"], leading_output["shape"], leading_output["ref"],
+                        graph.dtype, graph.frontend, registry, input_dtype=leading_input["dtype"],
+                        named_inputs=inputs, named_outputs=outputs)
 
 
 def validate_concrete_plan(plan, *, registry=None, limits=None):
@@ -405,7 +430,8 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
     graph = Graph(tuple(Node(node.id, node.op, node.args, node.inputs, node.outputs, node.source,
                              initialization=node.initialization, trainability=node.trainability) for node in plan.nodes),
                   plan.input_shape, plan.output_shape, plan.output_ref, plan.dtype, plan.frontend,
-                  input_dtype=plan.input_dtype)
+                  input_dtype=plan.input_dtype, named_inputs=plan.named_inputs,
+                  named_outputs=plan.named_outputs)
     verified = resolve_graph(graph, registry, bounds)
     if plan.semantic_digest != verified.semantic_digest:
         raise HNDLError("E_INTEGRITY", "Saved concrete arguments and port shapes are inconsistent; no inferred replacement is accepted")

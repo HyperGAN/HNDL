@@ -39,6 +39,20 @@ style = linear(w, name="style", init={"weight": 0, "bias": 0})
 adaptive_norm(features, style, name="norm")
 '''
 
+CONDITIONAL = '''
+joined = concat(z, y, name="joined")
+linear(joined, 16, name="project")
+features = relu(name="features")
+logits = linear(1, name="head")
+'''
+
+# Named external ports, pinned alongside the node table of the same case.
+PORTS = {
+    "conditional": ({"z": ("B", 8), "y": ("B", 4)},
+                    {"logits": ("B", 1), "features": ("B", 16)},
+                    {"logits": "node:head/out", "features": "node:features/out"}),
+}
+
 CASES = {
     "mlp": ("linear(64); relu(); linear()", ("B", 128), ("B", 10), [
         ("n0", "linear@1", {"out_features": 64, "in_features": 128, "bias": True, "spectral_norm": False}, {"x": ("B", 128)}, {"out": ("B", 64)}),
@@ -82,6 +96,15 @@ CASES = {
         ("style", "linear@1", {"out_features": 128, "in_features": 256, "bias": True, "spectral_norm": False}, {"x": ("B", 256)}, {"out": ("B", 128)}),
         ("norm", "adaptive_norm@1", {"eps": 1e-5}, {"x": ("B", 64, 4, 4), "params": ("B", 128)}, {"out": ("B", 64, 4, 4)}),
     ]),
+    "conditional": (CONDITIONAL, {"z": ("B", 8), "y": ("B", 4)},
+                    {"logits": ("B", 1), "features": ("B", 16)}, [
+        ("joined", "concat@1", {"axis": 1, "input_count": 2}, {"x0": ("B", 8), "x1": ("B", 4)}, {"out": ("B", 12)}),
+        ("project", "linear@1", {"out_features": 16, "in_features": 12, "bias": True, "spectral_norm": False},
+         {"x": ("B", 12)}, {"out": ("B", 16)}),
+        ("features", "relu@1", {}, {"x": ("B", 16)}, {"out": ("B", 16)}),
+        ("head", "linear@1", {"out_features": 1, "in_features": 16, "bias": True, "spectral_norm": False},
+         {"x": ("B", 16)}, {"out": ("B", 1)}),
+    ]),
 }
 
 
@@ -93,3 +116,8 @@ def test_golden_plan(case):
               for node in plan.nodes]
     assert actual == expected
     assert plan.semantic_digest == type(plan).from_json(plan.to_json()).semantic_digest
+    if case in PORTS:
+        inputs, outputs, refs = PORTS[case]
+        assert {name: entry["shape"] for name, entry in plan.inputs.items()} == inputs
+        assert {name: entry["shape"] for name, entry in plan.outputs.items()} == outputs
+        assert {name: entry["ref"] for name, entry in plan.outputs.items()} == refs
