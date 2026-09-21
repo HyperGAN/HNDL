@@ -328,7 +328,8 @@ def parameter_counts(plan, *, registry=None):
     for node in plan.nodes:
         spec = registry.by_identity(node.op)
         try:
-            layer = construct(spec, node, "meta", DTYPES[plan.dtype])
+            with registry.activated():
+                layer = construct(spec, node, "meta", DTYPES[plan.dtype])
         except Exception:
             counts[node.id] = None
             continue
@@ -435,7 +436,8 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     unbounded = []
     for node in plan.nodes:
         try:
-            probe = construct(specs[node.id], node, "meta", dtype)
+            with registry.activated():
+                probe = construct(specs[node.id], node, "meta", dtype)
         except Exception:
             unbounded.append(node.id)
             continue
@@ -459,7 +461,7 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
         for owners, key in owned:
             owners[key] = node_id
 
-    with _initialization_rng(device, initialization_seed):
+    with registry.activated(), _initialization_rng(device, initialization_seed):
         for node in plan.nodes:
             layer = construct(specs[node.id], node, device, dtype)
             check_ownership(layer, node.id)

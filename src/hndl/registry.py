@@ -1,9 +1,14 @@
 """Operator registries: exact alias/identity bindings and argument normalization."""
 
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from .errors import HNDLError
 from .operator import Operator, make_operator
+
+_ACTIVE = ContextVar("hndl_active_registry", default=None)
+MAX_PROVIDER_NAME = 64
 
 
 class Registry:
@@ -12,6 +17,7 @@ class Registry:
     def __init__(self):
         self._aliases = {}
         self._identities = {}
+        self._pretrained_providers = {}
 
     @property
     def aliases(self):
@@ -68,6 +74,47 @@ class Registry:
             return self._identities[identity]
         except (KeyError, TypeError):
             raise HNDLError("E_STATE_VERSION", f"Operator {identity!r} is unavailable; supply its exact compatible registration") from None
+
+    # -- pretrained architecture providers -------------------------------------------------
+    #
+    # A provider is trusted host Python, never something configuration selects:
+    # the host registers a zero-argument callable that returns the ``nn.Module``
+    # a local ``.pth`` checkpoint belongs to, and configuration may only name an
+    # already registered provider. Providers live on this instance, so a
+    # provider added to one ``Registry.builtins()`` is invisible to the next.
+
+    @property
+    def pretrained_providers(self):
+        return tuple(self._pretrained_providers)
+
+    def pretrained_provider(self, name, build):
+        """Register a trusted architecture builder for ``pretrained(..., provider=name)``."""
+        if type(name) is not str or not name or len(name) > MAX_PROVIDER_NAME:
+            raise HNDLError("E_REGISTRY", f"A pretrained provider name must be a string of 1-{MAX_PROVIDER_NAME} characters")
+        if not callable(build):
+            raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} must be a callable returning an nn.Module")
+        if name in self._pretrained_providers:
+            raise HNDLError("E_REGISTRY", f"Duplicate pretrained provider {name!r}")
+        self._pretrained_providers[name] = build
+        return build
+
+    def pretrained_builder(self, name):
+        """The registered builder for ``name``, or None."""
+        return self._pretrained_providers.get(name)
+
+    @contextmanager
+    def activated(self):
+        """Make this registry the one provider lookups see on this thread/task."""
+        token = _ACTIVE.set(self)
+        try:
+            yield self
+        finally:
+            _ACTIVE.reset(token)
+
+    @classmethod
+    def active(cls):
+        """The registry a resolution or build is currently running under, or None."""
+        return _ACTIVE.get()
 
 
 def normalize_arguments(op, positional, kwargs, policy=None):
