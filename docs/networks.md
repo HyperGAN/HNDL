@@ -457,6 +457,101 @@ index  name       operation        input shapes         output shapes
 
 Parameters: 11,689,512. He et al., "Deep Residual Learning for Image Recognition" (CVPR 2016), configuration ResNet-18; the count equals torchvision.models.resnet18(), sum(p.numel() for p in m.parameters()) == 11,689,512, because hndl's resblock is torchvision's BasicBlock — bias-free 3×3 convolutions with batch norm, and a 1×1 convolution plus norm on each downsampling shortcut.
 
+## Small U-Net
+
+An encoder–decoder with skip connections for 32×32 segmentation: two 16- and 32-channel down stages, a 64-channel bottleneck, and two up stages that concatenate the matching encoder tensor before convolving. The single output channel of the 1×1 head is inferred from the output contract.
+
+`examples/networks/unet_small.hndl`
+
+```python
+# A small U-Net for 32×32 segmentation: two down stages, a bottleneck, two up
+# stages. Every 3×3 convolution uses padding 1, so only the pools and the
+# upsamples change the resolution.
+
+# --- Encoder stage 1: 32×32, 16 channels --------------------------------------
+conv(16, kernel_size=3, padding=1)
+relu()
+conv(16, kernel_size=3, padding=1)
+skip1 = relu(name="skip1")           # [B, 16, 32, 32], kept for the last merge
+max_pool(2)                          # -> 16×16
+
+# --- Encoder stage 2: 16×16, 32 channels --------------------------------------
+conv(32, kernel_size=3, padding=1)
+relu()
+conv(32, kernel_size=3, padding=1)
+skip2 = relu(name="skip2")           # [B, 32, 16, 16], kept for the first merge
+max_pool(2)                          # -> 8×8
+
+# --- Bottleneck: 8×8, 64 channels ---------------------------------------------
+conv(64, kernel_size=3, padding=1)
+relu()
+conv(64, kernel_size=3, padding=1)
+relu()
+
+# --- Decoder stage 2: back to 16×16 -------------------------------------------
+upsample(2)                          # nearest-neighbour, no parameters
+conv(32, kernel_size=3, padding=1)   # the "up-conv" that halves the channels
+upconv2 = relu(name="upconv2")
+concat(skip2, upconv2)               # 32 + 32 -> 64 channels
+conv(32, kernel_size=3, padding=1)
+relu()
+conv(32, kernel_size=3, padding=1)
+relu()
+
+# --- Decoder stage 1: back to 32×32 -------------------------------------------
+upsample(2)
+conv(16, kernel_size=3, padding=1)
+upconv1 = relu(name="upconv1")
+concat(skip1, upconv1)               # 16 + 16 -> 32 channels
+conv(16, kernel_size=3, padding=1)
+relu()
+conv(16, kernel_size=3, padding=1)
+relu()
+
+# --- Head: one logit per pixel; the single channel comes from the contract ----
+conv(kernel_size=1, name="logits")
+```
+
+Input `['B', 3, 32, 32]` → output `['B', 1, 32, 32]`.
+
+```text
+Network: [B, 3, 32, 32] -> [B, 1, 32, 32]  dtype=float32
+index  name     operation  input shapes                            output shapes
+0      n0       conv       x=[B, 3, 32, 32]                        out=[B, 16, 32, 32]
+1      n1       relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
+2      n2       conv       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
+3      skip1    relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
+4      n4       max_pool   x=[B, 16, 32, 32]                       out=[B, 16, 16, 16]
+5      n5       conv       x=[B, 16, 16, 16]                       out=[B, 32, 16, 16]
+6      n6       relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
+7      n7       conv       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
+8      skip2    relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
+9      n9       max_pool   x=[B, 32, 16, 16]                       out=[B, 32, 8, 8]
+10     n10      conv       x=[B, 32, 8, 8]                         out=[B, 64, 8, 8]
+11     n11      relu       x=[B, 64, 8, 8]                         out=[B, 64, 8, 8]
+12     n12      conv       x=[B, 64, 8, 8]                         out=[B, 64, 8, 8]
+13     n13      relu       x=[B, 64, 8, 8]                         out=[B, 64, 8, 8]
+14     n14      upsample   x=[B, 64, 8, 8]                         out=[B, 64, 16, 16]
+15     n15      conv       x=[B, 64, 16, 16]                       out=[B, 32, 16, 16]
+16     upconv2  relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
+17     n17      concat     x0=[B, 32, 16, 16], x1=[B, 32, 16, 16]  out=[B, 64, 16, 16]
+18     n18      conv       x=[B, 64, 16, 16]                       out=[B, 32, 16, 16]
+19     n19      relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
+20     n20      conv       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
+21     n21      relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
+22     n22      upsample   x=[B, 32, 16, 16]                       out=[B, 32, 32, 32]
+23     n23      conv       x=[B, 32, 32, 32]                       out=[B, 16, 32, 32]
+24     upconv1  relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
+25     n25      concat     x0=[B, 16, 32, 32], x1=[B, 16, 32, 32]  out=[B, 32, 32, 32]
+26     n26      conv       x=[B, 32, 32, 32]                       out=[B, 16, 32, 32]
+27     n27      relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
+28     n28      conv       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
+29     n29      relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
+30     logits   conv       x=[B, 16, 32, 32]                       out=[B, 1, 32, 32]
+```
+
+Parameters: 129,841. Ronneberger, Fischer & Brox, "U-Net: Convolutional Networks for Biomedical Image Segmentation" (MICCAI 2015), scaled down to 16/32/64 channels with padded 3×3 convolutions and nearest-neighbour up-convolutions; the count was checked against the same architecture written as a plain torch.nn.Module (448 + 2320 + 4640 + 9248 + 18496 + 36928 + 18464 + 18464 + 9248 + 4624 + 4624 + 2320 + 17 = 129,841 over its 13 convolutions).
+
 ## Tiny Vision Transformer
 
 A ViT-Tiny-shaped classifier for 32×32 RGB images: a 4×4 patch stem of width 192, a learned class token and position table, four pre-norm transformer blocks with 3 heads, then a final layer norm and a linear head read off the class position.
