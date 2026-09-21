@@ -79,8 +79,6 @@ class Graph:
 class ResolvedNode(Node):
     input_shapes: Mapping = field(default_factory=dict)
     output_shapes: Mapping = field(default_factory=dict)
-    state_bytes: int = 0
-    state_version: int = 1
     provenance: Mapping = field(default_factory=dict)
 
     def __post_init__(self):
@@ -91,7 +89,7 @@ class ResolvedNode(Node):
 
     def to_dict(self, *, semantic=False):
         result = {key: plain(getattr(self, key)) for key in (
-            "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes", "state_bytes", "state_version",
+            "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
             "initialization", "trainability"
         )}
         if not semantic:
@@ -131,10 +129,6 @@ class ResolvedPlan:
     @property
     def semantic_digest(self):
         return digest(self._data(semantic=True))
-
-    @property
-    def state_bytes(self):
-        return sum(node.state_bytes for node in self.nodes)
 
     def to_json(self):
         data = self._data()
@@ -176,7 +170,7 @@ class ResolvedPlan:
             if len(serialized_nodes) > _limits(limits)["max_nodes"]:
                 raise HNDLError("E_RESOURCE", "Saved plan exceeds max_nodes")
             required_node_fields = {"id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
-                                    "state_bytes", "state_version", "initialization", "trainability", "source", "provenance"}
+                                    "initialization", "trainability", "source", "provenance"}
             if any(type(item) is not dict or set(item) != required_node_fields for item in serialized_nodes):
                 raise HNDLError("E_SCHEMA", "Saved schema 1 nodes require all canonical fields, including initialization and trainability")
             nodes = tuple(ResolvedNode(**item) for item in serialized_nodes)
@@ -202,7 +196,7 @@ class ResolvedPlan:
         return "\n".join(lines)
 
     def describe(self):
-        lines = [repr(self), f"Semantic digest: {self.semantic_digest}", f"Registered state bound: {self.state_bytes} bytes"]
+        lines = [repr(self), f"Semantic digest: {self.semantic_digest}"]
         for node in self.nodes:
             lines.append(f"{node.id}: " + ", ".join(f"{key}={plain(value)}" for key, value in node.provenance.items()))
             lines.append(f"  initialization={plain(node.initialization)}, trainability={plain(node.trainability)}")

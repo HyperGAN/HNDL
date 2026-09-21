@@ -217,19 +217,3 @@ def test_public_split_infers_omitted_size_from_selected_remainder():
     assert plan.nodes[0].args["size"] == 96
     with pytest.raises(HNDLError, match="E_BINDING"):
         resolve("linear(64)\nout = x", input_shape=("B", 128), output_shape=("B", 128))
-
-
-def test_import_and_resolution_do_not_load_torch():
-    script = '''
-import builtins
-original = builtins.__import__
-def guarded(name, *args, **kwargs):
-    if name == "torch" or name.startswith("torch."):
-        raise AssertionError("pure frontend imported torch")
-    return original(name, *args, **kwargs)
-builtins.__import__ = guarded
-from hndl import resolve, resolve_callable, ops
-resolve("linear(4)", input_shape=("B", 8), output_shape=("B", 4))
-resolve_callable(lambda x: ops.linear(4), input_shape=("B", 8), output_shape=("B", 4))
-'''
-    subprocess.run([sys.executable, "-c", script], check=True, timeout=15)

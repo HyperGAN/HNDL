@@ -2,8 +2,10 @@ from dataclasses import replace
 
 import pytest
 
+from torch import nn
+
+from hndl import Registry
 from hndl.errors import HNDLError
-from hndl.registry import Registry, preserves_shape
 from hndl.resolver import resolve_graph
 from hndl.types import Graph, Node
 
@@ -90,14 +92,18 @@ def test_concat_backward_width_and_add_shape_conflict():
 def test_group_norm_divisibility_and_flatten():
     good = chain([("group_norm", {"num_groups": 2}), ("flatten", {})], ("B", 4, 3, 3), ("B", 36))
     plan = resolve_graph(good)
-    assert plan.nodes[0].state_bytes == 32
+    assert plan.nodes[0].args["num_channels"] == 4
     with pytest.raises(HNDLError, match="must divide"):
         resolve_graph(replace(good, nodes=(replace(good.nodes[0], args={"num_groups": 3}), good.nodes[1])))
 
 
-def test_custom_shape_provider_has_bidirectional_relations_and_state_bound():
+def test_custom_shape_preserving_operator_has_bidirectional_relations():
     registry = Registry.builtins()
-    registry.register("silu", identity="example.silu", version=1, shape=preserves_shape, max_state_bytes=0)
+
+    @registry.operator("silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
+    class SiLU(nn.SiLU):
+        pass
+
     graph = chain([("linear", {}), ("example.silu", {})], ("B", 128), ("B", 10))
     plan = resolve_graph(graph, registry)
     assert plan.nodes[0].args["out_features"] == 10
@@ -109,9 +115,9 @@ def test_identity_and_resource_limits():
     assert resolve_graph(identity).nodes == ()
     with pytest.raises(HNDLError, match="E_CONSTRAINT"):
         resolve_graph(replace(identity, output_shape=("B", 5)))
-    graph = chain([("linear", {})], ("B", 128), ("B", 128))
-    with pytest.raises(HNDLError, match="max_state_bytes"):
-        resolve_graph(graph, limits={"max_state_bytes": 1024})
+    graph = chain([("linear", {})] * 5000, ("B", 4), ("B", 4))
+    with pytest.raises(HNDLError, match="max_nodes"):
+        resolve_graph(graph)
 
 
 def test_cycle_and_dead_nodes_rejected_and_topology_stable():

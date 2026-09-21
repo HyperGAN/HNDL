@@ -6,8 +6,8 @@ from math import prod
 import re
 
 from .errors import HNDLError
-from .registry import Registry, normalize_arguments, preserves_shape
-from .schema import Dim, ShapeRule
+from .operator import ELLIPSIS, NodeView, SUPPORTED_RANKS, Sym
+from .registry import Registry, normalize_arguments
 from .types import Graph, Node, ResolvedNode, ResolvedPlan
 
 
@@ -31,8 +31,9 @@ def _limits(overrides):
 
 
 def _contract(shape, label, limits):
-    if not isinstance(shape, (tuple, list)) or len(shape) not in (2, 4):
-        raise HNDLError("E_SCHEMA", f"{label} must include batch and have rank 2 (BF) or 4 (NCHW)")
+    if not isinstance(shape, (tuple, list)) or len(shape) not in SUPPORTED_RANKS:
+        ranks = ", ".join(map(str, SUPPORTED_RANKS))
+        raise HNDLError("E_SCHEMA", f"{label} must include batch and have a supported rank ({ranks})")
     for axis, value in enumerate(shape):
         if axis == 0 and value == "B":
             continue
@@ -66,18 +67,19 @@ def _ordered_nodes(graph, registry, limits):
         if node.source is not None and not isinstance(node.source, Mapping):
             raise HNDLError("E_SCHEMA", "Node source metadata must be a mapping", node=node.id)
         args = normalize_arguments(spec, (), node.args)
-        if spec.variadic_inputs and args["input_count"] > limits["max_edges"]:
-            raise HNDLError("E_RESOURCE", "concat input_count exceeds max_edges", node=node.id)
+        if spec.variadic is not None and args["input_count"] > limits["max_edges"]:
+            raise HNDLError("E_RESOURCE", f"{spec.alias} input_count exceeds max_edges", node=node.id)
         source = dict(node.source or {})
         origins = {key: "explicit" if key in node.args else "operator default" for key in args}
         if "policy" in node.args:
-            source["policy"] = "spatial.up2_transpose@1"
-            for key in ("kernel_size", "stride", "padding", "dilation", "output_padding", "groups"):
+            policy = spec.policies[node.args["policy"]]
+            source["policy"] = policy.identity
+            for key in policy.requires:
                 if key not in node.args:
                     origins[key] = "policy-selected"
         origins.update(source.get("argument_origins", {}))
         source["argument_origins"] = origins
-        ports = tuple(f"x{i}" for i in range(args["input_count"])) if spec.variadic_inputs else spec.input_ports
+        ports = spec.input_ports_for(args)
         if set(node.inputs) != set(ports):
             raise HNDLError("E_BINDING", f"Required input ports are {ports}, got {tuple(node.inputs)}", node=node.id)
         lookup[node.id] = replace(node, args=args, source=source)
@@ -143,7 +145,7 @@ class _Solver:
 
     def set_shape(self, ref, values, code="E_CONSTRAINT"):
         values = list(values)
-        if len(values) not in (2, 4):
+        if len(values) not in SUPPORTED_RANKS:
             self.error(code, f"Unsupported tensor rank {len(values)} at {ref}")
         for axis, value in enumerate(values):
             if value is None:
@@ -222,176 +224,87 @@ class _Solver:
                     self.error("E_RESHAPE", f"Element count {total} is not divisible by known reshape product {known}")
                 self.axis(ref, missing[0], total // known, "E_RESHAPE")
 
+    def interval(self, ref, axis, lower, upper):
+        """Intersect a bounded inverse interval, fixing the axis when it collapses."""
+        previous = self.intervals.get((ref, axis))
+        if previous:
+            lower, upper = max(lower, previous[0]), min(upper, previous[1])
+        if lower > upper:
+            self.error("E_CONSTRAINT", "Convolution inverse intervals are incompatible")
+        self.intervals[ref, axis] = (lower, upper)
+        shape = self.shapes.get(ref)
+        known = shape[axis] if shape is not None and axis < len(shape) else None
+        if known is not None and not lower <= known <= upper:
+            self.error("E_CONSTRAINT", f"Input extent {known} lies outside required [{lower}, {upper}]")
+        if lower == upper:
+            self.axis(ref, axis, lower)
+
     def apply(self, node):
         self.node = node
         spec = self.specs[node.id]
-        kind, args = spec.identity, self.args[node.id]
-        ports = node.inputs
-        outs = {port: f"node:{node.id}/{port}" for port in node.outputs}
-        x = ports.get("x")
-        y = outs.get("out")
-        if spec.shape is preserves_shape:
-            self.equal(ports[spec.input_ports[0]], outs[spec.output_ports[0]])
-            return
-        if type(spec.shape) is ShapeRule:
-            self.patterns(spec.shape, ports, outs)
-            return
-        if kind in ("relu", "leaky_relu", "tanh", "group_norm"):
-            self.equal(x, y)
-            if kind == "group_norm" and x in self.shapes:
-                channels = self.shapes[x][1]
-                if "num_channels" in args:
-                    self.axis(x, 1, args["num_channels"])
-                    channels = args["num_channels"]
-                if channels is not None:
-                    if channels % args["num_groups"]:
-                        self.error("E_CONSTRAINT", f"num_groups={args['num_groups']} must divide channels={channels}")
-                    self.argument(args, "num_channels", channels)
-            return
-        if kind == "linear":
-            a, b = self.rank(x, 2), self.rank(y, 2)
-            self.axis(x, 1, args.get("in_features"))
-            self.axis(y, 1, args.get("out_features"))
-            self.argument(args, "in_features", a[1])
-            self.argument(args, "out_features", b[1])
-        elif kind in ("reshape", "flatten"):
-            if kind == "flatten":
-                self.rank(y, 2)
-            else:
-                prefix = args["shape"]
-                if len(prefix) >= 2:
-                    self.rank(y, 4)
-                if y in self.shapes:
-                    if len(prefix) >= len(self.shapes[y]):
-                        self.error("E_RESHAPE", "Reshape prefix exceeds the output rank")
-                    for axis, value in enumerate(prefix, 1):
-                        self.axis(y, axis, value, "E_RESHAPE")
-            self.product(x, y)
-        elif kind in ("conv2d", "conv_transpose2d"):
-            a, b = self.rank(x, 4), self.rank(y, 4)
-            self.axis(x, 1, args.get("in_channels"))
-            self.axis(y, 1, args.get("out_channels"))
-            self.argument(args, "in_channels", a[1])
-            self.argument(args, "out_channels", b[1])
-            for channels in (a[1], b[1]):
-                if channels is not None and channels % args["groups"]:
-                    self.error("E_CONSTRAINT", f"groups={args['groups']} must divide input and output channels")
-            for j in range(2):
-                axis = j + 2
-                k, stride, pad, dilation = (args[key][j] for key in ("kernel_size", "stride", "padding", "dilation"))
-                i, o = a[axis], b[axis]
-                if i is not None:
-                    result = ((i + 2 * pad - dilation * (k - 1) - 1) // stride + 1
-                              if kind == "conv2d" else
-                              (i - 1) * stride - 2 * pad + dilation * (k - 1) + args["output_padding"][j] + 1)
-                    self.axis(y, axis, result)
-                if o is not None:
-                    if kind == "conv_transpose2d":
-                        numerator = o + 2 * pad - dilation * (k - 1) - args["output_padding"][j] - 1
-                        if numerator % stride:
-                            self.error("E_CONSTRAINT", f"Target extent {o} requires a non-integer transpose-convolution input")
-                        self.axis(x, axis, numerator // stride + 1)
-                    else:
-                        lower = max(1, (o - 1) * stride - 2 * pad + dilation * (k - 1) + 1)
-                        upper = o * stride - 2 * pad + dilation * (k - 1)
-                        if lower > upper:
-                            self.error("E_CONSTRAINT", "Convolution inverse has no positive input extent")
-                        previous = self.intervals.get((x, axis))
-                        if previous:
-                            lower, upper = max(lower, previous[0]), min(upper, previous[1])
-                        if lower > upper:
-                            self.error("E_CONSTRAINT", "Convolution inverse intervals are incompatible")
-                        self.intervals[x, axis] = (lower, upper)
-                        if i is not None and not lower <= i <= upper:
-                            self.error("E_CONSTRAINT", f"Input extent {i} lies outside required [{lower}, {upper}]")
-                        if lower == upper:
-                            self.axis(x, axis, lower)
-        elif kind == "add":
-            self.equal(ports["a"], y)
-            self.equal(ports["b"], y)
-        elif kind == "split":
-            first, rest = outs["first"], outs["rest"]
-            known = next((self.shapes[r] for r in (x, first, rest) if r in self.shapes), None)
-            if known is None:
-                return
-            dim = args["dim"]
-            if dim >= len(known):
-                self.error("E_ARGUMENT", f"split dim {dim} is outside rank {len(known)}")
-            for ref in (x, first, rest):
-                self.rank(ref, len(known))
-            for axis in range(1, len(known)):
-                if axis != dim:
-                    for a_ref in (x, first, rest):
-                        for b_ref in (x, first, rest):
-                            self.axis(a_ref, axis, self.shapes[b_ref][axis])
-            self.axis(first, dim, args.get("size"))
-            i, a, b = (self.shapes[ref][dim] for ref in (x, first, rest))
-            if a is not None and b is not None:
-                self.axis(x, dim, a + b)
-            if i is not None and a is not None:
-                self.axis(rest, dim, i - a)
-            if i is not None and b is not None:
-                self.axis(first, dim, i - b)
-            self.argument(args, "size", self.shapes[first][dim])
-        elif kind == "concat":
-            refs = tuple(ports[f"x{i}"] for i in range(args["input_count"]))
-            all_refs = refs + (y,)
-            known = next((self.shapes[r] for r in all_refs if r in self.shapes), None)
-            if known is None:
-                return
-            axis = args["axis"]
-            if axis >= len(known):
-                self.error("E_ARGUMENT", f"concat axis {axis} is outside rank {len(known)}")
-            for ref in all_refs:
-                self.rank(ref, len(known))
-            for dim in range(1, len(known)):
-                if dim != axis:
-                    # All tensors share this extent. Propagate one known value
-                    # once per edge; comparing every pair lets a short config
-                    # make the parent resolver do quadratic work.
-                    extent = next((self.shapes[ref][dim] for ref in all_refs
-                                   if self.shapes[ref][dim] is not None), None)
-                    for ref in all_refs:
-                        self.axis(ref, dim, extent)
-            sizes = [self.shapes[ref][axis] for ref in refs]
-            missing = [i for i, size in enumerate(sizes) if size is None]
-            if not missing:
-                self.axis(y, axis, sum(sizes))
-            elif len(missing) == 1 and self.shapes[y][axis] is not None:
-                self.axis(refs[missing[0]], axis, self.shapes[y][axis] - sum(size for size in sizes if size is not None))
-        else:
-            self.error("E_UNRESOLVED", f"No pure shape rules for {node.op}")
+        view = NodeView(self, node, spec)
+        self.patterns(spec, view)
+        if spec.relation is not None:
+            spec.relation(view)
 
-    def patterns(self, rule, inputs, outputs):
-        """Refine shared positive variables in two bounded linear passes.
+    def patterns(self, spec, view):
+        """Refine shared positive symbols from the declared shape patterns.
 
-        Variables live only in this node invocation. Both input and output
-        facts participate equally; every shared occurrence is an equation.
+        Symbols live only in this node invocation. Input and output facts
+        participate equally; every shared occurrence is an equation. An
+        ellipsis stands for the same run of middle axes on every port using it.
         """
-        entries = [(inputs[name], pattern) for name, pattern in rule.inputs.items()]
-        entries.extend((outputs[name], pattern) for name, pattern in rule.outputs.items())
+        entries = [(port.name, port.pattern) for port in (*spec.inputs, *spec.outputs) if port.pattern is not None]
+        if not entries:
+            return
+        args = view.args
+        bound = {arg.dim: name for name, arg in spec.args.items() if arg.dim is not None}
+        # Determine the shared ellipsis length from any port with a known rank.
+        ellipsis_length = None
+        for name, pattern in entries:
+            if ELLIPSIS in pattern:
+                shape = view.shape(name)
+                if shape is not None:
+                    ellipsis_length = len(shape) - (len(pattern) - 1)
+                    break
+        expanded = []
+        for name, pattern in entries:
+            if ELLIPSIS in pattern:
+                if ellipsis_length is None:
+                    continue
+                if ellipsis_length < 0:
+                    self.error("E_CONSTRAINT", f"Rank of {name} is below the declared pattern rank")
+                index = pattern.index(ELLIPSIS)
+                pattern = pattern[:index] + tuple(Sym(f"...{i}") for i in range(ellipsis_length)) + pattern[index + 1:]
+            expanded.append((name, pattern))
         values = {}
-        for ref, pattern in entries:
-            shape = self.rank(ref, len(pattern))
+        for symbol, arg_name in bound.items():
+            if arg_name in args:
+                values[symbol] = args[arg_name]
+        for name, pattern in expanded:
+            shape = view.rank(name, len(pattern))
             for axis, dimension in enumerate(pattern):
                 if axis == 0:
-                    continue  # Pattern validation fixes unscaled B here.
+                    continue
                 if type(dimension) is int:
-                    self.axis(ref, axis, dimension)
+                    view.axis(name, axis, dimension)
                     continue
                 extent = shape[axis]
                 if extent is None:
                     continue
                 if extent % dimension.scale:
-                    self.error("E_CONSTRAINT", f"Extent {extent} at {ref}[{axis}] is not divisible by scale {dimension.scale} of {dimension.name}")
+                    self.error("E_CONSTRAINT", f"Extent {extent} at {name}[{axis}] is not divisible by scale {dimension.scale} of {dimension.name}")
                 value = extent // dimension.scale
                 if dimension.name in values and values[dimension.name] != value:
                     self.error("E_CONSTRAINT", f"Shared dimension {dimension.name} requires incompatible values {values[dimension.name]} and {value}")
                 values[dimension.name] = value
-        for ref, pattern in entries:
+        for name, pattern in expanded:
             for axis, dimension in enumerate(pattern):
-                if axis and isinstance(dimension, Dim) and dimension.name in values:
-                    self.axis(ref, axis, dimension.scale * values[dimension.name])
+                if axis and isinstance(dimension, Sym) and dimension.name in values:
+                    view.axis(name, axis, dimension.scale * values[dimension.name])
+        for symbol, arg_name in bound.items():
+            if symbol in values:
+                view.arg(arg_name, values[symbol])
 
     def run(self):
         for _ in range(self.limits["max_iterations"]):
@@ -405,9 +318,9 @@ class _Solver:
         else:
             self.error("E_RESOURCE", "Shape rules exceeded max_iterations")
         resolved = []
-        state_total = 0
         for node in self.nodes:
             self.node = node
+            spec = self.specs[node.id]
             args = self.args[node.id]
             for port, ref in list(node.inputs.items()) + [(port, f"node:{node.id}/{port}") for port in node.outputs]:
                 shape = self.shapes.get(ref)
@@ -415,39 +328,23 @@ class _Solver:
                     interval = next((bounds for (r, _), bounds in self.intervals.items() if r == ref), None)
                     detail = f"; inverse allows {interval}" if interval else ""
                     self.error("E_AMBIGUOUS", f"Shape for {port} ({ref}) remains ambiguous{detail}; supply a dimension or a policy")
-            if self.specs[node.id].identity == "reshape":
-                args["shape"] = tuple(self.shapes[f"node:{node.id}/out"][1:])
-            state_bytes = self.state_bound(node, args)
-            state_total += state_bytes
-            if state_total > self.limits["max_state_bytes"]:
-                self.error("E_RESOURCE", "Plan exceeds max_state_bytes before allocation")
+            missing = [name for name, arg in spec.args.items() if arg.inferable and name not in args]
+            if missing:
+                self.error("E_UNRESOLVED", f"{spec.alias} could not infer {', '.join(missing)}")
+            input_shapes = {key: tuple(self.shapes[ref]) for key, ref in node.inputs.items()}
+            output_shapes = {key: tuple(self.shapes[f"node:{node.id}/{key}"]) for key in node.outputs}
+            if spec.finalize is not None:
+                args = dict(spec.finalize(dict(args), input_shapes, output_shapes))
             origins = {}
             source_origins = node.source.get("argument_origins", {}) if node.source else {}
             for name in args:
                 origins[name] = source_origins.get(name, "explicit" if name in node.args else "inferred")
             resolved.append(ResolvedNode(
                 id=node.id, op=node.op, args=args, inputs=node.inputs, outputs=node.outputs, source=node.source,
-                input_shapes={key: tuple(self.shapes[ref]) for key, ref in node.inputs.items()},
-                output_shapes={key: tuple(self.shapes[f"node:{node.id}/{key}"]) for key in node.outputs},
-                state_bytes=state_bytes, state_version=self.specs[node.id].state_version, provenance=origins,
+                input_shapes=input_shapes, output_shapes=output_shapes, provenance=origins,
                 initialization=node.initialization, trainability=node.trainability,
             ))
         return tuple(resolved)
-
-    def state_bound(self, node, args):
-        spec = self.specs[node.id]
-        if spec.shape is preserves_shape or type(spec.shape) is ShapeRule:
-            return spec.max_state_bytes
-        if spec.identity == "linear":
-            count = args["in_features"] * args["out_features"] + (args["out_features"] if args["bias"] else 0)
-        elif spec.identity in ("conv2d", "conv_transpose2d"):
-            count = args["in_channels"] * args["out_channels"] // args["groups"] * prod(args["kernel_size"])
-            count += args["out_channels"] if args["bias"] else 0
-        elif spec.identity == "group_norm":
-            count = 2 * args["num_channels"] if args["affine"] else 0
-        else:
-            count = 0
-        return 4 * count
 
 
 def resolve_graph(graph, registry=None, limits=None):
@@ -481,11 +378,7 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
             or type(plan.resolution_version) is not int or plan.resolution_version != 1):
         raise HNDLError("E_STATE_VERSION", "Expected plan schema 1 and resolution version 1")
     for node in plan.nodes:
-        spec = registry.by_identity(node.op)
-        if type(node.state_version) is not int or node.state_version != spec.state_version:
-            raise HNDLError("E_STATE_VERSION", f"{node.op} requires state version {node.state_version}; registered version is {spec.state_version}", node=node.id)
-        if type(node.state_bytes) is not int or node.state_bytes < 0:
-            raise HNDLError("E_SCHEMA", "State bounds must be nonnegative integers", node=node.id)
+        registry.by_identity(node.op)
         if set(node.input_shapes) != set(node.inputs) or set(node.output_shapes) != set(node.outputs):
             raise HNDLError("E_SCHEMA", "Saved port contracts are incomplete", node=node.id)
         for shape in (*node.input_shapes.values(), *node.output_shapes.values()):
@@ -495,5 +388,5 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
                   plan.input_shape, plan.output_shape, plan.output_ref, plan.dtype, plan.frontend)
     verified = resolve_graph(graph, registry, bounds)
     if plan.semantic_digest != verified.semantic_digest:
-        raise HNDLError("E_INTEGRITY", "Saved concrete arguments/port shapes/state bounds are inconsistent; no inferred replacement is accepted")
+        raise HNDLError("E_INTEGRITY", "Saved concrete arguments and port shapes are inconsistent; no inferred replacement is accepted")
     return replace(plan, registry=registry)

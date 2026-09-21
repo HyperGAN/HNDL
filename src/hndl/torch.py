@@ -1,11 +1,7 @@
-"""PyTorch construction and execution for concrete HNDL plans.
-
-Importing this backend is explicit: the resolver itself never imports torch.
-"""
+"""PyTorch construction and execution for concrete HNDL plans."""
 
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass
 from types import MappingProxyType
 
 import torch
@@ -13,66 +9,8 @@ from torch import nn
 
 from .errors import HNDLError
 
-_BUILTINS = frozenset(f"{name}@1" for name in (
-    "linear", "conv2d", "conv_transpose2d", "group_norm", "reshape", "flatten",
-    "relu", "leaky_relu", "tanh", "add", "split", "concat",
-))
-
-
-@dataclass(frozen=True)
-class TorchBinding:
-    module: object
-    state_version: int
-
-
-def register_torch(registry, alias, *, module, state_version):
-    """Attach an explicitly supplied constructor to an exact pure operator."""
-    entry = registry.get(alias)
-    if entry.key in _BUILTINS:
-        raise HNDLError("E_REGISTRY", f"Built-in backend {entry.key} cannot be replaced")
-    if type(state_version) is not int or state_version != entry.state_version:
-        raise HNDLError("E_STATE_VERSION", f"{alias}: backend state version differs from pure registration")
-    if entry.key in registry.backends:
-        raise HNDLError("E_REGISTRY", f"Backend already registered for {entry.key}")
-    if not callable(module):
-        raise HNDLError("E_REGISTRY", "module must be a trusted callable constructor")
-    registry.backends[entry.key] = TorchBinding(module, state_version)
-
-
-class _Reshape(nn.Module):
-    def __init__(self, shape):
-        super().__init__()
-        self.shape = tuple(shape)
-
-    def forward(self, x):
-        return x.reshape(x.shape[0], *self.shape)
-
-    def extra_repr(self):
-        return f"shape={self.shape}"
-
-
-class _Add(nn.Module):
-    def forward(self, a, b):
-        return a + b
-
-
-class _Split(nn.Module):
-    def __init__(self, size, remainder, dim):
-        super().__init__()
-        self.sizes = (size, remainder)
-        self.dim = dim
-
-    def forward(self, x):
-        return torch.split(x, self.sizes, dim=self.dim)
-
-
-class _Concat(nn.Module):
-    def __init__(self, axis):
-        super().__init__()
-        self.axis = axis
-
-    def forward(self, *xs):
-        return torch.cat(xs, dim=self.axis)
+DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
+          "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
 
 
 class _NodeModules(nn.ModuleDict):
@@ -127,6 +65,7 @@ class GraphModule(nn.Module):
         self.plan = plan
         self.nodes = _NodeModules(modules)
         self._runtime_device = device
+        self._dtype = DTYPES[plan.dtype]
         self._chain = _is_chain(plan)
         self._port_orders = port_orders
         self._state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
@@ -155,8 +94,8 @@ class GraphModule(nn.Module):
         expected = tuple(batch if isinstance(d, str) else d for d in shape)
         if tuple(value.shape) != expected or value.ndim == 0 or value.shape[0] <= 0:
             raise HNDLError("E_RUNTIME", f"{location}: expected shape {expected}, got {tuple(value.shape)}")
-        if value.dtype != torch.float32:
-            raise HNDLError("E_RUNTIME", f"{location}: expected dtype float32, got {value.dtype}")
+        if value.dtype != self._dtype:
+            raise HNDLError("E_RUNTIME", f"{location}: expected dtype {self.plan.dtype}, got {value.dtype}")
         if value.device != self._runtime_device:
             raise HNDLError("E_RUNTIME", f"{location}: expected device {self._runtime_device}, got {value.device}")
 
@@ -187,7 +126,7 @@ class GraphModule(nn.Module):
         self._check(result, self.plan.output_shape, batch, "output")
         state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
         if state_names != self._state_names:
-            raise HNDLError("E_RUNTIME", "A custom module created or removed registered state during forward")
+            raise HNDLError("E_RUNTIME", "A module created or removed registered state during forward")
         return result
 
     def forward(self, **inputs):
@@ -221,14 +160,20 @@ class GraphModule(nn.Module):
             raise TypeError("Branched graphs support node-name lookup only")
         return iter(self.nodes.values())
 
+    def _alias(self, op):
+        registry = self.plan.registry
+        try:
+            return registry.by_identity(op).alias if registry is not None else op.split("@")[0]
+        except HNDLError:
+            return op.split("@")[0]
+
     def __repr__(self):
         lines = [f"{type(self).__name__}: {_shape_text(self.plan.input_shape)} -> "
                  f"{_shape_text(self.plan.output_shape)}  dtype={self.plan.dtype}"]
         rows = [("index", "name", "operation", "input shape", "output shape")
                 if self._chain else ("name", "operation", "input shapes", "output shapes")]
         for i, node in enumerate(self.plan.nodes):
-            operation = node.op.split("@")[0]
-            operation = {"conv2d": "conv", "conv_transpose2d": "deconv"}.get(operation, operation)
+            operation = self._alias(node.op)
             if self._chain:
                 rows.append((str(i), node.id, operation,
                              _shape_text(next(iter(node.input_shapes.values()))),
@@ -266,49 +211,72 @@ def _initialization_rng(device, seed):
         yield
 
 
-def _builtin(node, device):
-    args = dict(node.args)
-    factory = {"device": device, "dtype": torch.float32}
-    op = node.op
-    if op == "linear@1":
-        return nn.Linear(**args, **factory)
-    if op == "conv2d@1":
-        return nn.Conv2d(**args, **factory)
-    if op == "conv_transpose2d@1":
-        return nn.ConvTranspose2d(**args, **factory)
-    if op == "group_norm@1":
-        return nn.GroupNorm(**args, **factory)
-    if op == "reshape@1":
-        return _Reshape(args["shape"])
-    if op == "flatten@1":
-        return nn.Flatten(start_dim=1)
-    if op == "relu@1":
-        return nn.ReLU(inplace=False)
-    if op == "leaky_relu@1":
-        return nn.LeakyReLU(**args, inplace=False)
-    if op == "tanh@1":
-        return nn.Tanh()
-    if op == "add@1":
-        return _Add()
-    if op == "split@1":
-        dim, size = args["dim"], args["size"]
-        return _Split(size, node.input_shapes["x"][dim] - size, dim)
-    if op == "concat@1":
-        return _Concat(args["axis"])
-    return None
+def _symbol_values(spec, node):
+    """Resolved values of the shape symbols a module constructor requests."""
+    values = {}
+    shapes = {**node.input_shapes, **node.output_shapes}
+    from .operator import ELLIPSIS, Sym
+    for port in (*spec.inputs, *spec.outputs):
+        if port.pattern is None or port.name not in shapes:
+            continue
+        shape = shapes[port.name]
+        pattern = port.pattern
+        if ELLIPSIS in pattern:
+            index = pattern.index(ELLIPSIS)
+            middle = len(shape) - (len(pattern) - 1)
+            pattern = pattern[:index] + (None,) * middle + pattern[index + 1:]
+        for axis, dimension in enumerate(pattern):
+            if isinstance(dimension, Sym) and dimension.name not in values:
+                values[dimension.name] = shape[axis] // dimension.scale
+    return values
+
+
+def construct(spec, node, device, dtype):
+    """Instantiate one operator's module from concrete plan arguments."""
+    kwargs = dict(node.args)
+    if spec.init_symbols:
+        symbols = _symbol_values(spec, node)
+        for name in spec.init_symbols:
+            kwargs[name] = symbols[name]
+    for name in spec.init_shapes:
+        kwargs[name] = {port: tuple(shape) for port, shape in getattr(node, name).items()}
+    with torch.device(device):
+        layer = spec.module(**kwargs)
+    if not isinstance(layer, nn.Module):
+        raise HNDLError("E_REGISTRY", f"{node.id}: operator {spec.alias} did not construct an nn.Module")
+    return layer.to(dtype=dtype)
 
 
 def _state_bytes(module):
-    # Count unique storage, including nonpersistent registered buffers.
+    """Unique registered parameter/buffer storage, including nonpersistent buffers."""
     storages = {}
     for value in (*module.parameters(), *module.buffers()):
+        if value.device.type == "meta":
+            storages[id(value)] = value.numel() * value.element_size()
+            continue
         storage = value.untyped_storage()
         key = (value.device, storage.data_ptr())
         storages[key] = max(storages.get(key, 0), storage.nbytes())
     return sum(storages.values())
 
 
-def _prepare_parameter_settings(layer, node):
+def parameter_counts(plan, *, registry=None):
+    """Per-node parameter counts from an allocation-free meta-device construction."""
+    from .registry import Registry
+    registry = registry if registry is not None else plan.registry or Registry.builtins()
+    counts = {}
+    for node in plan.nodes:
+        spec = registry.by_identity(node.op)
+        try:
+            layer = construct(spec, node, "meta", DTYPES[plan.dtype])
+        except Exception:
+            counts[node.id] = None
+            continue
+        counts[node.id] = sum(p.numel() for p in layer.parameters())
+    return counts
+
+
+def _prepare_parameter_settings(layer, node, dtype):
     """Validate exact targets and aliases without changing any parameter."""
     parameters = dict(layer.named_parameters(remove_duplicate=False))
     buffers = dict(layer.named_buffers(remove_duplicate=False))
@@ -369,8 +337,8 @@ def _prepare_parameter_settings(layer, node):
     for identity, parameter in by_id.items():
         constant = constants.get(identity)
         flag = effective_flags[identity] if default_trainability is not None or identity in flags else None
-        if constant is not None and parameter.dtype != torch.float32:
-            raise HNDLError("E_INITIALIZATION", f"Parameter {names[identity][0]!r} has unsupported constant-initialization dtype {parameter.dtype}; expected float32", node=node.id)
+        if constant is not None and parameter.dtype != dtype:
+            raise HNDLError("E_INITIALIZATION", f"Parameter {names[identity][0]!r} has unsupported constant-initialization dtype {parameter.dtype}; expected {dtype}", node=node.id)
         if flag is True and not (parameter.is_floating_point() or parameter.is_complex()):
             raise HNDLError("E_TRAINABILITY", f"Parameter {names[identity][0]!r} with dtype {parameter.dtype} cannot require gradients", node=node.id)
         result.append((parameter, constant, flag))
@@ -378,8 +346,9 @@ def _prepare_parameter_settings(layer, node):
 
 
 def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None):
-    if plan.dtype != "float32":
+    if plan.dtype not in DTYPES or plan.dtype not in ("float32",):
         raise HNDLError("E_SCHEMA", f"Unsupported plan dtype {plan.dtype!r}")
+    dtype = DTYPES[plan.dtype]
     device = torch.device(device)
     if device.type == "cpu":
         device = torch.device("cpu")
@@ -395,28 +364,29 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     if registry is None:
         from .registry import Registry
         registry = Registry.builtins()
-    from .resolver import validate_concrete_plan
+    from .resolver import validate_concrete_plan, _limits
+    bounds = _limits(limits)
     plan = validate_concrete_plan(plan, registry=registry, limits=limits)
-    # Validate all required implementations before constructing any modules.
-    custom = {}
-    port_orders = {}
+    specs = {node.id: registry.by_identity(node.op) for node in plan.nodes}
+    port_orders = {node.id: specs[node.id].input_ports_for(node.args) for node in plan.nodes}
+
+    # Bound registered storage with an allocation-free meta construction first.
+    total = 0
+    unbounded = []
     for node in plan.nodes:
-        entry = registry.by_identity(node.op)
-        port_orders[node.id] = (tuple(f"x{i}" for i in range(node.args["input_count"]))
-                                if node.op == "concat@1" else entry.input_ports)
-        if getattr(node, "state_version", entry.state_version) != entry.state_version:
-            raise HNDLError("E_STATE_VERSION", f"{node.id}: incompatible state version")
-        if node.op not in _BUILTINS:
-            binding = registry.backends.get(node.op)
-            if binding is None:
-                raise HNDLError("E_REGISTRY", f"No explicitly registered PyTorch backend for {node.op}")
-            if binding.state_version != entry.state_version:
-                raise HNDLError("E_STATE_VERSION", f"{node.id}: incompatible backend state version")
-            custom[node.id] = binding
+        try:
+            probe = construct(specs[node.id], node, "meta", dtype)
+        except Exception:
+            unbounded.append(node.id)
+            continue
+        total += _state_bytes(probe)
+        if total > bounds["max_state_bytes"]:
+            raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes before allocation", node=node.id)
+
     modules = OrderedDict()
     module_owners, tensor_owners, storage_owners = {}, {}, {}
 
-    def check_ownership(layer, node_id, *, record=False):
+    def check_ownership(layer, node_id):
         owned = [(module_owners, id(child)) for child in layer.modules()]
         for tensor in (*layer.parameters(), *layer.buffers()):
             owned.append((tensor_owners, id(tensor)))
@@ -425,32 +395,21 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
                 owned.append((storage_owners, (tensor.device, storage.data_ptr())))
         for owners, key in owned:
             if key in owners and owners[key] != node_id:
-                raise HNDLError("E_REGISTRY", f"{node_id}: backend reuses module or registered state from node {owners[key]}; each node must own an independent instance")
-        if record:
-            for owners, key in owned:
-                owners[key] = node_id
+                raise HNDLError("E_REGISTRY", f"{node_id}: operator reuses a module or registered state from node {owners[key]}; each node must own an independent instance")
+        for owners, key in owned:
+            owners[key] = node_id
 
     with _initialization_rng(device, initialization_seed):
         for node in plan.nodes:
-            if node.id in custom:
-                layer = custom[node.id].module(**dict(node.args))
-                if not isinstance(layer, nn.Module):
-                    raise HNDLError("E_REGISTRY", f"{node.id}: backend constructor must return nn.Module")
-                # Check before .to() can mutate an earlier node's shared module.
-                check_ownership(layer, node.id)
-                if _state_bytes(layer) > node.state_bytes:
-                    raise HNDLError("E_RESOURCE", f"{node.id}: registered parameter/buffer storage exceeds declared {node.state_bytes} bytes")
-                layer = layer.to(device=device, dtype=torch.float32)
-                if _state_bytes(layer) > node.state_bytes:
-                    raise HNDLError("E_RESOURCE", f"{node.id}: materialized parameter/buffer storage exceeds declared {node.state_bytes} bytes")
-            else:
-                layer = _builtin(node, device)
-                if layer is None:
-                    raise HNDLError("E_REGISTRY", f"No supported PyTorch implementation for {node.op}")
-            check_ownership(layer, node.id, record=True)
+            layer = construct(specs[node.id], node, device, dtype)
+            check_ownership(layer, node.id)
+            if node.id in unbounded:
+                total += _state_bytes(layer)
+                if total > bounds["max_state_bytes"]:
+                    raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes", node=node.id)
             modules[f"n_{node.id}"] = layer
         # Resolve every target before applying settings to any graph node.
-        settings = [_prepare_parameter_settings(modules[f"n_{node.id}"], node) for node in plan.nodes]
+        settings = [_prepare_parameter_settings(modules[f"n_{node.id}"], node, dtype) for node in plan.nodes]
         with torch.no_grad():
             for assignments in settings:
                 for parameter, constant, trainable in assignments:
@@ -458,9 +417,10 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
                         parameter.fill_(constant)
                     if trainable is not None:
                         parameter.requires_grad_(trainable)
-    receipt = {"torch_version": str(torch.__version__), "device": str(device),
+    receipt = {"torch_version": str(torch.__version__), "device": str(device), "dtype": plan.dtype,
                "initialization_seed": initialization_seed,
-               "seed_mode": "caller" if initialization_seed is None else "isolated"}
+               "seed_mode": "caller" if initialization_seed is None else "isolated",
+               "state_bytes": total}
     cls = Network if facade else GraphModule
     return cls(plan, modules, device, receipt, port_orders)
 

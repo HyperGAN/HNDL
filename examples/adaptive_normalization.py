@@ -1,60 +1,15 @@
-"""Register learned affine instance normalization and build two style graphs.
+"""Build two style-conditioned graphs with the built-in adaptive normalization.
 
-Run from an installed checkout: ``python examples/adaptive_normalization.py --device cpu``.
-CUDA is also supported when available; device selection never falls back.
-This fixture defines its own affine convention, not a full StyleGAN model.
+Run from an installed checkout: ``python examples/adaptive_normalization.py --device cuda:0``.
+Device selection never falls back. This fixture defines its own affine
+convention, not a full StyleGAN model.
 """
 
 import argparse
-import math
 
 import torch
-from torch import nn
 
-from hndl import Argument, Dim, Registry, ShapeRule
-from hndl.torch import network, register_torch
-
-
-class AdaptiveNorm(nn.Module):
-    """Population instance normalization followed by learned scale and bias.
-
-    ``params`` holds [delta_gamma, beta], one of each per feature channel.
-    A zero style vector gives normalized features, not the raw input.
-    """
-
-    def __init__(self, eps=1e-5):
-        super().__init__()
-        if not isinstance(eps, (int, float)) or isinstance(eps, bool) or not math.isfinite(eps) or eps <= 0:
-            raise ValueError("eps must be a positive finite number")
-        self.eps = float(eps)
-
-    def forward(self, x, params):
-        if x.ndim != 4 or params.ndim != 2 or params.shape != (x.shape[0], 2 * x.shape[1]):
-            raise ValueError("Expected features [B,C,H,W] and style parameters [B,2*C]")
-        mean = x.mean(dim=(2, 3), keepdim=True)
-        centered = x - mean
-        variance = centered.square().mean(dim=(2, 3), keepdim=True)
-        normalized = centered * torch.rsqrt(variance + self.eps)
-        delta_gamma, beta = params.split(x.shape[1], dim=1)
-        return (1 + delta_gamma[:, :, None, None]) * normalized + beta[:, :, None, None]
-
-
-def make_registry():
-    """Explicitly register pure shape relations and their trusted backend."""
-    registry = Registry.builtins()
-    registry.register(
-        "adaptive_norm",
-        identity="example.adaptive_norm",
-        version=1,
-        shape=ShapeRule(
-            inputs={"x": ("B", "C", "H", "W"), "params": ("B", Dim("C", scale=2))},
-            outputs={"out": ("B", "C", "H", "W")},
-        ),
-        arguments={"eps": Argument(float, default=1e-5, minimum=0.0, exclusive_minimum=True)},
-        max_state_bytes=0,
-    )
-    register_torch(registry, "adaptive_norm", module=AdaptiveNorm, state_version=1)
-    return registry
+from hndl.torch import network
 
 
 MAPPING_CONFIG = '''
@@ -77,13 +32,13 @@ adaptive_norm(features, z2, name="norm")
 def mapping_model(*, device="cpu", initialization_seed=7):
     """Fan mapping features into projection and a declaratively zeroed affine."""
     return network(MAPPING_CONFIG, input_shape=("B", 128), output_shape=("B", 64, 4, 4),
-                   registry=make_registry(), device=device, initialization_seed=initialization_seed)
+                   device=device, initialization_seed=initialization_seed)
 
 
 def split_model(*, device="cpu", initialization_seed=7):
     """Use the first 64 features for content and the remainder for style."""
     return network(SPLIT_CONFIG, input_shape=("B", 128), output_shape=("B", 32, 4, 4),
-                   registry=make_registry(), device=device, initialization_seed=initialization_seed)
+                   device=device, initialization_seed=initialization_seed)
 
 
 def main():

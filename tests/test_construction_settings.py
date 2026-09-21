@@ -6,7 +6,9 @@ import struct
 
 import pytest
 
-from hndl import Argument, HNDLError, Registry, ShapeRule, preserves_shape
+from torch import nn
+
+from hndl import Arg, HNDLError, Registry
 from hndl.resolver import resolve_graph, validate_concrete_plan
 from hndl.settings import (normalize_settings, normalize_initialization, normalize_trainability,
                            validate_initialization, validate_trainability)
@@ -162,12 +164,12 @@ def test_unsupported_schema_rejected_on_restore_and_direct_validation():
 
 @pytest.mark.parametrize("metadata", ["init", "trainable"])
 def test_construction_metadata_reserved_in_custom_ports_and_arguments(metadata):
+    registry = Registry.builtins()
     with pytest.raises(HNDLError, match="conflicts"):
-        ShapeRule(inputs={metadata: ("B", "F")}, outputs={"out": ("B", "F")})
+        registry.operator("custom", summary="Bad.", shape=f"{metadata}[B, F] -> out[B, F]")(nn.Identity)
     with pytest.raises(HNDLError, match="conflicts"):
-        ShapeRule(inputs={"x": ("B", "F")}, outputs={metadata: ("B", "F")})
+        registry.operator("custom", summary="Bad.", shape=f"x[B, F] -> {metadata}[B, F]")(nn.Identity)
     with pytest.raises(HNDLError, match="conflicts"):
-        Registry.builtins().register("custom", identity="example.custom", version=1,
-                                     max_state_bytes=0, shape=preserves_shape,
-                                     arguments={metadata: Argument(bool, default=False)})
+        registry.operator("custom", summary="Bad.", shape="x[B, F] -> out[B, F]",
+                          args={metadata: Arg(bool, False, help="Reserved.")})(nn.Identity)
 
