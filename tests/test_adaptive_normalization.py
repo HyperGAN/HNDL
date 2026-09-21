@@ -69,7 +69,8 @@ def test_fixture_finite_difference_gradcheck_and_gradgradcheck(device):
 @pytest.mark.parametrize("device", DEVICES)
 def test_mapping_fanout_reference_gradients_optimizer_and_reload(device):
     # Nonzero ordinary affine initialization exercises both feature/style paths.
-    model = network(MAPPING_CONFIG, input_shape=("B", 128), output_shape=("B", 64, 4, 4),
+    source = MAPPING_CONFIG.replace(', init={"weight": 0, "bias": 0}', '')
+    model = network(source, input_shape=("B", 128), output_shape=("B", 64, 4, 4),
                     registry=make_registry(), device=device, initialization_seed=11)
 
     class Reference(nn.Module):
@@ -147,7 +148,7 @@ def test_example_zero_affine_normalizes_and_split_remainder_receives_gradients(d
 def test_incompatible_custom_contracts_and_scalar_arguments_fail_before_build():
     for source, output_shape in [
         (SPLIT_CONFIG, ("B", 31, 4, 4)),
-        (MAPPING_CONFIG.replace('linear(w, name="style")', 'linear(w, 127, name="style")'), ("B", 64, 4, 4)),
+        (MAPPING_CONFIG.replace('style = linear(w,', 'style = linear(w, 127,'), ("B", 64, 4, 4)),
         (MAPPING_CONFIG.replace('name="norm"', 'name="norm", eps=0'), ("B", 64, 4, 4)),
     ]:
         with pytest.raises(HNDLError):
