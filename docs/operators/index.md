@@ -83,6 +83,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`cross_attention`](cross_attention.md) | Multi-head attention with queries from one sequence and keys and values from another. |
 | [`embedding`](embedding.md) | Look up a learned vector for every integer token id. |
 | [`feed_forward`](feed_forward.md) | Transformer feed-forward block: widen, activate, project back. |
+| [`gather_token`](gather_token.md) | Select the token of a sequence at the position holding the largest id. |
 | [`moe`](moe.md) | Sparse mixture of experts: route every token to its top-k feed-forward experts. |
 | [`pool_tokens`](pool_tokens.md) | Reduce a [B, T, D] sequence to one [B, D] vector per example. |
 | [`pos_embed`](pos_embed.md) | Add a learned position vector to every position of a sequence. |
