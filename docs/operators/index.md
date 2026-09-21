@@ -118,3 +118,4 @@ are generated from those declarations by `python -m hndl.docs`.
 | Operator | Summary |
 | --- | --- |
 | [`patch_embed`](patch_embed.md) | Cut an image into non-overlapping patches and embed each one as a token. |
+| [`resblock`](resblock.md) | Residual basic block: two 3x3 convolutions with a normalized shortcut. |
