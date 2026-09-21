@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-09-21)
+
+A minor release for HyperGAN's fixed-context discriminator: `concat` joins tensors along the batch axis with the multiple tracked as `k*B`, and a new `chunk` operator cuts an axis back into equal sections.
 
 - **`concat` joins along the batch axis, tracked as `k*B`.** `axis=0` was
   rejected; it now stacks examples, so
