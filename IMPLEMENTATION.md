@@ -54,7 +54,10 @@ rank two `[B, F]`, rank three `[B, T, D]` (a sequence of `T` positions with
 or rank four `[B, C, H, W]`. One-dimensional convolution and pooling use rank
 three as `[B, C, L]`; `transpose(1, 2)` moves between the conventions. Only
 the batch axis may be symbolic (`"B"`). Other dimensions and runtime batch
-sizes must be positive integers. The device is always caller-selected.
+sizes must be positive integers. `concat(..., axis=0)` stacks examples, so an
+intermediate contract may hold several batches at once, written `"2*B"`;
+`chunk(..., dim=0)` divides them again. External contracts stay one plan
+batch. The device is always caller-selected.
 
 Plans carry a compute `dtype` of `float32` (default), `float16`, or
 `bfloat16`; parameters are constructed in that dtype and every floating tensor
@@ -68,8 +71,9 @@ Built-in unary operations take an optional leading tensor or `x=`. Custom
 unary operations use their declared input-port keyword. Every operator's
 arguments, defaults, bounds, shape relation, and examples are listed in
 [docs/operators](docs/operators/index.md). Convolution spatial arguments
-accept an integer or a pair of integers. Split/concat axes are positive,
-non-batch indices; negative axes are rejected. `name=` sets a stable node ID
+accept an integer or a pair of integers. `split` axes are positive, non-batch
+indices; `concat` and `chunk` also accept axis 0, which joins or divides the
+batch. Negative axes are rejected. `name=` sets a stable node ID
 independently of Python variable names. Operator aliases are reserved names
 in configurations.
 

@@ -70,14 +70,23 @@ Fields:
   - `x*` declares a variadic input (`x0`, `x1`, …); declare an `int` argument
     named `input_count`.
   - `out*` declares a variadic output (`out0`, `out1`, …); it must be the sole
-    output port and the declaration names the sequence argument fixing the
-    count with `outputs_from="<argument>"`. An empty sequence leaves the single
-    declared `out` port; any other length returns a tuple and clears current.
+    output port and the declaration names the argument fixing the count with
+    `outputs_from="<argument>"` — a sequence (`ints`/`strs`), whose length is
+    the count, or a bounded `int`, whose value is. A count of zero leaves the
+    single declared `out` port; any other count returns a tuple and clears
+    current.
+- `batch=` says how the operator treats axis 0. The default, `"shared"`,
+  means batch passes through: every port of the node carries the same batch
+  entry, and `B` in a pattern stands for that entry, which may be a multiple
+  such as `2*B`. An operator that moves tensors across the batch axis —
+  `concat(axis=0)`, `chunk(dim=0)` — declares `batch="relation"` and sets
+  axis 0 on each port itself, with `s.batch(port)` and `s.axis(port, 0, ...)`.
 - `relation=` is a function receiving a node view `s` for rules the DSL
   cannot express (convolution arithmetic, products, splits). It runs in every
   solver sweep and may only add facts: `s.shape(port)`, `s.rank(port, r)`,
   `s.axis(port, i, value)`, `s.equal(p, q)`, `s.arg(name, value)`,
   `s.product(p, q)`, `s.interval(port, i, lo, hi)`, `s.error(code, msg)`,
+  `s.batch(port)`, `s.share_batch(*ports)`,
   `s.args`, `s.inputs`, and `s.policy` (the selected policy identity or None). Shared relations live in `operators/_relations.py`.
   Give `shape_text=` a one-line description for the docs.
 - `args` maps names to `Arg(type, default, ...)`. Omit the default to require
