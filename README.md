@@ -310,7 +310,7 @@ from hndl.torch import network
 registry = Registry.builtins()
 
 @registry.operator(
-    "silu",
+    "my_silu",
     identity="example.silu",
     summary="Sigmoid-weighted linear unit.",
     shape="x[B, ...] -> out[B, ...]",
@@ -321,7 +321,7 @@ class SiLU(nn.SiLU):
 model = network(
     """
     linear(64)
-    silu()
+    my_silu()
     linear()
     """,
     input_shape=("B", 128),
@@ -331,7 +331,7 @@ model = network(
 )
 ```
 
-Configs now understand `silu()`. Native functions use `registry.ops.silu()` and pass that same registry to `network_from_callable`. The shape string `x[B, ...] -> out[B, ...]` says the output has exactly the input's shape, so constraints propagate in both directions through the layer. Each node gets its own instance of the class, constructed with the resolved arguments.
+Configs now understand `my_silu()`. Native functions use `registry.ops.my_silu()` and pass that same registry to `network_from_callable`. The shape string `x[B, ...] -> out[B, ...]` says the output has exactly the input's shape, so constraints propagate in both directions through the layer. Each node gets its own instance of the class, constructed with the resolved arguments.
 
 Operations with several inputs, different output dimensions, or scalar arguments declare them in the same place. The built-in adaptive normalization is declared as:
 

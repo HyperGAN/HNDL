@@ -100,7 +100,7 @@ def test_group_norm_divisibility_and_flatten():
 def test_custom_shape_preserving_operator_has_bidirectional_relations():
     registry = Registry.builtins()
 
-    @registry.operator("silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
+    @registry.operator("my_silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
     class SiLU(nn.SiLU):
         pass
 

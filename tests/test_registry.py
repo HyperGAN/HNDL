@@ -6,7 +6,7 @@ from hndl.errors import HNDLError
 from hndl.registry import normalize_arguments
 
 
-def silu(registry, alias="silu", identity="example.silu"):
+def silu(registry, alias="my_silu", identity="example.silu"):
     @registry.operator(alias, identity=identity, summary="SiLU activation.", shape="x[B, ...] -> out[B, ...]")
     class SiLU(nn.SiLU):
         pass
@@ -17,15 +17,15 @@ def test_registries_are_independent_and_duplicates_fail():
     a, b = Registry.builtins(), Registry.builtins()
     cls = silu(a)
     entry = cls.__hndl_operator__
-    assert a.get("silu") is a.by_identity("example.silu@1") is entry
+    assert a.get("my_silu") is a.by_identity("example.silu@1") is entry
     assert entry.module is cls
-    assert "silu" not in b.aliases
+    assert "my_silu" not in b.aliases
     with pytest.raises(HNDLError, match="Duplicate"):
         silu(a)
     with pytest.raises(HNDLError, match="Duplicate"):
         silu(a, alias="other")
     b.add(cls)
-    assert b.get("silu") is entry
+    assert b.get("my_silu") is entry
     with pytest.raises(HNDLError, match="E_REGISTRY"):
         Registry.builtins().add(nn.SiLU)
 
