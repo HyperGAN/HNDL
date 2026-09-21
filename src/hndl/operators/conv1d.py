@@ -1,5 +1,6 @@
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.utils import parametrizations
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ._relations import conv_output
@@ -30,9 +31,21 @@ def _relation(s):
 
 
 def _reference(module):
-    """The functional form of the same convolution, sharing the module's parameters."""
+    """The functional form of the same convolution, sharing the module's parameters.
+
+    Under ``spectral_norm=True`` the weight is a parametrization that advances
+    its power iteration on every training-mode access, so the weight is read in
+    evaluation mode: that reuses the vectors the module's own forward just
+    refreshed and therefore reproduces exactly the weight it applied.
+    """
     def apply(x):
-        return F.conv1d(x, module.weight, module.bias, stride=module.stride, padding=module.padding,
+        training = module.training
+        module.eval()
+        try:
+            weight = module.weight
+        finally:
+            module.train(training)
+        return F.conv1d(x, weight, module.bias, stride=module.stride, padding=module.padding,
                         dilation=module.dilation, groups=module.groups)
     return apply
 
@@ -55,6 +68,8 @@ def _reference(module):
         "dilation": Arg(int, 1, min=1, positional=False, help="Spacing between kernel taps along the length axis."),
         "groups": Arg(int, 1, min=1, positional=False, help="Channel groups; must divide input and output channels."),
         "bias": Arg(bool, True, positional=False, help="Add a learned per-channel bias."),
+        "spectral_norm": Arg(bool, False, positional=False,
+                             help="Divide the weight by its largest singular value, estimated by power iteration."),
     },
     examples=[
         Example("conv1d(16, kernel_size=3, padding=1)\nrelu()\nconv1d(4, kernel_size=3, padding=1)",
@@ -63,6 +78,10 @@ def _reference(module):
                 "Kernel 4, stride 2, padding 1 halves the length."),
         Example("conv1d(6, kernel_size=3, dilation=2)\ngroup_norm(3)\nrelu()", ("B", 2, 16), ("B", 6, 12),
                 "Dilation 2 widens the receptive field to 5 positions and trims 4 from the length."),
+        Example("conv1d(16, kernel_size=4, stride=2, padding=1, spectral_norm=True)\nleaky_relu(0.2)\n"
+                "conv1d(32, kernel_size=4, stride=2, padding=1, spectral_norm=True)",
+                ("B", 1, 64), ("B", 32, 16),
+                "A spectrally normalized waveform discriminator trunk."),
     ],
     category="convolution",
 )
@@ -95,10 +114,31 @@ class Conv1d(nn.Conv1d):
 
     Parameters are `weight` of shape `[out_channels, in_channels / groups,
     kernel_size]` and, when enabled, `bias` of shape `[out_channels]`.
-    Behavior is identical in train and eval mode, and the computation stays in
-    the input dtype.
+    Behavior is identical in train and eval mode unless `spectral_norm` is
+    enabled, and the computation stays in the input dtype.
+
+    ## Spectral normalization
+
+    With `spectral_norm=True` the weight is reparametrized as `weight /
+    sigma(weight)`, where `sigma` is the largest singular value of the weight
+    viewed as an `[out_channels, -1]` matrix, estimated by one power iteration
+    per forward pass
+    (`torch.nn.utils.parametrizations.spectral_norm`). The layer is then
+    1-Lipschitz, the standard constraint for a GAN discriminator.
+
+    The parametrization renames the registered state: the learned tensor
+    becomes `parametrizations.weight.original` and `weight` turns into a
+    computed attribute, with persistent buffers
+    `parametrizations.weight.0._u` and `parametrizations.weight.0._v` holding
+    the power-iteration vectors. `init` and `trainable` overrides must
+    therefore target `parametrizations.weight.original` instead of `weight`;
+    `bias` is unaffected. The power iteration refreshes the buffers in
+    training mode only, so evaluation is a pure function of the stored state.
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias,
+                 spectral_norm):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=padding,
                          dilation=dilation, groups=groups, bias=bias)
+        if spectral_norm:
+            parametrizations.spectral_norm(self)

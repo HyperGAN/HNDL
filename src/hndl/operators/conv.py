@@ -1,4 +1,5 @@
 from torch import nn
+from torch.nn.utils import parametrizations
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, PAIR, Policy, operator
 from ._relations import spatial
@@ -51,6 +52,8 @@ def _relation(s):
         "dilation": Arg(PAIR, 1, min=1, positional=False, help="Spacing between kernel taps."),
         "groups": Arg(int, 1, min=1, positional=False, help="Channel groups; must divide input and output channels."),
         "bias": Arg(bool, True, positional=False, help="Add a learned per-channel bias."),
+        "spectral_norm": Arg(bool, False, positional=False,
+                             help="Divide the weight by its largest singular value, estimated by power iteration."),
     },
     policies={"down2": Policy(DOWN2, {"kernel_size": 4, "stride": 2, "padding": 1, "dilation": 1, "groups": 1})},
     examples=[
@@ -62,6 +65,12 @@ def _relation(s):
                 ("B", 3, 32, 32), ("B", 1),
                 'A DCGAN-style discriminator: the "down2" policy fixes kernel 4, stride 2, padding 1, and the '
                 "8x8 feature map and its 8192-wide flattening resolve backward."),
+        Example('conv(64, policy="down2", spectral_norm=True)\nleaky_relu(0.2)\n'
+                'conv(128, policy="down2", spectral_norm=True)\nleaky_relu(0.2)\nflatten()\n'
+                "linear(spectral_norm=True)",
+                ("B", 3, 32, 32), ("B", 1),
+                "An SN-GAN discriminator: the same downsampling stack with every weight constrained to unit "
+                "spectral norm."),
     ],
     category="convolution",
 )
@@ -77,7 +86,7 @@ class Conv2d(nn.Conv2d):
     and the same formula on the width axis. Parameters are ``weight`` with
     shape ``[out_channels, in_channels / groups, kH, kW]`` and, when
     ``bias=True``, ``bias`` with shape ``[out_channels]``. Behavior is
-    identical in training and evaluation.
+    identical in training and evaluation unless ``spectral_norm`` is enabled.
 
     Inverse inference from a known output extent may leave an interval of
     valid input sizes; that ambiguity is reported rather than resolved
@@ -89,8 +98,32 @@ class Conv2d(nn.Conv2d):
     alone. An explicit argument contradicting the policy fails with
     ``E_POLICY_CONFLICT``; an odd input extent under the policy fails with
     ``E_CONSTRAINT``.
+
+    ## Spectral normalization
+
+    With ``spectral_norm=True`` the weight is reparametrized as ``weight /
+    sigma(weight)``, where ``sigma`` is the largest singular value of the
+    weight viewed as an ``[out_channels, -1]`` matrix, estimated by one power
+    iteration per forward pass
+    (``torch.nn.utils.parametrizations.spectral_norm``). This is the
+    discriminator constraint from SN-GAN; pair it with ``policy="down2"`` for
+    the usual downsampling critic.
+
+    The parametrization renames the registered state: the learned tensor
+    becomes ``parametrizations.weight.original`` and ``weight`` turns into a
+    computed attribute, with persistent buffers
+    ``parametrizations.weight.0._u`` and ``parametrizations.weight.0._v``
+    holding the power-iteration vectors. ``init`` and ``trainable``
+    overrides must therefore target ``parametrizations.weight.original``
+    instead of ``weight``; ``bias`` is unaffected. The power iteration
+    refreshes the buffers in training mode only, so evaluation is a pure
+    function of the stored state — the one case where this operator's
+    behavior differs between training and evaluation.
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias,
+                 spectral_norm):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=padding,
                          dilation=dilation, groups=groups, bias=bias)
+        if spectral_norm:
+            parametrizations.spectral_norm(self)

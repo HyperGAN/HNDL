@@ -29,6 +29,7 @@ Relation: `L_out = floor((L_in + 2*padding - dilation*(kernel_size - 1) - 1) / s
 | `dilation` | int | `1` | >= 1 | Spacing between kernel taps along the length axis. |
 | `groups` | int | `1` | >= 1 | Channel groups; must divide input and output channels. |
 | `bias` | bool | `True` | — | Add a learned per-channel bias. |
+| `spectral_norm` | bool | `False` | — | Divide the weight by its largest singular value, estimated by power iteration. |
 
 ## Description
 
@@ -60,8 +61,26 @@ resolver reports the ambiguity rather than choosing one.
 
 Parameters are `weight` of shape `[out_channels, in_channels / groups,
 kernel_size]` and, when enabled, `bias` of shape `[out_channels]`.
-Behavior is identical in train and eval mode, and the computation stays in
-the input dtype.
+Behavior is identical in train and eval mode unless `spectral_norm` is
+enabled, and the computation stays in the input dtype.
+
+## Spectral normalization
+
+With `spectral_norm=True` the weight is reparametrized as `weight /
+sigma(weight)`, where `sigma` is the largest singular value of the weight
+viewed as an `[out_channels, -1]` matrix, estimated by one power iteration
+per forward pass
+(`torch.nn.utils.parametrizations.spectral_norm`). The layer is then
+1-Lipschitz, the standard constraint for a GAN discriminator.
+
+The parametrization renames the registered state: the learned tensor
+becomes `parametrizations.weight.original` and `weight` turns into a
+computed attribute, with persistent buffers
+`parametrizations.weight.0._u` and `parametrizations.weight.0._v` holding
+the power-iteration vectors. `init` and `trainable` overrides must
+therefore target `parametrizations.weight.original` instead of `weight`;
+`bias` is unaffected. The power iteration refreshes the buffers in
+training mode only, so evaluation is a pure function of the stored state.
 
 ## Examples
 
@@ -126,3 +145,25 @@ index  name  operation   input shapes  output shapes
 ```
 
 Parameters: 54
+
+### Example 4
+
+A spectrally normalized waveform discriminator trunk.
+
+```python
+conv1d(16, kernel_size=4, stride=2, padding=1, spectral_norm=True)
+leaky_relu(0.2)
+conv1d(32, kernel_size=4, stride=2, padding=1, spectral_norm=True)
+```
+
+Input `['B', 1, 64]` → output `['B', 32, 16]`.
+
+```text
+Network: [B, 1, 64] -> [B, 32, 16]  dtype=float32
+index  name  operation   input shapes   output shapes
+0      n0    conv1d      x=[B, 1, 64]   out=[B, 16, 32]
+1      n1    leaky_relu  x=[B, 16, 32]  out=[B, 16, 32]
+2      n2    conv1d      x=[B, 16, 32]  out=[B, 32, 16]
+```
+
+Parameters: 2,160
