@@ -26,6 +26,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | Operator | Summary |
 | --- | --- |
 | [`conv`](conv.md) | Two-dimensional convolution over [B, C, H, W] images. |
+| [`conv1d`](conv1d.md) | One-dimensional convolution over [B, C, L] signals. |
 | [`deconv`](deconv.md) | Transposed two-dimensional convolution, typically for upsampling. |
 
 ## core
