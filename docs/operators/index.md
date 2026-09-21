@@ -10,11 +10,15 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`clamp`](clamp.md) | Saturate every element into the closed interval [min, max]. |
 | [`dropout`](dropout.md) | Randomly zero elements during training and rescale the rest. |
 | [`elu`](elu.md) | Exponential linear unit: identity above zero, saturating below. |
+| [`gelu`](gelu.md) | Gaussian error linear unit, x * Phi(x). |
 | [`hardswish`](hardswish.md) | Piecewise-linear approximation of swish, x * relu6(x + 3) / 6. |
 | [`identity`](identity.md) | Pass the tensor through unchanged, as a named node. |
 | [`leaky_relu`](leaky_relu.md) | ReLU with a small slope for negative inputs. |
 | [`mish`](mish.md) | Self-gated smooth activation, x * tanh(softplus(x)). |
+| [`quick_gelu`](quick_gelu.md) | CLIP's fast GELU approximation, x * sigmoid(1.702 * x). |
 | [`relu`](relu.md) | Rectified linear unit, max(x, 0). |
+| [`sigmoid`](sigmoid.md) | Logistic sigmoid, squashing values into (0, 1). |
+| [`silu`](silu.md) | Sigmoid linear unit (swish), x * sigmoid(x). |
 | [`softmax`](softmax.md) | Normalize one non-batch axis into a probability distribution. |
 | [`softplus`](softplus.md) | Smooth positive activation, log(1 + exp(beta*x)) / beta. |
 | [`tanh`](tanh.md) | Hyperbolic tangent, squashing values into (-1, 1). |

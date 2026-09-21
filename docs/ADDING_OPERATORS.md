@@ -123,12 +123,12 @@ from hndl.torch import network
 
 registry = Registry.builtins()
 
-@registry.operator("silu", identity="example.silu", summary="SiLU activation.",
+@registry.operator("my_silu", identity="example.silu", summary="SiLU activation.",
                    shape="x[B, ...] -> out[B, ...]")
 class SiLU(nn.SiLU):
     pass
 
-model = network("linear(64); silu(); linear()", input_shape=("B", 128), output_shape=("B", 10),
+model = network("linear(64); my_silu(); linear()", input_shape=("B", 128), output_shape=("B", 10),
                 registry=registry, device="cuda:0")
 ```
 

@@ -277,11 +277,11 @@ def test_runtime_device_mismatch_and_module_moves():
 def test_custom_operator_builds_with_shared_shape_inference():
     registry = Registry.builtins()
 
-    @registry.operator("silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
+    @registry.operator("my_silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
     class SiLU(nn.SiLU):
         pass
 
-    model = network("linear(); silu()", input_shape=("B", 4), output_shape=("B", 3),
+    model = network("linear(); my_silu()", input_shape=("B", 4), output_shape=("B", 3),
                     device="cpu", registry=registry)
     x = torch.randn(2, 4, requires_grad=True)
     torch.testing.assert_close(model(x), nn.functional.silu(model[0](x)))

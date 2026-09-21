@@ -153,13 +153,13 @@ def test_concurrent_captures_keep_independent_current_tensors():
 def test_registry_factories_require_selected_exact_identity():
     registry = Registry.builtins()
 
-    @registry.operator("silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
+    @registry.operator("my_silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
     class SiLU(nn.SiLU):
         pass
 
     with pytest.raises(HNDLError, match="E_STATE_VERSION"):
-        capture(lambda x: registry.ops.silu())
-    graph = capture(lambda x: registry.ops.silu(), registry=registry)
+        capture(lambda x: registry.ops.my_silu())
+    graph = capture(lambda x: registry.ops.my_silu(), registry=registry)
     assert graph.nodes[0].op == "example.silu@1"
 
 
