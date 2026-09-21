@@ -10,7 +10,7 @@ The first release of HNDL, the human-readable network definition language.
   scalar arguments with help text, and runnable examples. Custom operators use
   the same decorator on a `Registry`. Documentation is generated from the
   declarations with `python -m hndl.docs`.
-- **Catalog of sixty operators.** Activations (`gelu`, `silu`, `softmax`, …),
+- **Catalog of 59 operators.** Activations (`gelu`, `silu`, `softmax`, …),
   arithmetic and shape plumbing (`add`, `mul`, `transpose`, `permute`, `mean`,
   `pad`, …), normalizations (`layer_norm`, `rms_norm`, `batch_norm`,
   `instance_norm`, `group_norm`, `adaptive_norm`), convolution and spatial

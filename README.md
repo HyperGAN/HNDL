@@ -4,7 +4,7 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: 0.1.0.** Config strings, native Python functions, bidirectional shape inference, branches, a catalog of sixty documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](docs/operators/index.md), the [authored networks](docs/networks.md), and the [implementation notes](IMPLEMENTATION.md). Diagnostics below are illustrative.
+**Status: 0.1.0.** Config strings, native Python functions, bidirectional shape inference, branches, a catalog of 59 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](docs/operators/index.md), the [authored networks](docs/networks.md), and the [implementation notes](IMPLEMENTATION.md). Diagnostics below are illustrative.
 
 From a checkout, install on Linux with Python 3.11–3.14:
 
