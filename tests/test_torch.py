@@ -3,6 +3,7 @@
 
 import subprocess
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -242,6 +243,28 @@ def test_runtime_input_contracts_and_empty_identity():
     assert len(identity) == 0
 
 
+def test_direct_plan_tampering_rejected_before_module_allocation(monkeypatch):
+    plan = hndl.resolve("linear(3)", input_shape=("B", 4), output_shape=("B", 3))
+    forged = replace(plan, nodes=(replace(plan.nodes[0], state_bytes=0),))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid plan must fail before constructing a module")
+    monkeypatch.setattr(nn, "Linear", forbidden)
+    with pytest.raises(HNDLError, match="E_INTEGRITY"):
+        build(forged, device="cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available on this host")
+def test_runtime_device_mismatch_and_module_moves():
+    model = _mlp(device="cuda:0")
+    with pytest.raises(HNDLError, match="E_RUNTIME"):
+        model(torch.ones(2, 4))
+    model.cpu()
+    assert model(torch.ones(2, 4)).shape == (2, 2)
+    identity = network("", input_shape=("B", 4), output_shape=("B", 4), device="cpu").cuda(0)
+    x = torch.ones(2, 4, device="cuda:0")
+    assert identity(x) is x
+
+
 def test_custom_exact_registration_bounds_and_runtime_contract():
     registry = Registry.builtins()
     registry.register("silu", identity="example.silu", version=1, shape=preserves_shape, max_state_bytes=0)
@@ -277,6 +300,16 @@ def test_custom_exact_registration_bounds_and_runtime_contract():
     broken = network("wrong()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
     with pytest.raises(HNDLError, match="E_RUNTIME"):
         broken(torch.randn(2, 4))
+
+    class LateParameter(nn.Module):
+        def forward(self, x):
+            self.weight = nn.Parameter(torch.ones(1))
+            return x
+    registry.register("late", identity="test.late", version=1, shape=preserves_shape, max_state_bytes=0)
+    register_torch(registry, "late", module=LateParameter, state_version=1)
+    late = network("late()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
+    with pytest.raises(HNDLError, match="E_RUNTIME"):
+        late(torch.randn(2, 4))
 
 
 def test_file_and_callable_capture_once(tmp_path):
