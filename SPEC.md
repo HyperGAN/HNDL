@@ -454,7 +454,7 @@ The last convolution preserves spatial size. Three doubling stages give `output_
 
 ## 8. Custom operators and minimal graphs
 
-A custom operator registration must provide:
+The full v1 custom operator contract requires:
 
 | Component | Requirement |
 | --- | --- |
@@ -498,9 +498,9 @@ linear()
 )
 ```
 
-`Registry.builtins()` returns an independently extensible registry containing the fixed built-in aliases. `register(alias, *, identity, version, shape, max_state_bytes, state_version=1, arguments=None, input_ports=None, output_ports=None)` binds a new alias to its exact operator identity/version. The no-argument unary helper shown here supplies an empty argument schema, input port `x`, output port `out`, default state compatibility version `1`, and unqualified capability status. State compatibility metadata belongs to the pure registration, so resolution can record it without loading a backend. More complex operators must declare their schemas/ports explicitly through the full extension API.
+`Registry.builtins()` returns an independently extensible registry containing the fixed built-in aliases. Custom aliases must be Python identifiers other than keywords or `x`/`out`, and must not start with an underscore. `register(alias, *, identity, version, shape, max_state_bytes, state_version=1, arguments=None, input_ports=None, output_ports=None)` binds a new alias to its exact operator identity/version. The no-argument unary helper shown here supplies an empty argument schema, input port `x`, output port `out`, default state compatibility version `1`, and unqualified capability status. State compatibility metadata belongs to the pure registration, so resolution can record it without loading a backend. More complex operators must declare their schemas/ports explicitly through the full extension API.
 
-`max_state_bytes` is an explicit nonnegative per-node upper bound on registered parameter and buffer storage, including nonpersistent buffers, recorded in the pure registration and plan. The SiLU example declares zero because it owns neither parameters nor buffers; shape preservation alone does not imply this. Full providers may supply a pure bound derived from resolved arguments. The planner sums bounds before building, and the backend checks registered storage against the declaration after construction. These are trusted implementation contracts, not a sandbox for builder code or a bound on temporary allocations.
+`max_state_bytes` is an explicit nonnegative per-node upper bound on registered parameter and buffer storage, including nonpersistent buffers, recorded in the pure registration and plan. The SiLU example declares zero because it owns neither parameters nor buffers; shape preservation alone does not imply this. The v1 target also allows pure bounds derived from resolved arguments; the current API requires a fixed integer bound. The planner sums bounds before building, and the backend checks registered storage against the declaration after construction. These are trusted implementation contracts, not a sandbox for builder code or a bound on temporary allocations.
 
 `preserves_shape` contributes bidirectional equality relations for input/output dimensions, layout, and dtype; it is not merely a forward shape callback. Downstream constraints can therefore propagate through this custom layer. The provider's claim must still be verified against the actual module during numerical qualification; registering it does not qualify its device/dtype/gradient behavior.
 
@@ -528,7 +528,7 @@ registry.register(
 )
 ```
 
-Input/output mapping order defines port order. Explicit `input_ports` and `output_ports`, if supplied, must match that order exactly. A sole input can use the implicit current tensor regardless of its port name. Multiple inputs must all be explicit. Multiple outputs return an ordered symbolic tuple and clear current. Input ports and scalar argument names must be distinct; frontend metadata names `name` and `policy` are reserved.
+Input/output mapping order defines port order. Explicit `input_ports` and `output_ports`, if supplied, must match that order exactly. A sole input can use the implicit current tensor regardless of its port name. Multiple inputs must all be explicit. Multiple outputs return an ordered symbolic tuple and clear current. Scalar argument names must not collide with input or output port names; frontend metadata names `name` and `policy` are reserved.
 
 `arguments` is an ordered mapping of scalar names to `Argument` declarations. Scalar positional arguments follow tensor inputs in that mapping's order; keyword arguments use their declared names. Supported types are `int`, `float`, `bool`, and `str`. Integers and booleans are distinct; float arguments accept finite integer or float literals and normalize them to floats. An argument without a default is required. Numeric `minimum` and `maximum` are inclusive unless their corresponding `exclusive_minimum` or `exclusive_maximum` flag is true. Defaults pass the same validation as explicit values and become concrete plan arguments. Custom scalars are not inferred in this implementation.
 
