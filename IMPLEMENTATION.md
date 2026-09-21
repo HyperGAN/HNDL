@@ -17,8 +17,12 @@ in this alpha.
   Contradictions fail; the resolver does not choose arbitrary missing sizes.
 - PyTorch modules, shape tables, name lookup, sequence indexing and shared
   slices, ordinary autograd, state dictionaries, and CPU/CUDA construction.
-- Separate, versioned registration of unary shape-preserving operations and
-  trusted PyTorch constructors, including the README's SiLU example.
+- Separate, versioned registration of custom operations and trusted PyTorch
+  constructors: scalar argument schemas, ordered input/output ports, and
+  bidirectional shape rules with shared or integer-scaled dimensions. The
+  unary `preserves_shape` helper remains available.
+- An executable AdaIN-style example with inferred feature/style projections,
+  split/remainder routing, shared branches, and numerical/gradient checks.
 - Immutable resolved graph data, canonical JSON plan persistence, digests,
   exact operator/state-version checks, and `build(plan)` without recapturing an
   author function. JSON is a persistence format, not an authoring language.
@@ -37,7 +41,8 @@ The backend requires PyTorch 2.6 or newer in the 2.x series. Plans use
 may be symbolic (`"B"`). Other dimensions and runtime batch sizes must be
 positive integers. The device is always caller-selected.
 
-All unary operations take an optional leading tensor or `x=`. The remaining
+Built-in unary operations take an optional leading tensor or `x=`. Custom
+unary operations use their declared input-port keyword. The built-in scalar
 arguments are listed below. Omitted inferable fields have no numeric default.
 
 | Call | Arguments and defaults |
@@ -79,6 +84,32 @@ Custom implementations are trusted and must honor their declared storage
 bounds. These bounds do not estimate peak training memory or bound arbitrary
 native Python authoring code.
 
+## Custom operation scope
+
+`Argument`, `Dim`, and `ShapeRule` are pure declarations; they do not import
+PyTorch or execute callbacks. Shared dimension names impose equality within
+one node, and `Dim("C", scale=2)` imposes an exact integer multiple in either
+direction. Literal dimensions are also supported. Patterns include batch and
+use the same rank-two/rank-four contracts as built-in operations. See the
+[registration examples](README.md#register-your-own-operation) and the
+[technical contract](SPEC.md#declarative-custom-schemas-and-shape-rules).
+
+Each registration permits at most 32 input ports, 32 output ports, 64 scalar
+arguments, and 64 distinct dimension symbols. Port, argument, and dimension
+names are limited to 64 characters. Dimension literals and scales are capped
+at `2**31 - 1`; the usually lower runtime `max_dimension` still applies to
+resolved extents. Integer scalar arguments are bounded by `abs(value) <=
+2**63 - 1`, and string arguments by 16,384 UTF-8 bytes. Float values must be
+finite. Schemas may apply tighter numeric bounds. Omitted scalar arguments
+need an explicit default; custom scalar inference is not implemented.
+
+The [adaptive-normalization example](examples/adaptive_normalization.py)
+shows registration and both a shared mapping branch and split/remainder
+routing. Run it with `python examples/adaptive_normalization.py --device cpu`
+(or an available CUDA device). Its style-affine zero initialization is an
+explicit PyTorch action after construction; save the state dictionary along
+with the plan to preserve initialized or trained values.
+
 ## Saving a resolved plan
 
 Use the plan alongside the model's ordinary PyTorch state dictionary:
@@ -114,8 +145,9 @@ as loading declarative source.
 
 ## Remaining v1 work
 
-- General custom operators with explicit argument/port schemas and custom
-  bidirectional shape relations; the adaptive instance-normalization fixture.
+- Custom shape relations beyond equality and integer scaling, inferable custom
+  scalar arguments, argument-dependent shapes and state bounds, and opaque
+  asserted contracts. Arbitrary custom shape callbacks are not accepted.
 - General custom construction policies, initializer overrides, and persisted
   per-node trainability masks.
 - Full derivation chains and source provenance for every inferred value.
