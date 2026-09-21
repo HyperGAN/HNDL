@@ -9,7 +9,7 @@ def _relation(s):
     args = s.args
     source = sources.resolve_source(args["source"], args["config"], args["provider"], args["sha256"])
     s.arg("revision", source.revision)
-    provider = sources.provider_for(source, args["output"], args["component"], args["layer"])
+    provider = sources.provider_for(source, args["output"], args["component"], args["layer"], args["readout"])
     contract = provider.contract()
     if contract.kind == "tensor":
         # A provider checkpoint declares no contract of its own; only the dtype is fixed.
@@ -37,7 +37,7 @@ def _relation(s):
     if x is None or any(value is None for value in x[1:]):
         return
     shape = sources.output_shape(args["source"], args["config"], args["output"], args["component"], tuple(x),
-                                 args["provider"], args["sha256"], args["layer"])
+                                 args["provider"], args["sha256"], args["layer"], args["readout"])
     s.rank("out", len(shape))
     for axis, value in enumerate(shape):
         if axis:
@@ -68,6 +68,10 @@ def _relation(s):
         "layer": Arg(str, "", positional=False,
                      help='Dotted named_modules() path of the provider submodule whose output the node returns, '
                           'such as "features.16"; empty returns the model\'s own output.'),
+        "readout": Arg(str, "", positional=False,
+                       help='Name of a readout the host registered with the provider, such as "patch_tokens"; the '
+                            'node returns that callable\'s tensor instead of the model\'s own output. Mutually '
+                            'exclusive with layer=.'),
         "revision": Arg(str, inferable=True, positional=False,
                         help="Resolved commit hash or content digest. Filled in at resolution and checked on restore."),
     },
@@ -119,9 +123,34 @@ class Pretrained(nn.Module):
     model's own output. Provider checkpoints declare no input contract, so the
     graph input shape is whatever the module accepts (floating point); the
     meta-device trace checks it.
+
+    ``readout=`` names host code instead of a submodule, for checkpoints whose
+    useful tensor comes from a method rather than ``forward``. The host binds
+    named ``callable(model, x)`` readouts to the provider, and configuration may
+    only name one of them::
+
+        registry.pretrained_provider("dinov2_vits14", build_dinov2, readouts={
+            "patch_tokens": lambda m, x: m.forward_features(x)["x_norm_patchtokens"],
+            "layers_2_5_8_11": lambda m, x: torch.cat(
+                m.get_intermediate_layers(x, n=(2, 5, 8, 11), reshape=True, norm=True), dim=1),
+        })
+
+    which a network then selects with
+    ``pretrained("/path/dinov2_vits14.pth", provider="dinov2_vits14",
+    sha256="<64 hex>", readout="patch_tokens")``. Readouts can also be added to
+    an existing provider with
+    ``registry.pretrained_readout("dinov2_vits14", "cls_token", fn)``. A readout
+    must return exactly one tensor --- concatenate or stack several inside the
+    readout, or register one readout per tensor --- and it runs during
+    resolution on PyTorch's meta device, so it must be a pure function of
+    ``(model, x)`` that touches no real data. ``readout=`` and ``layer=`` are
+    mutually exclusive, an unknown readout name fails with ``E_PRETRAINED``
+    listing the ones registered for that provider, and neither applies to
+    transformers or timm checkpoints, which select ``output=``.
     """
 
-    def __init__(self, source, output, component, config, revision, provider, sha256, layer, *, input_shapes):
+    def __init__(self, source, output, component, config, revision, provider, sha256, layer, readout, *,
+                 input_shapes):
         super().__init__()
         materialize = torch.empty(0).device.type != "meta"
         if provider and not materialize:
@@ -131,7 +160,8 @@ class Pretrained(nn.Module):
         self.output = output
         self.component = component
         self.layer = layer
-        self.provider = sources.provider_for(self.source, output, component, layer)
+        self.readout = readout
+        self.provider = sources.provider_for(self.source, output, component, layer, readout)
         self.kind = self.provider.contract().kind
         self.model = self.provider.instantiate(weights=materialize)
         self.model.eval()
@@ -150,6 +180,7 @@ class Pretrained(nn.Module):
     def extra_repr(self):
         component = f", component={self.component!r}" if self.component else ""
         if self.source.kind == "state_dict":
-            layer = f", layer={self.layer!r}" if self.layer else ""
-            return f"source={self.source.spec!r}, provider={self.source.config['provider']!r}{layer}"
+            selected = f", layer={self.layer!r}" if self.layer else ""
+            selected += f", readout={self.readout!r}" if self.readout else ""
+            return f"source={self.source.spec!r}, provider={self.source.config['provider']!r}{selected}"
         return f"source={self.source.spec!r}, output={self.output!r}{component}"

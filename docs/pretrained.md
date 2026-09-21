@@ -142,9 +142,40 @@ or read it from the `E_PRETRAINED` message raised when `sha256=` is missing.
   `"features.2"` or `"layer3.1.conv2"`. The node runs the model with a forward
   hook on that submodule, returns its output, and stops the pass there, which
   is what perceptual losses and feature matching want. An unknown name fails
-  with `E_PRETRAINED` listing the available submodules. Omit `layer` and the
-  node returns the model's own return value. `output=`, `component=` and
-  `config=` apply to transformers and timm checkpoints, not to providers.
+  with `E_PRETRAINED` listing the available submodules. Omit `layer` and
+  `readout` and the node returns the model's own return value. `output=`,
+  `component=` and `config=` apply to transformers and timm checkpoints, not to
+  providers.
+- **`readout=`** names host code instead of a submodule, for checkpoints whose
+  useful tensor comes from a method rather than `forward` — DINOv2's
+  `forward_features(x)["x_norm_patchtokens"]`, for example. The host binds named
+  `callable(model, x)` readouts to the provider and configuration may only name
+  one of them:
+
+  ```python
+  registry.pretrained_provider("dinov2_vits14", build_dinov2, readouts={
+      "patch_tokens": lambda m, x: m.forward_features(x)["x_norm_patchtokens"],
+      "layers_2_5_8_11": lambda m, x: torch.cat(
+          m.get_intermediate_layers(x, n=(2, 5, 8, 11), reshape=True, norm=True), dim=1),
+  })
+  ```
+
+  ```python
+  pretrained("dinov2_vits14.pth", provider="dinov2_vits14", sha256="<64 hex>",
+             readout="patch_tokens")
+  ```
+
+  `registry.pretrained_readout("dinov2_vits14", "cls_token", fn)` adds one to a
+  provider that is already registered, and
+  `registry.pretrained_readouts("dinov2_vits14")` lists what a provider offers.
+  A readout must return exactly one tensor: combine several with `torch.cat` or
+  `torch.stack` inside the readout, or register one readout per tensor you need,
+  or anything else fails with `E_PRETRAINED`. It also runs on the `meta` device
+  while the plan resolves, so it must be a pure function of `(model, x)` that
+  touches no real data and allocates nothing outside the model. An unregistered
+  name fails with `E_PRETRAINED` listing that provider's readouts, and
+  `readout=` and `layer=` are mutually exclusive — they both say what the node
+  returns.
 - The whole module is still constructed, so the layers after `layer=` are
   registered (and counted by `parameter_counts`) even though they never run.
   Return a truncated module from the builder if you want them gone.
