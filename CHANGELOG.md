@@ -45,6 +45,19 @@
   tensor and the compute dtype from the plan. It has no parameters and no
   buffers, its output is detached from the autograd graph, and the shape may
   be omitted and read from the output contract.
+- **`matmul` operator.** A batched matrix product of two rank-3 tensors,
+  `a[B, N, K], b[B, K, M] -> out[B, N, M]`, with both operands explicit. The
+  shared inner dimension `K` flows in both directions; other ranks are
+  rejected with `E_CONSTRAINT`, so reshape a `[B, C, H, W]` map to
+  `[B, C, H*W]` first.
+- **`learned_scale` operator.** `out = gamma * x` with one learned scalar
+  parameter named `gamma`, started from `init_value` (default `0.0`, the SAGAN
+  convention that makes a gated residual begin as the identity). Use `scale`
+  for a fixed constant.
+- **SAGAN self-attention example.** `examples/networks/sagan_attention.hndl`
+  builds the Self-Attention GAN block (Zhang et al. 2018) from registered
+  operators alone: 1x1 projections, `reshape`/`transpose`, two `matmul`s
+  around a `softmax`, and a `learned_scale` gate on the residual.
 
 ## 0.1.2 (2026-09-21)
 

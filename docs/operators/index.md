@@ -29,6 +29,8 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`broadcast_add`](broadcast_add.md) | Elementwise sum of two tensors of equal rank, broadcasting size-1 axes. |
 | [`clamp`](clamp.md) | Saturate every element into the closed interval [min, max]. |
 | [`constant`](constant.md) | Emit a tensor of a fixed shape filled with one constant value. |
+| [`learned_scale`](learned_scale.md) | Multiply a tensor by one learned scalar. |
+| [`matmul`](matmul.md) | Batched matrix product of two rank-3 tensors. |
 | [`mul`](mul.md) | Elementwise product of two tensors with identical shapes. |
 | [`scale`](scale.md) | Multiply a tensor by a fixed scalar. |
 | [`sub`](sub.md) | Elementwise difference of two tensors with identical shapes. |
