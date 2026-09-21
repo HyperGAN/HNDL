@@ -430,6 +430,7 @@ class _Solver:
                 input_shapes={key: tuple(self.shapes[ref]) for key, ref in node.inputs.items()},
                 output_shapes={key: tuple(self.shapes[f"node:{node.id}/{key}"]) for key in node.outputs},
                 state_bytes=state_bytes, state_version=self.specs[node.id].state_version, provenance=origins,
+                initialization=node.initialization, trainability=node.trainability,
             ))
         return tuple(resolved)
 
@@ -476,9 +477,9 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
         raise HNDLError("E_SCHEMA", "Expected an immutable ResolvedPlan")
     registry = registry or plan.registry or Registry.builtins()
     bounds = _limits(limits)
-    if (type(plan.schema_version) is not int or plan.schema_version != 1
+    if (type(plan.schema_version) is not int or plan.schema_version != 2
             or type(plan.resolution_version) is not int or plan.resolution_version != 1):
-        raise HNDLError("E_STATE_VERSION", "Unsupported plan schema/resolution version")
+        raise HNDLError("E_STATE_VERSION", "Expected plan schema 2 and resolution version 1; re-resolve older alpha author sources with explicit construction settings")
     for node in plan.nodes:
         spec = registry.by_identity(node.op)
         if type(node.state_version) is not int or node.state_version != spec.state_version:
@@ -489,7 +490,8 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
             raise HNDLError("E_SCHEMA", "Saved port contracts are incomplete", node=node.id)
         for shape in (*node.input_shapes.values(), *node.output_shapes.values()):
             _contract(shape, f"{node.id} port", bounds)
-    graph = Graph(tuple(Node(node.id, node.op, node.args, node.inputs, node.outputs, node.source) for node in plan.nodes),
+    graph = Graph(tuple(Node(node.id, node.op, node.args, node.inputs, node.outputs, node.source,
+                             initialization=node.initialization, trainability=node.trainability) for node in plan.nodes),
                   plan.input_shape, plan.output_shape, plan.output_ref, plan.dtype, plan.frontend)
     verified = resolve_graph(graph, registry, bounds)
     if plan.semantic_digest != verified.semantic_digest:
