@@ -1,0 +1,8 @@
+{
+  "title": "Fully connected autoencoder",
+  "description": "Compress a 28×28 image through a 32-unit bottleneck and reconstruct it. The decoder's final width is inferred from the reshape target and the output contract.",
+  "input_shape": ["B", 1, 28, 28],
+  "output_shape": ["B", 1, 28, 28],
+  "parameters": 209968,
+  "reference": "Classic MNIST autoencoder with a 784-128-32-128-784 stack; 784·128+128 + 128·32+32 + 32·128+128 + 128·784+784 = 209,968 parameters, cross-checked against the equivalent torch.nn.Sequential."
+}
