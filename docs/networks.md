@@ -246,6 +246,58 @@ index  name    operation  input shapes      output shapes
 
 Parameters: 109,962. Hopfield layer of Ramsauer et al., "Hopfield Networks is All You Need" (2020), whose only parameter is the stored-pattern matrix; 784·128+128 + 64·128 + 128·10+10 = 109,962 parameters.
 
+## LeNet-5
+
+The classic convolutional digit classifier: two 5×5 convolution and 2×2 average-pooling stages, then 120- and 84-unit tanh layers. The final width is inferred from the output contract.
+
+`examples/networks/lenet5.hndl`
+
+```python
+# LeNet-5 (LeCun et al. 1998) for 32×32 grayscale digits.
+# Valid 5×5 convolutions and 2×2 average pooling: 32 -> 28 -> 14 -> 10 -> 5.
+
+# C1/S2: six feature maps, then subsampling.
+conv(6, kernel_size=5, name="c1")
+tanh()
+avg_pool(2, name="s2")
+
+# C3/S4: sixteen feature maps, then subsampling. Leaves [B, 16, 5, 5].
+conv(16, kernel_size=5, name="c3")
+tanh()
+avg_pool(2, name="s4")
+
+# C5/F6: the classifier head over the 400 flattened features.
+flatten()
+linear(120, name="c5")
+tanh()
+linear(84, name="f6")
+tanh()
+
+# The output width is inferred from the contract (10 classes).
+linear(name="output")
+```
+
+Input `['B', 1, 32, 32]` → output `['B', 10]`.
+
+```text
+Network: [B, 1, 32, 32] -> [B, 10]  dtype=float32
+index  name    operation  input shapes       output shapes
+0      c1      conv       x=[B, 1, 32, 32]   out=[B, 6, 28, 28]
+1      n1      tanh       x=[B, 6, 28, 28]   out=[B, 6, 28, 28]
+2      s2      avg_pool   x=[B, 6, 28, 28]   out=[B, 6, 14, 14]
+3      c3      conv       x=[B, 6, 14, 14]   out=[B, 16, 10, 10]
+4      n4      tanh       x=[B, 16, 10, 10]  out=[B, 16, 10, 10]
+5      s4      avg_pool   x=[B, 16, 10, 10]  out=[B, 16, 5, 5]
+6      n6      flatten    x=[B, 16, 5, 5]    out=[B, 400]
+7      c5      linear     x=[B, 400]         out=[B, 120]
+8      n8      tanh       x=[B, 120]         out=[B, 120]
+9      f6      linear     x=[B, 120]         out=[B, 84]
+10     n10     tanh       x=[B, 84]          out=[B, 84]
+11     output  linear     x=[B, 84]          out=[B, 10]
+```
+
+Parameters: 61,706. LeCun et al., "Gradient-Based Learning Applied to Document Recognition" (Proc. IEEE, 1998), in the usual modern reading with fully connected C5/F6 layers; checked against the equivalent torch.nn stack: 156 + 2,416 + 48,120 + 10,164 + 850 = 61,706 parameters.
+
 ## Multilayer perceptron
 
 Flatten a 28×28 image and classify it with two ReLU hidden layers. The final width is inferred from the output contract.
