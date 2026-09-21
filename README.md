@@ -305,6 +305,57 @@ branches = network_from_callable(
 
 The helper explicitly starts each branch from its argument and returns a reference for the join. Native functions can also return a tensor explicitly to select the network output. Variable names do not name layers; optional `name="..."` arguments give layers stable identities for lookup and saved state.
 
+## Take several inputs and return several outputs
+
+`input_shape` and `output_shape` each accept one shape, as above, or a mapping of named shapes. A conditional GAN discriminator reads an image `x` and a one-hot label `y`, and returns both a score and the features behind it:
+
+```python
+discriminator = network(
+    """
+    # Project the label onto its own 28x28 plane and stack it on the image.
+    plane = linear(y, 784, name="label_projection")
+    label = reshape(plane, 1, 28, 28, name="label_plane")
+    concat(x, label, name="conditioned")
+
+    conv(64, policy="down2", name="stage1")
+    leaky_relu(0.2)
+
+    features = flatten(name="features")
+    logits = linear(1, name="logits")
+    """,
+    input_shape={"x": ("B", 1, 28, 28), "y": ("B", 10)},
+    output_shape={"logits": ("B", 1), "features": ("B", 12544)},
+    device="cpu",
+)
+
+result = discriminator(image, label)   # or discriminator(x=image, y=label)
+score, features = result["logits"], result["features"]
+```
+
+Every named input is prebound as a tensor variable, so `y` is available to `linear(y, 784)` just as `x` always was, and the first declared input is the initial current tensor. Every named output is selected by binding its name: `features = flatten(...)` and `logits = linear(1)` publish those two tensors. All the contracts share one batch symbol, and an input the network never reads is an error rather than a silent extra argument.
+
+The same network in native Python takes its inputs as keyword arguments and returns a mapping:
+
+```python
+def discriminator(*, x, y):
+    label = ops.reshape(ops.linear(y, 784), 1, 28, 28)
+    ops.concat(x, label)
+    ops.conv(64, policy="down2")
+    ops.leaky_relu(0.2)
+    features = ops.flatten()
+    return {"logits": ops.linear(1), "features": features}
+
+
+model = network_from_callable(
+    discriminator,
+    input_shape={"x": ("B", 1, 28, 28), "y": ("B", 10)},
+    output_shape={"logits": ("B", 1), "features": ("B", 12544)},
+    device="cpu",
+)
+```
+
+A network with one input and one output is unchanged: it takes a tensor and returns a tensor. With several inputs, pass them positionally in declaration order or by keyword; with several outputs, the call returns a dictionary keyed by the declared names. The [conditional discriminator](https://github.com/HyperGAN/HNDL/blob/master/examples/networks/conditional_discriminator.hndl) is a complete worked example. `input_dtype` accepts a mapping too, so a graph can take `{"tokens": "int64"}` alongside floating inputs.
+
 ## Set initial values and freeze layers
 
 Keep initialization choices with the network definition:

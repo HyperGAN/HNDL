@@ -58,6 +58,19 @@
   builds the Self-Attention GAN block (Zhang et al. 2018) from registered
   operators alone: 1x1 projections, `reshape`/`transpose`, two `matmul`s
   around a `softmax`, and a `learned_scale` gate on the residual.
+- **Named external inputs and outputs.** `input_shape` and `output_shape`
+  accept a mapping of named contracts — `{"z": ("B", 128), "y": ("B", 10)}` —
+  in every `resolve*`/`network*` entry point, and `input_dtype` accepts one
+  dtype per input. Declarative configuration prebinds each input as a local and
+  selects each output by binding its name; a callable receives the inputs as
+  keyword arguments and returns a mapping of named outputs. A network with one
+  input and one output is unchanged, down to the saved plan's bytes.
+- **Multi-output forward.** `GraphModule.forward(**inputs)` accepts exactly the
+  declared input names and returns a dictionary keyed by the declared output
+  names. The `network*` facades accept the inputs positionally or by keyword and
+  return a tensor for one output or that dictionary for several.
+- **Conditional GAN example.** `examples/networks/conditional_discriminator.hndl`
+  takes an image and a label and publishes `logits` and `features`.
 
 ## 0.1.2 (2026-09-21)
 
