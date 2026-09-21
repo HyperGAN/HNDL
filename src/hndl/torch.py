@@ -151,7 +151,7 @@ class GraphModule(nn.Module):
     def _check(self, value, shape, batch, location):
         if not isinstance(value, torch.Tensor):
             raise HNDLError("E_RUNTIME", f"{location} must be a tensor")
-        expected = tuple(batch if d == "B" else d for d in shape)
+        expected = tuple(batch if isinstance(d, str) else d for d in shape)
         if tuple(value.shape) != expected or value.ndim == 0 or value.shape[0] <= 0:
             raise HNDLError("E_RUNTIME", f"{location}: expected shape {expected}, got {tuple(value.shape)}")
         if value.dtype != torch.float32:

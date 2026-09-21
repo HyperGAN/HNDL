@@ -1,6 +1,9 @@
 """Numerical and integration checks for the optional PyTorch backend."""
 # ruff: noqa: E402 -- torch is an optional dependency checked before imports.
 
+import subprocess
+import sys
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -9,6 +12,7 @@ from torch import nn
 import hndl
 from hndl import HNDLError, Registry, preserves_shape
 from hndl.torch import build, network, network_file, network_from_callable, register_torch
+from hndl.types import ResolvedPlan
 
 
 DEVICES = ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else [])
@@ -195,6 +199,33 @@ def test_concat_and_unused_split_port():
     remainder = network("a, b = split(2); out = b", input_shape=("B", 5),
                         output_shape=("B", 3), device="cpu")
     torch.testing.assert_close(remainder(x), x[:, 2:])
+
+
+def test_saved_concat_uses_numeric_port_order():
+    model = network("a, b = split(1); concat(a,b,a,b,a,b,a,b,a,b,a,b)",
+                    input_shape=("B", 3), output_shape=("B", 18), device="cpu")
+    restored = build(ResolvedPlan.from_json(model.plan.to_json()), device="cpu")
+    x = torch.tensor([[1., 2., 3.]])
+    torch.testing.assert_close(restored(x=x)["output"], x.repeat(1, 6))
+
+
+def test_state_reload_in_fresh_process(tmp_path):
+    model = _mlp(device="cpu", initialization_seed=713)
+    (tmp_path / "plan.json").write_text(model.plan.to_json())
+    torch.save(model.state_dict(), tmp_path / "state.pt")
+    script = '''
+import pathlib, sys, torch
+from hndl.types import ResolvedPlan
+from hndl.torch import build
+path = pathlib.Path(sys.argv[1])
+plan = ResolvedPlan.from_json((path / "plan.json").read_text())
+model = build(plan, device="cpu")
+model.load_state_dict(torch.load(path / "state.pt", weights_only=True))
+torch.save(model(x=torch.ones(2, 4))["output"], path / "output.pt")
+'''
+    subprocess.run([sys.executable, "-c", script, str(tmp_path)], check=True, timeout=30)
+    torch.testing.assert_close(torch.load(tmp_path / "output.pt", weights_only=True),
+                               model(torch.ones(2, 4)))
 
 
 def test_runtime_input_contracts_and_empty_identity():
