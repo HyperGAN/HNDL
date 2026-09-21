@@ -169,8 +169,8 @@ or read it from the `E_PRETRAINED` message raised when `sha256=` is missing.
   provider that is already registered, and
   `registry.pretrained_readouts("dinov2_vits14")` lists what a provider offers.
   A readout must return exactly one tensor: combine several with `torch.cat` or
-  `torch.stack` inside the readout, or register one readout per tensor you need,
-  or anything else fails with `E_PRETRAINED`. It also runs on the `meta` device
+  `torch.stack` inside the readout, or register one readout per tensor you need;
+  anything else fails with `E_PRETRAINED`. It also runs on the `meta` device
   while the plan resolves, so it must be a pure function of `(model, x)` that
   touches no real data and allocates nothing outside the model. An unregistered
   name fails with `E_PRETRAINED` listing that provider's readouts, and
