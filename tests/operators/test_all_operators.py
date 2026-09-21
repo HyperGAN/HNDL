@@ -13,6 +13,14 @@ from hndl.torch import DTYPES, build, parameter_counts
 from .conftest import all_operators, contract, example_input, operator_examples
 
 
+def port_input(spec, port, shape, compute, device):
+    """A random tensor for one input port, honouring the port's declared dtype."""
+    dtype = DTYPES[spec.port_dtype(port, compute)]
+    if not dtype.is_floating_point:
+        return torch.randint(0, 8, (2, *shape[1:]), device=device).to(dtype)
+    return torch.randn(2, *shape[1:], device=device, dtype=dtype, requires_grad=True)
+
+
 def replay(graph, registry):
     """Rebuild a captured configuration through the native ``ops`` frontend."""
     def author(x):
@@ -121,16 +129,15 @@ def test_reference_implementation_matches(spec, example, device):
         pytest.skip(f"{spec.alias} declares no reference implementation")
     plan = resolve(example.source, **contract(example))
     model = build(plan, device=device, initialization_seed=5)
-    dtype = DTYPES[plan.dtype]
     for node in plan.nodes:
         if node.op != spec.key:
             continue
         module = model[node.id]
         reference = spec.reference(module)
         ports = spec.input_ports_for(node.args)
-        inputs = [torch.randn(2, *node.input_shapes[port][1:], device=device, dtype=dtype, requires_grad=True)
-                  for port in ports]
-        mirrors = [tensor.detach().clone().requires_grad_() for tensor in inputs]
+        inputs = [port_input(spec, port, node.input_shapes[port], plan.dtype, device) for port in ports]
+        mirrors = [tensor.detach().clone().requires_grad_() if tensor.requires_grad else tensor.clone()
+                   for tensor in inputs]
         actual, expected = module(*inputs), reference(*mirrors)
         actual = actual if isinstance(actual, (tuple, list)) else (actual,)
         expected = expected if isinstance(expected, (tuple, list)) else (expected,)
