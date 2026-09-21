@@ -112,9 +112,10 @@ def _shape_text(shape):
 def _is_chain(plan):
     previous = "input:x"
     for node in plan.nodes:
-        if dict(node.inputs) != {"x": previous} or tuple(node.outputs) != ("out",):
+        if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
+                or len(node.outputs) != 1):
             return False
-        previous = f"node:{node.id}/out"
+        previous = f"node:{node.id}/{node.outputs[0]}"
     return plan.output_ref == previous
 
 
@@ -230,7 +231,8 @@ class GraphModule(nn.Module):
             operation = {"conv2d": "conv", "conv_transpose2d": "deconv"}.get(operation, operation)
             if self._chain:
                 rows.append((str(i), node.id, operation,
-                             _shape_text(node.input_shapes["x"]), _shape_text(node.output_shapes["out"])))
+                             _shape_text(next(iter(node.input_shapes.values()))),
+                             _shape_text(next(iter(node.output_shapes.values())))))
             else:
                 inputs = ", ".join(f"{p}={node.inputs[p]}:{_shape_text(s)}" for p, s in node.input_shapes.items())
                 outputs = ", ".join(f"{p}={_shape_text(s)}" for p, s in node.output_shapes.items())
@@ -343,19 +345,40 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
                 raise HNDLError("E_STATE_VERSION", f"{node.id}: incompatible backend state version")
             custom[node.id] = binding
     modules = OrderedDict()
+    module_owners, tensor_owners, storage_owners = {}, {}, {}
+
+    def check_ownership(layer, node_id, *, record=False):
+        owned = [(module_owners, id(child)) for child in layer.modules()]
+        for tensor in (*layer.parameters(), *layer.buffers()):
+            owned.append((tensor_owners, id(tensor)))
+            storage = tensor.untyped_storage()
+            if storage.nbytes():
+                owned.append((storage_owners, (tensor.device, storage.data_ptr())))
+        for owners, key in owned:
+            if key in owners and owners[key] != node_id:
+                raise HNDLError("E_REGISTRY", f"{node_id}: backend reuses module or registered state from node {owners[key]}; each node must own an independent instance")
+        if record:
+            for owners, key in owned:
+                owners[key] = node_id
+
     with _initialization_rng(device, initialization_seed):
         for node in plan.nodes:
             if node.id in custom:
                 layer = custom[node.id].module(**dict(node.args))
                 if not isinstance(layer, nn.Module):
                     raise HNDLError("E_REGISTRY", f"{node.id}: backend constructor must return nn.Module")
+                # Check before .to() can mutate an earlier node's shared module.
+                check_ownership(layer, node.id)
                 if _state_bytes(layer) > node.state_bytes:
                     raise HNDLError("E_RESOURCE", f"{node.id}: registered parameter/buffer storage exceeds declared {node.state_bytes} bytes")
                 layer = layer.to(device=device, dtype=torch.float32)
+                if _state_bytes(layer) > node.state_bytes:
+                    raise HNDLError("E_RESOURCE", f"{node.id}: materialized parameter/buffer storage exceeds declared {node.state_bytes} bytes")
             else:
                 layer = _builtin(node, device)
                 if layer is None:
                     raise HNDLError("E_REGISTRY", f"No supported PyTorch implementation for {node.op}")
+            check_ownership(layer, node.id, record=True)
             modules[f"n_{node.id}"] = layer
     receipt = {"torch_version": str(torch.__version__), "device": str(device),
                "initialization_seed": initialization_seed,
