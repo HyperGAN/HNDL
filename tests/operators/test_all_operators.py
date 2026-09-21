@@ -47,7 +47,8 @@ def replay(graph, registry):
             elif trainability["overrides"]:
                 kwargs["trainable"] = dict(trainability["overrides"])
             result = getattr(registry.ops, spec.alias)(*tensors, name=node.id, **kwargs)
-            outputs = (result,) if len(node.outputs) == 1 else result
+            # A variadic output port returns a tuple even for a single output.
+            outputs = result if spec.returns_tuple(node.args) else (result,)
             for port, symbol in zip(node.outputs, outputs):
                 symbols[f"node:{node.id}/{port}"] = symbol
         return symbols[graph.output_ref]

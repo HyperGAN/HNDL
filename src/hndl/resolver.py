@@ -213,7 +213,8 @@ class _Solver:
             elif old[index] != value:
                 if index == 0:
                     self.error(code, f"Batch {old[index]!r} at {ref} conflicts with required {value!r}")
-                self.error(code, f"Dimension {index} at {ref}: {old[index]} conflicts with required {value}")
+                else:
+                    self.error(code, f"Dimension {index} at {ref}: {old[index]} conflicts with required {value}")
 
     def valid_batch(self, value):
         """Whether a batch entry is admissible for this plan.
@@ -223,7 +224,7 @@ class _Solver:
         batch-axis join or split introduces.
         """
         if type(self.batch) is int:
-            return type(value) is int and 0 < value
+            return type(value) is int and value > 0
         return batch_multiple(value) is not None
 
     def share_batch(self, refs):
