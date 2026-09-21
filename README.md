@@ -4,7 +4,15 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: design stage.** The API and console output below describe the proposed behavior. There is no implementation yet.
+**Status: initial alpha (`0.1.0a1`).** Config strings, native Python functions, shape inference, branches, and the PyTorch backend are implemented. The [implementation notes](IMPLEMENTATION.md) distinguish this release from the remaining v1 work in the spec. Display spacing and diagnostics below are illustrative.
+
+From a checkout, install on Linux with Python 3.11–3.14:
+
+```sh
+python -m pip install -e '.[torch]'
+```
+
+Use `python -m pip install -e .` for the pure resolver without PyTorch. CPU and CUDA devices are supported by the backend; select the device explicitly. Wheel and source distributions are built by CI. PyPI publication requires the one-time setup described in [CONTRIBUTING.md](CONTRIBUTING.md#publishing).
 
 ## A network in a string
 
@@ -181,7 +189,7 @@ branches = network(
 
 After a split there are two results, so there is no single current tensor. `linear(z1, 128)` explicitly starts the content branch; `relu()` then follows it implicitly. Passing `z2` starts the style branch. Joins such as `add(features, style)` take both inputs explicitly.
 
-The proposed graph display includes every input and output port:
+The graph display includes every input and output port:
 
 ```pycon
 >>> print(branches)
@@ -199,6 +207,8 @@ combined   add        a=features.out:[B, 128], b=style.out:[B, 128]     out=[B, 
 This branched model still accepts and returns a tensor. Layer lookup uses names; positional indexing and slicing apply to simple chains. The final current tensor is the output by default; ending on a split requires an explicit selection. An optional `out` binding overrides that choice: a split-only config can finish with `out = z2` to return the remainder. Assignments store references; they do not change the current tensor themselves.
 
 ### Feed a branch into adaptive normalization
+
+This is a planned v1 extension. The initial alpha supports custom unary operations that preserve shape; custom multi-input shape rules and the adaptive-normalization fixture are not implemented yet.
 
 With the custom `adaptive_norm` operation described in the spec registered, a config can route features and style parameters:
 
@@ -265,11 +275,11 @@ generator = network_file(
 
 File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, loops, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
 
-The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The proposed loader applies source, parser, graph, and model-size limits and parses all declarative input in an isolated worker. Even AST parsing can exhaust resources, so syntax restrictions alone are insufficient. See the [loading and trust contract](SPEC.md#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
+The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader applies source, parser, graph, and model-size limits and parses all declarative input in an isolated worker. Even AST parsing can exhaust resources, so syntax restrictions alone are insufficient. See the [loading and trust contract](SPEC.md#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
 
 ## Register your own operation
 
-Extend the vocabulary with a PyTorch module and its shape rule. Here is a proposed registration for the shape-preserving SiLU activation:
+Extend the vocabulary with a PyTorch module and its shape rule. Here is a registration for the shape-preserving SiLU activation:
 
 ```python
 from torch import nn
@@ -301,7 +311,7 @@ model = network(
 
 Configs now understand `silu()`. Native functions use `registry.ops.silu()` and pass that same registry to `network_from_callable`. `preserves_shape` tells the resolver that input and output dimensions, layout, and dtype are equal, so constraints propagate in both directions. `max_state_bytes=0` declares that this operation has no parameter or buffer storage. The backend constructs an `nn.SiLU` for execution. Registration carries the operation's version; network text uses its plain name.
 
-This helper covers unary operations with no author arguments. Operations that change shapes or accept several inputs need their own rules and port declarations, described in [SPEC.md](SPEC.md#8-custom-operators-and-minimal-graphs). Custom implementations still need numerical and gradient checks; declaring a shape rule does not prove their code correct.
+This helper covers unary operations with no author arguments. Custom operations that change shapes or accept several inputs are planned for a later release, as described in [SPEC.md](SPEC.md#8-custom-operators-and-minimal-graphs). Custom implementations still need numerical and gradient checks; declaring a shape rule does not prove their code correct.
 
 ## Experiment with less boilerplate
 
@@ -320,6 +330,6 @@ plan = resolve(
 print(plan)
 ```
 
-Built-in config resolution needs no PyTorch import or tensor allocation. `resolve_file(...)` reads a config file; `resolve_callable(...)` captures a trusted Python function before using the same pure resolver. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences, named branches, and custom multi-input operations use the same resolve-then-build workflow.
+Built-in config resolution needs no PyTorch import or tensor allocation. `resolve_file(...)` reads a config file; `resolve_callable(...)` captures a trusted Python function before using the same pure resolver. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences and named branches use the same resolve-then-build workflow.
 
-[SPEC.md](SPEC.md) defines the language, registration, shape rules, and PyTorch interface. [DESIGN.md](DESIGN.md) preserves the original rationale; the spec defines the current Python authoring and declarative loading APIs.
+[SPEC.md](SPEC.md) defines the v1 language, registration, shape rules, and PyTorch interface. [IMPLEMENTATION.md](IMPLEMENTATION.md) describes the current alpha. HNDL is [MIT licensed](LICENSE).

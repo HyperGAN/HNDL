@@ -1,8 +1,8 @@
 # HNDL v1 technical specification
 
-**Status: proposed; no implementation exists yet.** This document defines the baseline for implementing **HNDL — Human-readable Network Definition Language**, pronounced “handle.” It turns the direction in [DESIGN.md](DESIGN.md) into a standalone technical contract. [README.md](README.md) introduces the same ideas with examples.
+**Status: v1 target specification; an initial alpha is implemented.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records the current alpha's scope and remaining work. [README.md](README.md) introduces the APIs with examples.
 
-“Must” denotes a v1 requirement. Python signatures and JSON examples describe the proposed interface, not an available package. This specification supersedes conflicting public API descriptions in DESIGN.md: the public frontends are a declarative subset of Python syntax and a separately invoked trusted Python callable. Both share an implicit current tensor for single-input operations, accept explicit tensors for branches, and use one graph/resolver. Omitted inferable dimensions replace explicit unknown markers; `name=` alone pins module identity; printing a module shows its resolved shapes. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
+“Must” denotes a v1 requirement, including features beyond the initial alpha. The public frontends are a declarative subset of Python syntax and a separately invoked trusted Python callable. Both share an implicit current tensor for single-input operations, accept explicit tensors for branches, and use one graph/resolver. Omitted inferable dimensions replace explicit unknown markers; `name=` alone pins module identity; printing a module shows its resolved shapes. JSON is an internal graph/persistence format, not a third authoring frontend. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
 
 ## 1. Purpose and boundary
 
@@ -66,7 +66,7 @@ Activations are separate explicit graph operations in both v1 frontends. Built-i
 
 ## 4. Author specification and graph
 
-The canonical internal model is a finite directed acyclic graph. Both frontends produce this graph before resolution. Structured graph input remains available for named multi-input/multi-output networks.
+The canonical internal model is a finite directed acyclic graph. Both frontends produce this graph before resolution. It can represent named ports and multiple outputs internally; public authoring remains focused on the two Python frontends.
 
 | Field | Contract |
 | --- | --- |
@@ -79,7 +79,7 @@ The canonical internal model is a finite directed acyclic graph. Both frontends 
 
 Input, output, and node IDs match `[a-z][a-z0-9_]*`. References are `input:<name>` or `node:<id>/<port>`. Built-in unary nodes consume `x` and produce `out`. Custom operators declare every input and output port.
 
-The following proposed internal/structured JSON encoding defines a two-layer perceptron whose last width is resolved from the output contract. Ordinary users use either Python frontend in §7 instead. Container/key choices shown here are the baseline for the implementation; a machine-readable schema is still required before release.
+The following conceptual internal JSON encoding describes a two-layer perceptron whose last width is resolved from the output contract. Users author either Python frontend in §7. This illustrates the graph model; it is not accepted as source by `resolve()` and is not the alpha's serialized-plan schema.
 
 ```json
 {
@@ -299,7 +299,7 @@ Callable capture is explicitly trusted Python execution. The function and regist
 
 `resolve`, `resolve_file`, `resolve_callable`, and `ops` are exported by `hndl`; construction functions are exported by `hndl.torch`. A string always means source, never a filename or function to execute. File paths are supplied only by the host through the explicit file APIs. A missing registry selects an independent built-in registry. Explicit registry objects supply extensions without a mutable global singleton. Built-in `ops` and explicit `registry.ops` calls capture exact operator identities; a capture using an identity unavailable in the selected resolution registry fails. Both modes use identical operator/policy rules and output contracts. Their graph has external input `x` and public output `output`; `output_shape` constrains the selected tensor. When a configuration binds `out`, its final value must be one tensor symbol and takes precedence over current; otherwise current is selected. Native `None`/fallthrough selects current, while an explicit symbol selects itself and any other value fails. An unset current fails when default selection requires it; an invalid explicit selection always fails. Empty source or a callable with no operator calls using default selection chooses the external input, subject to matching input/output contracts. Unused output ports are allowed, but every created node must reach the selected output.
 
-Both network constructors accept one runtime tensor and return one tensor, even for branched graphs. Printed graphs include all input/output ports, including both split results; a shared producer appears once. The lower-level graph builder retains named-input/dictionary-output behavior for structured graphs.
+Both network constructors accept one runtime tensor and return one tensor, even for branched graphs. Printed graphs include all input/output ports, including both split results; a shared producer appears once. The lower-level `build(plan)` builder provides named-input/dictionary-output behavior for resolved plans.
 
 ### Current input and output selection
 
