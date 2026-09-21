@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from types import MappingProxyType
 
 from .errors import HNDLError
 from .operator import Operator, make_operator
@@ -18,6 +19,7 @@ class Registry:
         self._aliases = {}
         self._identities = {}
         self._pretrained_providers = {}
+        self._pretrained_readouts = {}
 
     @property
     def aliases(self):
@@ -82,25 +84,56 @@ class Registry:
     # a local ``.pth`` checkpoint belongs to, and configuration may only name an
     # already registered provider. Providers live on this instance, so a
     # provider added to one ``Registry.builtins()`` is invisible to the next.
+    # A readout is the same kind of trusted Python: a named ``callable(model, x)``
+    # the host binds to a provider, which configuration may only name.
 
     @property
     def pretrained_providers(self):
         return tuple(self._pretrained_providers)
 
-    def pretrained_provider(self, name, build):
-        """Register a trusted architecture builder for ``pretrained(..., provider=name)``."""
+    def pretrained_provider(self, name, build, readouts=None):
+        """Register a trusted architecture builder for ``pretrained(..., provider=name)``.
+
+        ``readouts`` optionally maps a name to a ``callable(model, x)`` returning
+        one tensor, selected in configuration with ``readout="<name>"`` when the
+        model's own ``forward`` is not what the network wants.
+        """
         if type(name) is not str or not name or len(name) > MAX_PROVIDER_NAME:
             raise HNDLError("E_REGISTRY", f"A pretrained provider name must be a string of 1-{MAX_PROVIDER_NAME} characters")
         if not callable(build):
             raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} must be a callable returning an nn.Module")
         if name in self._pretrained_providers:
             raise HNDLError("E_REGISTRY", f"Duplicate pretrained provider {name!r}")
+        if readouts is not None and not isinstance(readouts, Mapping):
+            raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} readouts must be a mapping of name to callable(model, x)")
         self._pretrained_providers[name] = build
+        self._pretrained_readouts[name] = {}
+        for readout_name, readout in (readouts or {}).items():
+            self.pretrained_readout(name, readout_name, readout)
         return build
+
+    def pretrained_readout(self, provider, name, readout):
+        """Add one named readout to an already registered provider."""
+        if provider not in self._pretrained_providers:
+            raise HNDLError("E_REGISTRY", f"No pretrained provider named {provider!r}; "
+                                          "register it with registry.pretrained_provider(name, build) first")
+        if type(name) is not str or not name or len(name) > MAX_PROVIDER_NAME:
+            raise HNDLError("E_REGISTRY", f"A pretrained readout name must be a string of 1-{MAX_PROVIDER_NAME} characters")
+        if not callable(readout):
+            raise HNDLError("E_REGISTRY", f"Pretrained readout {name!r} of provider {provider!r} must be a "
+                                          "callable(model, x) returning one tensor")
+        if name in self._pretrained_readouts[provider]:
+            raise HNDLError("E_REGISTRY", f"Duplicate pretrained readout {name!r} for provider {provider!r}")
+        self._pretrained_readouts[provider][name] = readout
+        return readout
 
     def pretrained_builder(self, name):
         """The registered builder for ``name``, or None."""
         return self._pretrained_providers.get(name)
+
+    def pretrained_readouts(self, provider):
+        """The readouts registered for ``provider``, as a name to callable mapping."""
+        return MappingProxyType(self._pretrained_readouts.get(provider, {}))
 
     @contextmanager
     def activated(self):

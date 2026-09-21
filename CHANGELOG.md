@@ -10,6 +10,23 @@
   declared, because those casts leave non-floating state alone. Copies made
   with `copy.deepcopy` carry the dtype the original was cast to, and casting a
   copy leaves the original alone.
+- **Named readouts for provider checkpoints.** A `.pth` checkpoint whose useful
+  tensor comes from a method rather than `forward` — DINOv2's
+  `forward_features(x)["x_norm_patchtokens"]` or
+  `get_intermediate_layers(x, n=(2, 5, 8, 11), reshape=True, norm=True)` — now
+  names host code for it. `registry.pretrained_provider(name, build,
+  readouts={"patch_tokens": fn})` binds named `callable(model, x)` readouts to a
+  provider (and `registry.pretrained_readout(provider, name, fn)` adds one
+  later), which a network selects with
+  `pretrained("w.pth", provider="dino", sha256="<64 hex>",
+  readout="patch_tokens")`. Configuration still names only registered code, so
+  the plan stays a serializable string. The readout runs on the meta device
+  while the plan resolves, so the node's output shape is inferred as usual; it
+  must be a pure function of `(model, x)` returning exactly one tensor
+  (concatenate or stack inside the readout, or register one readout per
+  tensor). `readout=` and `layer=` are mutually exclusive, an unknown name lists
+  the readouts the provider offers, and neither applies to transformers or timm
+  checkpoints, which select `output=`.
 
 ## 0.2.0 (2026-09-21)
 

@@ -28,6 +28,7 @@ Relation: `input contract and output shape come from the checkpoint's configurat
 | `provider` | str | `""` | — | Name of an architecture builder the host registered with registry.pretrained_provider(name, build); required for a local .pth state dict. |
 | `sha256` | str | `""` | — | The 64 hex character digest of a local .pth file, verified before it is loaded. |
 | `layer` | str | `""` | — | Dotted named_modules() path of the provider submodule whose output the node returns, such as "features.16"; empty returns the model's own output. |
+| `readout` | str | `""` | — | Name of a readout the host registered with the provider, such as "patch_tokens"; the node returns that callable's tensor instead of the model's own output. Mutually exclusive with layer=. |
 | `revision` | str | inferred | — | Resolved commit hash or content digest. Filled in at resolution and checked on restore. |
 
 ## Description
@@ -68,6 +69,30 @@ a forward hook, stopping the pass there; omitted, the node returns the
 model's own output. Provider checkpoints declare no input contract, so the
 graph input shape is whatever the module accepts (floating point); the
 meta-device trace checks it.
+
+``readout=`` names host code instead of a submodule, for checkpoints whose
+useful tensor comes from a method rather than ``forward``. The host binds
+named ``callable(model, x)`` readouts to the provider, and configuration may
+only name one of them::
+
+    registry.pretrained_provider("dinov2_vits14", build_dinov2, readouts={
+        "patch_tokens": lambda m, x: m.forward_features(x)["x_norm_patchtokens"],
+        "layers_2_5_8_11": lambda m, x: torch.cat(
+            m.get_intermediate_layers(x, n=(2, 5, 8, 11), reshape=True, norm=True), dim=1),
+    })
+
+which a network then selects with
+``pretrained("/path/dinov2_vits14.pth", provider="dinov2_vits14",
+sha256="<64 hex>", readout="patch_tokens")``. Readouts can also be added to
+an existing provider with
+``registry.pretrained_readout("dinov2_vits14", "cls_token", fn)``. A readout
+must return exactly one tensor --- concatenate or stack several inside the
+readout, or register one readout per tensor --- and it runs during
+resolution on PyTorch's meta device, so it must be a pure function of
+``(model, x)`` that touches no real data. ``readout=`` and ``layer=`` are
+mutually exclusive, an unknown readout name fails with ``E_PRETRAINED``
+listing the ones registered for that provider, and neither applies to
+transformers or timm checkpoints, which select ``output=``.
 
 ## Examples
 

@@ -192,6 +192,20 @@ def provider_build(name):
     return build
 
 
+def provider_readout(provider, name):
+    """The trusted readout callable the active registry binds to ``provider``."""
+    from .registry import Registry
+    registry = Registry.active()
+    readouts = registry.pretrained_readouts(provider) if registry is not None else {}
+    readout = readouts.get(name)
+    if readout is None:
+        known = ", ".join(sorted(readouts)) or "(none)"
+        _fail(f"Pretrained provider {provider!r} has no readout named {name!r} (registered: {known}); "
+              "register one with registry.pretrained_provider(name, build, readouts={\"<name>\": fn}) "
+              "or registry.pretrained_readout(provider, name, fn)")
+    return readout
+
+
 @dataclass(frozen=True)
 class Contract(Immutable):
     """What the wrapped model consumes."""
@@ -384,19 +398,32 @@ def capture_layer(model, name, x, location):
     return value
 
 
+def call_readout(model, readout, name, x, location):
+    """Run a host-registered readout and require exactly one tensor back."""
+    value = readout(model, x)
+    if not isinstance(value, torch.Tensor):
+        _fail(f"{location}: readout {name!r} returned {type(value).__name__}, not a tensor; a readout must return "
+              "one tensor — combine several with torch.cat or torch.stack inside the readout, or register one "
+              "readout per tensor you need")
+    return value
+
+
 class LocalProvider:
     """A ``.pth`` state dict loaded into an architecture the host registered."""
 
     name = "local"
 
-    def __init__(self, source, output, component, layer):
-        self.source, self.layer = source, layer
+    def __init__(self, source, output, component, layer, readout=""):
+        self.source, self.layer, self.readout = source, layer, readout
         if component:
             _fail("component= applies to multi-tower transformers checkpoints, not provider checkpoints")
+        if layer and readout:
+            _fail(f"layer={layer!r} and readout={readout!r} both say what the node returns; pass one of them")
         if output != "features":
-            _fail(f'provider checkpoints take an intermediate tensor with layer="<dotted submodule path>"; '
-                  f"output={output!r} applies to transformers and timm checkpoints")
+            _fail(f'provider checkpoints take an intermediate tensor with layer="<dotted submodule path>" '
+                  f'or readout="<registered readout>"; output={output!r} applies to transformers and timm checkpoints')
         self.build = provider_build(source.config["provider"])
+        self.read = provider_readout(source.config["provider"], readout) if readout else None
 
     def contract(self):
         return Contract("tensor")
@@ -425,32 +452,41 @@ class LocalProvider:
         return result
 
     def call(self, model, x, kind):
+        if self.readout:
+            return call_readout(model, self.read, self.readout, x, self.source.location)
         if not self.layer:
             return model(x)
         return capture_layer(model, self.layer, x, self.source.location)
 
 
-def provider_for(source, output, component, layer=""):
+def provider_for(source, output, component, layer="", readout=""):
     if source.provider == "local":
-        return LocalProvider(source, output, component, layer)
+        return LocalProvider(source, output, component, layer, readout)
     if layer:
         _fail("layer= names a submodule of a provider checkpoint; transformers and timm checkpoints select output=")
+    if readout:
+        _fail("readout= names a readout the host registered with a provider checkpoint's builder; "
+              "transformers and timm checkpoints select output=")
     if source.provider == "timm":
         return TimmProvider(source, output, component)
     return TransformersProvider(source, output, component)
 
 
-def output_shape(source_key, config_path, output, component, input_shape, provider="", checksum="", layer=""):
+def output_shape(source_key, config_path, output, component, input_shape, provider="", checksum="", layer="",
+                 readout=""):
     """Trace the wrapped model on the meta device to learn its output shape."""
-    # The builder itself is part of the cache key: two registries may bind the same name.
+    # The builder and readout are part of the cache key: two registries may bind the same names.
     build = provider_build(provider) if provider else None
-    return _traced_output_shape(source_key, config_path, output, component, input_shape, provider, checksum, layer, build)
+    read = provider_readout(provider, readout) if provider and readout else None
+    return _traced_output_shape(source_key, config_path, output, component, input_shape, provider, checksum, layer,
+                                readout, build, read)
 
 
 @lru_cache(maxsize=256)
-def _traced_output_shape(source_key, config_path, output, component, input_shape, provider_name, checksum, layer, build):
+def _traced_output_shape(source_key, config_path, output, component, input_shape, provider_name, checksum, layer,
+                         readout, build, read):
     source = resolve_source(source_key, config_path, provider_name, checksum)
-    provider = provider_for(source, output, component, layer)
+    provider = provider_for(source, output, component, layer, readout)
     kind = provider.contract().kind
     with torch.device("meta"):
         model = provider.instantiate(weights=False)
@@ -462,7 +498,9 @@ def _traced_output_shape(source_key, config_path, output, component, input_shape
         except HNDLError:
             raise
         except Exception as exc:
-            _fail(f"{source.location}: the checkpoint's model cannot consume input shape {list(input_shape)}: {type(exc).__name__}: {exc}")
+            through = f" through readout {readout!r}" if readout else ""
+            _fail(f"{source.location}: the checkpoint's model cannot consume input shape {list(input_shape)}{through}: "
+                  f"{type(exc).__name__}: {exc}")
     if not isinstance(result, torch.Tensor):
         _fail(f"{source.location}: output {output!r} is not a tensor")
     return ("B", *tuple(int(d) for d in result.shape[1:]))
