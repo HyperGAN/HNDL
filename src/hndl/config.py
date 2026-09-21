@@ -12,6 +12,7 @@ import tempfile
 from .capture import Capture, Symbol, _DEFAULT, _error
 from .errors import HNDLError
 from .registry import Registry
+from .settings import SCHEME_NAMES, initializer
 
 
 MAX_SOURCE_BYTES = 65_536
@@ -95,6 +96,18 @@ def _validate_response_program(program):
                 if type(pair) is not list or len(pair) != 2 or type(pair[0]) is not str:
                     fail()
                 expression(pair[1], depth + 1)
+        elif kind == "init_call":
+            if set(value) != {"kind", "name", "kwargs", "source"} or type(value["name"]) is not str:
+                fail()
+            if value["name"] not in SCHEME_NAMES or type(value["kwargs"]) is not list:
+                fail()
+            location(value["source"])
+            names = set()
+            for pair in value["kwargs"]:
+                if type(pair) is not list or len(pair) != 2 or type(pair[0]) is not str or pair[0] in names:
+                    fail()
+                names.add(pair[0])
+                expression(pair[1], depth + 1)
         else:
             fail()
 
@@ -127,6 +140,10 @@ def _parse(source, aliases):
     aliases = tuple(aliases)
     if "x" in aliases or "out" in aliases:
         raise HNDLError("E_NAME", "Operator aliases x and out are reserved by the declarative frontend")
+    shadowed = sorted(SCHEME_NAMES.intersection(aliases))
+    if shadowed:
+        raise HNDLError("E_NAME", "Operator aliases shadow initializer schemes reserved by the "
+                                  f"declarative frontend: {', '.join(shadowed)}")
     payload = json.dumps({"source": source, "aliases": aliases}, ensure_ascii=True).encode("ascii")
     if len(payload) > MAX_PROTOCOL_BYTES:
         raise HNDLError("E_RESOURCE", "Parser request exceeds protocol limit")
@@ -199,6 +216,13 @@ def _interpret(program, capture):
             return values if kind == "list" else tuple(values)
         if kind == "dict":
             return {key: evaluate(value) for key, value in expression["items"]}
+        if kind == "init_call":
+            # A scheme record is plain data: no registry lookup, no emitted node.
+            arguments = {name: evaluate(value) for name, value in expression["kwargs"]}
+            try:
+                return initializer(expression["name"], arguments)
+            except HNDLError as exc:
+                raise _error(exc.code, exc.message, expression["source"]) from None
         # All nested arguments run in Python order before current is bound.
         op = capture.registry.get(expression["alias"])
         args = tuple(evaluate(item) for item in expression["args"])

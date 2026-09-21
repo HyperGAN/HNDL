@@ -7,6 +7,7 @@ from types import MappingProxyType
 
 from .errors import HNDLError
 from .operator import Operator, make_operator
+from .settings import SCHEME_NAMES
 
 _ACTIVE = ContextVar("hndl_active_registry", default=None)
 MAX_PROVIDER_NAME = 64
@@ -45,6 +46,9 @@ class Registry:
     def _add(self, spec):
         if type(spec) is not Operator:
             raise HNDLError("E_REGISTRY", "Registries hold @operator declarations")
+        if spec.alias in SCHEME_NAMES:
+            raise HNDLError("E_REGISTRY", f"Operator alias {spec.alias} conflicts with the reserved "
+                                          "initializer scheme of the same name")
         if spec.alias in self._aliases or spec.key in self._identities:
             raise HNDLError("E_REGISTRY", f"Duplicate operator alias or identity: {spec.alias} / {spec.key}")
         self._aliases[spec.alias] = spec

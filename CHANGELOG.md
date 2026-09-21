@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+- **`init=` selects random initializer schemes, not just constants.** An entry
+  in the per-parameter `init` mapping may now be one of eight keyword-only
+  scheme calls instead of a number, mixed freely with constants in the same
+  mapping:
+
+  ```python
+  linear(init={"weight": xavier_uniform(gain=1.0), "bias": 0.0})
+  attention(4, init={"relative_position_bias_table": truncated_normal(std=0.02)})
+  conv(64, kernel_size=3, init={"weight": kaiming_normal(mode="fan_out", nonlinearity="relu")})
+  ```
+
+  The schemes are `xavier_uniform(gain=1.0)`, `xavier_normal(gain=1.0)`,
+  `kaiming_uniform(a=0.0, mode="fan_in", nonlinearity="leaky_relu")`,
+  `kaiming_normal(a=0.0, mode="fan_in", nonlinearity="leaky_relu")`,
+  `truncated_normal(mean=0.0, std=1.0, a=-2.0, b=2.0)`,
+  `normal(mean=0.0, std=1.0)`, `uniform(a=0.0, b=1.0)` and
+  `orthogonal(gain=1.0)` --- each one the `torch.nn.init` function of the same
+  name, with torch's own keyword names and defaults, so
+  `truncated_normal(std=0.02)` is
+  `torch.nn.init.trunc_normal_(parameter, mean=0.0, std=0.02, a=-2.0, b=2.0)`.
+  `mode` is `fan_in` or `fan_out` and `nonlinearity` is one of the names
+  `torch.nn.init.calculate_gain` accepts; every other keyword is a number
+  rounded to float32 exactly like a constant override. Fills happen inside the
+  construction RNG scope, in module-parameter order and then node order, so
+  the same plan and the same `initialization_seed` reproduce them bit for bit.
+  Xavier, Kaiming and orthogonal need a parameter of at least two dimensions:
+  `linear(2, init={"bias": xavier_uniform()})` is `E_INITIALIZATION` naming
+  the parameter and its shape, checked before any node is initialized rather
+  than surfacing a raw `torch` `ValueError`.
+
+- **The same initializer names work in native Python.**
+  `from hndl import xavier_uniform` (or `from hndl.initializers import ...`)
+  gives plain functions returning the record the declarative parser builds, so
+  `ops.linear(init={"weight": xavier_uniform(gain=1.0)})` and
+  `linear(init={"weight": xavier_uniform(gain=1.0)})` resolve to the same
+  `semantic_digest`. The eight names are reserved: registering an operator
+  alias that shadows one is `E_REGISTRY`, and a parse request carrying one is
+  `E_NAME`.
+
+- **Grammar: calls stay out of literal containers, with one narrow exception.**
+  An initializer call is legal only as a direct value of an `init={...}`
+  mapping on an operator call. A bare `init=xavier_uniform()`, a scheme in a
+  list, a scheme nested inside another scheme's arguments, a scheme in
+  `trainable={...}` or in any other keyword's dictionary, and any
+  non-initializer call inside a literal container all remain `E_SYNTAX`,
+  rejected by the isolated AST validator before any operator lookup happens.
+
+- **Plan format: `initialization.kind` gains `torch_default@2`.** A node with
+  at least one scheme override records
+  `{"kind": "torch_default@2", "overrides": {"weight": {"kind": "xavier_uniform", "gain": 1.0}, "bias": 0.0}}`.
+  Constant-only nodes --- including the empty default --- keep emitting
+  `"torch_default@1"` unchanged, so every plan written before this release
+  keeps its exact bytes, semantic digest and artifact digest. Both versions
+  are accepted on restore forever; a scheme record under `"torch_default@1"`,
+  a `"torch_default@2"` record with no scheme, a missing or extra scheme
+  keyword, and a non-canonical float32 scheme argument are each
+  `E_INITIALIZATION`.
+
 - **`attention` learns a 2D relative-position bias.** With
   `attention(4, spatial_shape=(16, 16), relative_position_bias=True)` the
   `[B, T, D]` sequence is read as a row-major `H x W` token grid --- token `t`

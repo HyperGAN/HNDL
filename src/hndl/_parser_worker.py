@@ -21,6 +21,14 @@ MAX_LITERAL_ITEMS = 1024
 MAX_LITERAL_BYTES = 16_384
 MAX_INTEGER_BITS = 256
 MAX_PROTOCOL_BYTES = 2_097_152
+MAX_INITIALIZER_KWARGS = 8
+
+# The only calls permitted inside a literal container, and only as a direct
+# value of an ``init={...}`` mapping. This fixed list is duplicated from
+# hndl.settings on purpose: the worker imports nothing from the package.
+INITIALIZER_CALLS = frozenset({"xavier_uniform", "xavier_normal", "kaiming_uniform",
+                               "kaiming_normal", "truncated_normal", "normal",
+                               "uniform", "orthogonal"})
 
 
 class Rejected(Exception):
@@ -48,9 +56,30 @@ class Validator:
         return {"line": node.lineno,
                 "column": len(prefix) + 1 + self.offsets[node.lineno - 1]}
 
-    def literal(self, node, depth=0):
+    def initializer_call(self, node):
+        """One allowlisted initializer scheme; keyword-only, literal arguments."""
+        if node.args:
+            reject("Initializer calls take keyword arguments only", node)
+        if len(node.keywords) > MAX_INITIALIZER_KWARGS:
+            reject("Initializer call exceeds keyword limit", node, code="E_RESOURCE")
+        names = [keyword.arg for keyword in node.keywords]
+        if None in names or len(set(names)) != len(names):
+            reject("Keyword expansion or duplicate keywords are not permitted", node)
+        if any(not valid_name(name) for name in names):
+            reject("Invalid initializer keyword", node)
+        return {"kind": "init_call", "name": node.func.id,
+                "kwargs": [[keyword.arg, self.literal(keyword.value)] for keyword in node.keywords],
+                "source": self.location(node)}
+
+    def literal(self, node, depth=0, *, initializers=False, call=False):
         if depth > MAX_DEPTH:
             reject("Literal nesting exceeds limit", node, code="E_RESOURCE")
+        if isinstance(node, ast.Call):
+            # Only an init= mapping value may be a call, and only one of the
+            # fixed initializer schemes; operator aliases stay out of literals.
+            if not call or not isinstance(node.func, ast.Name) or node.func.id not in INITIALIZER_CALLS:
+                reject("Arguments must be literal values or tensor expressions; containers cannot contain calls", node)
+            return self.initializer_call(node)
         if isinstance(node, ast.Constant):
             value = node.value
             if type(value) not in (int, float, bool, str, type(None)):
@@ -84,11 +113,11 @@ class Validator:
                 if key.value in keys:
                     reject("Duplicate literal dictionary key", key)
                 keys.add(key.value)
-                pairs.append([key.value, self.literal(value, depth + 1)])
+                pairs.append([key.value, self.literal(value, depth + 1, call=initializers)])
             return {"kind": "dict", "items": pairs}
         reject("Arguments must be literal values or tensor expressions; containers cannot contain calls", node)
 
-    def expression(self, node, *, assignment=False):
+    def expression(self, node, *, assignment=False, initializers=False):
         if isinstance(node, ast.Name):
             if not valid_name(node.id):
                 reject("Invalid local name", node)
@@ -105,13 +134,14 @@ class Validator:
                 reject("Keyword expansion or duplicate keywords are not permitted", node)
             return {"kind": "call", "alias": node.func.id,
                     "args": [self.expression(arg) for arg in node.args],
-                    "kwargs": [[keyword.arg, self.expression(keyword.value)] for keyword in node.keywords],
+                    "kwargs": [[keyword.arg, self.expression(keyword.value, initializers=keyword.arg == "init")]
+                               for keyword in node.keywords],
                     "source": self.location(node)}
         if assignment:
             if isinstance(node, ast.Tuple) and all(isinstance(item, (ast.Name, ast.Call)) for item in node.elts):
                 return {"kind": "tensor_tuple", "items": [self.expression(item, assignment=True) for item in node.elts]}
             reject("Assignments must bind tensor expressions, not literal values", node)
-        return self.literal(node)
+        return self.literal(node, initializers=initializers)
 
     def statements(self, module):
         statements = []

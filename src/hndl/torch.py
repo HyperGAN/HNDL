@@ -1,6 +1,7 @@
 """PyTorch construction and execution for concrete HNDL plans."""
 
 from collections import OrderedDict
+from collections.abc import Mapping
 from contextlib import contextmanager
 import copy
 from types import MappingProxyType
@@ -9,6 +10,7 @@ import torch
 from torch import nn
 
 from .errors import HNDLError
+from .settings import MATRIX_SCHEMES
 from .types import batch_multiple, contract_header
 
 # Build metadata a copied network shares with its original: immutable records
@@ -491,6 +493,42 @@ def parameter_counts(plan, *, registry=None):
     return counts
 
 
+INITIALIZERS = {
+    "xavier_uniform": nn.init.xavier_uniform_,
+    "xavier_normal": nn.init.xavier_normal_,
+    "kaiming_uniform": nn.init.kaiming_uniform_,
+    "kaiming_normal": nn.init.kaiming_normal_,
+    "truncated_normal": nn.init.trunc_normal_,
+    "normal": nn.init.normal_,
+    "uniform": nn.init.uniform_,
+    "orthogonal": nn.init.orthogonal_,
+}
+
+
+def _initializer_identity(value):
+    """Compare two overrides exactly, distinguishing +0.0 from -0.0."""
+    if isinstance(value, Mapping):
+        return tuple(sorted((key, item.hex() if type(item) is float else item)
+                            for key, item in value.items()))
+    # float.hex distinguishes +0.0 and -0.0, which fill_ preserves.
+    return value.hex()
+
+
+def _apply_initializer(parameter, override, name, node_id):
+    """Fill one parameter in place; scheme draws come from the active RNG."""
+    if not isinstance(override, Mapping):
+        parameter.fill_(override)
+        return
+    kind = override["kind"]
+    arguments = {key: item for key, item in override.items() if key != "kind"}
+    try:
+        INITIALIZERS[kind](parameter, **arguments)
+    except (ValueError, RuntimeError) as exc:
+        raise HNDLError("E_INITIALIZATION",
+                        f"Initializer {kind} cannot initialize parameter {name!r} with shape "
+                        f"{tuple(parameter.shape)}: {exc}", node=node_id) from None
+
+
 def _prepare_parameter_settings(layer, node, dtype):
     """Validate exact targets and aliases without changing any parameter."""
     parameters = dict(layer.named_parameters(remove_duplicate=False))
@@ -527,10 +565,10 @@ def _prepare_parameter_settings(layer, node, dtype):
         for name in sorted(assignments):
             identity = id(parameters[name])
             value = assignments[name]
-            # float.hex distinguishes +0.0 and -0.0, which fill_ preserves.
             previous = destination.get(identity)
             if identity in destination and (
-                previous.hex() != value.hex() if code == "E_INITIALIZATION" else previous != value
+                _initializer_identity(previous) != _initializer_identity(value)
+                if code == "E_INITIALIZATION" else previous != value
             ):
                 raise HNDLError(code, f"Conflicting settings for aliases of parameter {names[identity]!r}", node=node.id)
             destination[identity] = value
@@ -552,11 +590,17 @@ def _prepare_parameter_settings(layer, node, dtype):
     for identity, parameter in by_id.items():
         constant = constants.get(identity)
         flag = effective_flags[identity] if default_trainability is not None or identity in flags else None
+        target = names[identity][0]
         if constant is not None and parameter.dtype != dtype:
-            raise HNDLError("E_INITIALIZATION", f"Parameter {names[identity][0]!r} has unsupported constant-initialization dtype {parameter.dtype}; expected {dtype}", node=node.id)
+            kind = "constant" if not isinstance(constant, Mapping) else f"{constant['kind']}"
+            raise HNDLError("E_INITIALIZATION", f"Parameter {target!r} has unsupported {kind}-initialization dtype {parameter.dtype}; expected {dtype}", node=node.id)
+        # Rank is checked before any node is touched so a rejected scheme never
+        # leaves an earlier node's parameters half initialized.
+        if isinstance(constant, Mapping) and constant["kind"] in MATRIX_SCHEMES and parameter.dim() < 2:
+            raise HNDLError("E_INITIALIZATION", f"Initializer {constant['kind']} requires a parameter of at least two dimensions; {target!r} has shape {tuple(parameter.shape)}", node=node.id)
         if flag is True and not (parameter.is_floating_point() or parameter.is_complex()):
-            raise HNDLError("E_TRAINABILITY", f"Parameter {names[identity][0]!r} with dtype {parameter.dtype} cannot require gradients", node=node.id)
-        result.append((parameter, constant, flag))
+            raise HNDLError("E_TRAINABILITY", f"Parameter {target!r} with dtype {parameter.dtype} cannot require gradients", node=node.id)
+        result.append((parameter, target, constant, flag))
     return result
 
 
@@ -627,10 +671,10 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
         # Resolve every target before applying settings to any graph node.
         settings = [_prepare_parameter_settings(modules[f"n_{node.id}"], node, dtype) for node in plan.nodes]
         with torch.no_grad():
-            for assignments in settings:
-                for parameter, constant, trainable in assignments:
-                    if constant is not None:
-                        parameter.fill_(constant)
+            for node, assignments in zip(plan.nodes, settings):
+                for parameter, target, override, trainable in assignments:
+                    if override is not None:
+                        _apply_initializer(parameter, override, target, node.id)
                     if trainable is not None:
                         parameter.requires_grad_(trainable)
     receipt = {"torch_version": str(torch.__version__), "device": str(device), "dtype": plan.dtype,
