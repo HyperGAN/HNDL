@@ -46,6 +46,8 @@ are generated from those declarations by `python -m hndl.docs`.
 | --- | --- |
 | [`adaptive_norm`](adaptive_norm.md) | Instance-normalize features, then apply a per-example learned scale and bias. |
 | [`group_norm`](group_norm.md) | Normalize channel groups per example, with learned per-channel affine. |
+| [`layer_norm`](layer_norm.md) | Normalize the last axis of every position with a learned scale and bias. |
+| [`rms_norm`](rms_norm.md) | Scale the last axis by its root-mean-square, with a learned per-feature gain. |
 
 ## pretrained
 
