@@ -14,10 +14,27 @@ from .types import batch_multiple, contract_header
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
 SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names",
-                             "_input_names", "_input_dtypes", "_output_dtypes", "_build_dtype"})
+                             "_input_names", "_input_dtypes", "_output_dtypes", "_build_dtype",
+                             "_spec_inputs", "_spec_outputs", "_spec_in", "_spec_out"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
           "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
+
+#: Distinguishes "no batch resolved yet" from a legitimately resolved ``None``.
+_UNSET = object()
+
+#: The resolved-shape cache before any call: batch, dtype, then three programs.
+_UNCOMPILED = (_UNSET, None, (), (), ())
+
+
+def _compile_shape(shape):
+    """A contract shape with its batch entries pre-parsed, once, at build time.
+
+    Every dimension becomes either a plain ``int`` or a
+    ``(multiple_or_None, original_text)`` pair, so resolving a port against a
+    concrete batch is a multiplication rather than a regular-expression match.
+    """
+    return tuple(d if not isinstance(d, str) else (batch_multiple(d), d) for d in shape)
 
 
 class _NodeModules(nn.ModuleDict):
@@ -96,6 +113,21 @@ class GraphModule(nn.Module):
         self._output_dtypes = MappingProxyType(
             {name: DTYPES[produced[entry["ref"]]] for name, entry in plan.outputs.items()})
         self._state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
+        # The registration keys of every module, recorded once so the
+        # forward-time integrity check compares small tuples instead of walking
+        # the module tree and rebuilding every dotted state name per call.
+        self._state_modules = tuple(self.modules())
+        self._state_keys = tuple((tuple(m._parameters), tuple(m._buffers), tuple(m._modules))
+                                 for m in self._state_modules)
+        # Contract shapes with their batch entries pre-parsed; _resolve_shapes
+        # turns these into concrete expectations once per distinct batch size.
+        self._spec_inputs = {name: _compile_shape(entry["shape"]) for name, entry in plan.inputs.items()}
+        self._spec_outputs = {name: _compile_shape(entry["shape"]) for name, entry in plan.outputs.items()}
+        self._spec_in = {node.id: {port: _compile_shape(shape) for port, shape in node.input_shapes.items()}
+                         for node in plan.nodes}
+        self._spec_out = {node.id: {port: _compile_shape(shape) for port, shape in node.output_shapes.items()}
+                          for node in plan.nodes}
+        self._compiled = _UNCOMPILED
         self.build_receipt = MappingProxyType(receipt)
 
     def __setattr__(self, name, value):
@@ -125,6 +157,9 @@ class GraphModule(nn.Module):
             # instance dictionary directly, exactly as unpickling would.
             object.__setattr__(result, name, value if name in SHARED_METADATA
                                else copy.deepcopy(value, memo))
+        # Cheap insurance: the clone rebuilds its baked program against its own
+        # modules rather than trusting a structure copied mid-flight.
+        object.__setattr__(result, "_compiled", _UNCOMPILED)
         return result
 
     def __copy__(self):
@@ -163,25 +198,71 @@ class GraphModule(nn.Module):
         return self._runtime_dtype if dtype is not None and dtype == self._build_dtype else dtype
 
     @staticmethod
-    def _extent(dimension, batch, location):
-        """The concrete size a contract entry requires, scaling the batch axis.
+    def _resolve(spec, batch):
+        """A compiled shape as concrete sizes, or the entry that is not a batch axis.
 
         A port a batch-axis join or split produced carries ``"k*B"``, which
-        means ``k`` times this call's batch, not the batch itself.
+        means ``k`` times this call's batch, not the batch itself. An entry that
+        is symbolic but not a batch dimension comes back as the original string,
+        which :meth:`_check` reports from the port that actually carries it ---
+        keeping that a runtime error rather than promoting it to build time.
         """
-        if not isinstance(dimension, str):
-            return dimension
-        multiple = batch_multiple(dimension)
-        if multiple is None:
-            raise HNDLError("E_RUNTIME", f"{location}: contract entry {dimension!r} is not a batch dimension")
-        return None if batch is None else multiple * batch
+        resolved = []
+        for dimension in spec:
+            if type(dimension) is tuple:
+                multiple, text = dimension
+                if multiple is None:
+                    return text
+                resolved.append(None if batch is None else multiple * batch)
+            else:
+                resolved.append(dimension)
+        return tuple(resolved)
 
-    def _check(self, value, shape, batch, location, dtype):
-        dtype = self._effective_dtype(dtype)
+    def _resolve_shapes(self, batch):
+        """Bind every port's expected shape and dtype to this batch, once.
+
+        The whole program is published as a single tuple, so a caller on
+        another thread reads either the entire previous program or the entire
+        new one --- never a half-rebuilt mixture of the two.
+        """
+        resolve, effective = self._resolve, self._effective_dtype
+        expected_in = {node: {p: resolve(s, batch) for p, s in ports.items()}
+                       for node, ports in self._spec_in.items()}
+        expected_out = {node: {p: resolve(s, batch) for p, s in ports.items()}
+                        for node, ports in self._spec_out.items()}
+        effdt = {node: {p: effective(d) for p, d in ports.items()}
+                 for node, ports in self._port_dtypes.items()}
+        compiled = (
+            batch, self._runtime_dtype,
+            tuple((name, f"input:{name}", resolve(self._spec_inputs[name], batch),
+                   effective(self._input_dtypes[name]))
+                  for name in self._input_names),
+            self._build_program(expected_in, expected_out, effdt),
+            tuple((name, entry["ref"], resolve(self._spec_outputs[name], batch),
+                   effective(self._output_dtypes[name]))
+                  for name, entry in self.plan.outputs.items()))
+        self._compiled = compiled
+        return compiled
+
+    def _build_program(self, expected_in, expected_out, effdt):
+        """Bake the per-call constants --- labels, module handles, port sets --- into tuples."""
+        return tuple(
+            (self.nodes[f"n_{node.id}"],
+             tuple((node.inputs[port], expected_in[node.id][port], f"{node.id}/{port}",
+                    effdt[node.id][port])
+                   for port in self._port_orders[node.id]),
+             tuple((f"node:{node.id}/{port}", expected_out[node.id][port], f"{node.id}/{port}",
+                    effdt[node.id][port])
+                   for port in node.outputs),
+             node.outputs, frozenset(node.outputs), node.id)
+            for node in self.plan.nodes)
+
+    def _check(self, value, expected, location, dtype):
         if not isinstance(value, torch.Tensor):
             raise HNDLError("E_RUNTIME", f"{location} must be a tensor")
-        expected = tuple(self._extent(d, batch, location) for d in shape)
-        if tuple(value.shape) != expected or value.ndim == 0 or value.shape[0] <= 0:
+        if type(expected) is str:
+            raise HNDLError("E_RUNTIME", f"{location}: contract entry {expected!r} is not a batch dimension")
+        if value.shape != expected or value.ndim == 0 or value.shape[0] <= 0:
             raise HNDLError("E_RUNTIME", f"{location}: expected shape {expected}, got {tuple(value.shape)}")
         if dtype is not None and value.dtype != dtype:
             raise HNDLError("E_RUNTIME", f"{location}: expected dtype {dtype}, got {value.dtype}")
@@ -191,40 +272,49 @@ class GraphModule(nn.Module):
     def _execute(self, inputs):
         leading = inputs[self._input_names[0]]
         batch = leading.shape[0] if isinstance(leading, torch.Tensor) and leading.ndim else None
+        # The resolved expectations depend on the batch and on the dtype casts
+        # ``_apply`` records; the device is read live by ``_check`` instead, so
+        # ``.to(device)`` needs no invalidation.
+        compiled = self._compiled
+        if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
+            compiled = self._resolve_shapes(batch)
+        _, _, input_program, node_program, output_program = compiled
+        check = self._check
         values = {}
-        for name in self._input_names:
+        for name, key, expected, dtype in input_program:
             value = inputs[name]
-            self._check(value, self.plan.inputs[name]["shape"], batch, f"input:{name}",
-                        self._input_dtypes[name])
-            values[f"input:{name}"] = value
-        for node in self.plan.nodes:
+            check(value, expected, key, dtype)
+            values[key] = value
+        for module, ins, outs, out_ports, out_set, node_id in node_program:
             bound = []
-            dtypes = self._port_dtypes[node.id]
-            for port in self._port_orders[node.id]:
-                ref = node.inputs[port]
+            for ref, expected, location, dtype in ins:
                 value = values[ref]
-                self._check(value, node.input_shapes[port], batch, f"{node.id}/{port}", dtypes[port])
+                check(value, expected, location, dtype)
                 bound.append(value)
-            result = self.nodes[f"n_{node.id}"](*bound)
-            if isinstance(result, dict) and set(result) == set(node.outputs):
-                results = tuple(result[port] for port in node.outputs)
-            elif isinstance(result, (tuple, list)) and len(result) == len(node.outputs):
+            result = module(*bound)
+            if isinstance(result, dict) and set(result) == out_set:
+                results = tuple(result[port] for port in out_ports)
+            elif isinstance(result, (tuple, list)) and len(result) == len(out_ports):
                 results = tuple(result)
-            elif len(node.outputs) == 1:
+            elif len(out_ports) == 1:
                 results = (result,)
             else:
-                raise HNDLError("E_RUNTIME", f"{node.id}: expected output ports {node.outputs}")
-            for port, value in zip(node.outputs, results):
-                self._check(value, node.output_shapes[port], batch, f"{node.id}/{port}", dtypes[port])
-                values[f"node:{node.id}/{port}"] = value
+                raise HNDLError("E_RUNTIME", f"{node_id}: expected output ports {out_ports}")
+            for (key, expected, location, dtype), value in zip(outs, results):
+                check(value, expected, location, dtype)
+                values[key] = value
         outputs = {}
-        for name, entry in self.plan.outputs.items():
-            value = values[entry["ref"]]
-            self._check(value, entry["shape"], batch, name, self._output_dtypes[name])
+        for name, ref, expected, dtype in output_program:
+            value = values[ref]
+            check(value, expected, name, dtype)
             outputs[name] = value
-        state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
-        if state_names != self._state_names:
-            raise HNDLError("E_RUNTIME", "A module created or removed registered state during forward")
+        # Comparing registration keys catches state a module created or removed
+        # during forward without walking the module tree; the one case it misses
+        # is a forward that fills an already-declared ``None`` slot in place.
+        for module, keys in zip(self._state_modules, self._state_keys):
+            if (tuple(module._parameters) != keys[0] or tuple(module._buffers) != keys[1]
+                    or tuple(module._modules) != keys[2]):
+                raise HNDLError("E_RUNTIME", "A module created or removed registered state during forward")
         return outputs
 
     def _bind(self, args, kwargs):

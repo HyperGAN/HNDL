@@ -44,6 +44,32 @@
   from its configuration; the configuration itself is unchanged. Plans without
   an `attention` node encode and digest exactly as they did.
 
+- **Faster forward passes.** `GraphModule` no longer re-derives its per-call
+  constants on every call. Contract shapes are parsed once at build time and
+  resolved against a concrete batch only when the batch size or the runtime
+  dtype changes, and each node's module handle, port labels and expected
+  shapes are baked into a flat program instead of being rebuilt from f-strings
+  and `ModuleDict` lookups per call. The fixed per-node overhead drops from
+  about 12 us to about 4 us on the reference machine: in
+  `tests/benchmark/test_parity_vs_handwritten_pytorch.py` the MLP's parity
+  ratio against hand-written PyTorch improves from 1.46x to 1.19x at batch 256
+  and from ~2.5x to ~1.5x at batch 32, and `transformer_block` from 1.49x to
+  1.27x. Validation is unchanged: every shape, dtype and device check still
+  runs on every port of every call, in the same order, with the same
+  `E_RUNTIME` messages.
+
+- **The forward-time state-integrity check compares registration keys.** The
+  check that catches a module creating or removing registered state mid-forward
+  used to rebuild every dotted parameter and buffer name by walking the module
+  tree on each call; it now compares each module's cached `_parameters`,
+  `_buffers` and `_modules` key tuples. This is *stricter* in three cases it
+  previously missed — a stateless submodule attached or detached during
+  forward, a parameter re-registered under a second alias, and registration
+  keys reordered — and *narrower* in exactly one: a forward that fills an
+  already-declared `None` slot (for example assigning `self.bias` on a module
+  built with `bias=False`) adds no new key and is no longer reported. The slot
+  was declared at build time, so nothing structurally new appears.
+
 ## 0.5.0 (2026-09-21)
 
 A minor release adding a first-class `spatial_attention` operator and an

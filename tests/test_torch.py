@@ -388,9 +388,27 @@ def test_deepcopy_keeps_lookup_moves_and_the_state_consistency_check():
     assert clone._runtime_device == torch.device("cpu")
     x = torch.randn(2, 4)
     clone.eval()(x)
-    object.__setattr__(clone, "_state_names", model._state_names + ("ghost",))
+    object.__setattr__(clone, "_state_keys", clone._state_keys[:-1] + ((("ghost",), (), ()),))
     with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
         clone(x)
+
+
+def test_state_registered_during_forward_is_rejected():
+    """The real bug the integrity check exists for: state appearing mid-forward."""
+    registry = Registry.builtins()
+
+    @registry.operator("grows_state", identity="tests.grows_state",
+                       summary="Register a parameter during forward.",
+                       shape="data[B, F] -> value[B, F]")
+    class GrowsState(nn.Module):
+        def forward(self, data):
+            self.register_parameter("extra", nn.Parameter(torch.zeros(1)))
+            return data
+
+    model = network("grows_state()", input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=registry)
+    with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
+        model(torch.randn(2, 4))
 
 
 def test_immutable_records_are_shared_and_modules_refuse_to_pickle(tmp_path):
