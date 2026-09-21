@@ -28,6 +28,8 @@ class TorchBinding:
 def register_torch(registry, alias, *, module, state_version):
     """Attach an explicitly supplied constructor to an exact pure operator."""
     entry = registry.get(alias)
+    if entry.key in _BUILTINS:
+        raise HNDLError("E_REGISTRY", f"Built-in backend {entry.key} cannot be replaced")
     if type(state_version) is not int or state_version != entry.state_version:
         raise HNDLError("E_STATE_VERSION", f"{alias}: backend state version differs from pure registration")
     if entry.key in registry.backends:
@@ -203,7 +205,7 @@ class GraphModule(nn.Module):
         layers = tuple(self.nodes.values())
         if isinstance(key, slice):
             selected = tuple(self.plan.nodes)[key]
-            return nn.Sequential(OrderedDict((n.id, self.nodes[f"n_{n.id}"]) for n in selected))
+            return nn.Sequential(OrderedDict((f"n_{n.id}", self.nodes[f"n_{n.id}"]) for n in selected))
         if type(key) is int:
             return layers[key]
         raise TypeError("Layer index must be an integer, slice, or node name")
@@ -298,6 +300,8 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     if plan.dtype != "float32":
         raise HNDLError("E_SCHEMA", f"Unsupported plan dtype {plan.dtype!r}")
     device = torch.device(device)
+    if device.type == "cpu":
+        device = torch.device("cpu")
     if device.type not in ("cpu", "cuda"):
         raise HNDLError("E_SCHEMA", f"Unsupported execution device {device}; use cpu or cuda")
     if device.type == "cuda":
@@ -310,6 +314,8 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     if registry is None:
         from .registry import Registry
         registry = Registry.builtins()
+    from .resolver import validate_concrete_plan
+    plan = validate_concrete_plan(plan, registry=registry)
     # Validate all required implementations before constructing any modules.
     custom = {}
     port_orders = {}

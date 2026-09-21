@@ -1,4 +1,5 @@
 """Numerical and integration checks for the optional PyTorch backend."""
+# ruff: noqa: E402 -- torch is an optional dependency checked before imports.
 
 import pytest
 
@@ -74,6 +75,15 @@ def test_lookup_slices_share_real_layers_without_duplicate_registration():
         del model.nodes["n_hidden"]
     with pytest.raises(TypeError):
         model.nodes = nn.ModuleDict()
+
+
+def test_reserved_module_attribute_name_and_explicit_cpu_index():
+    model = network('linear(3, name="training")', input_shape=("B", 4),
+                    output_shape=("B", 3), device="cpu:0")
+    assert model[:][0] is model["training"]
+    assert model(torch.ones(2, 4)).shape == (2, 3)
+    with pytest.raises(HNDLError, match="E_REGISTRY"):
+        register_torch(Registry.builtins(), "relu", module=nn.Identity, state_version=1)
 
 
 def test_inspection_does_not_run_layers_or_draw_rng():
