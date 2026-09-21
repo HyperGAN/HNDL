@@ -215,6 +215,22 @@ def test_untouched_shared_storage_preserves_constructor_flags():
     assert [parameter.requires_grad for parameter in model.parameters()] == [False, True]
 
 
+def test_initialization_rejects_parameter_storage_aliased_by_a_buffer():
+    class BufferAlias(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(2))
+            self.register_buffer("shadow", self.weight.detach())
+        def forward(self, x):
+            return x * self.weight
+    layer = BufferAlias()
+    with pytest.raises(HNDLError, match="E_INITIALIZATION.*buffer"):
+        network('custom(init={"weight": 0})', input_shape=("B", 2), output_shape=("B", 2),
+                registry=custom_registry(lambda: layer), device="cpu")
+    assert torch.equal(layer.weight, torch.ones(2))
+    assert torch.equal(layer.shadow, torch.ones(2))
+
+
 def test_all_nodes_validate_before_any_parameter_settings_are_applied():
     layer = Aliased()
     registry = custom_registry(lambda: layer)
