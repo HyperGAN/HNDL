@@ -1,0 +1,8 @@
+{
+  "title": "Tiny Vision Transformer",
+  "description": "A ViT-Tiny-shaped classifier for 32×32 RGB images: a 4×4 patch stem of width 192, a learned class token and position table, four pre-norm transformer blocks with 3 heads, then a final layer norm and a linear head read off the class position.",
+  "input_shape": ["B", 3, 32, 32],
+  "output_shape": ["B", 10],
+  "parameters": 1803850,
+  "reference": "Dosovitskiy et al. 2020, \"An Image Is Worth 16x16 Words\" (ViT), in the ViT-Tiny configuration (width 192, 3 heads, mlp_ratio 4) at depth 4 with a 4×4 patch stem on 32×32 inputs; checked against an equivalent plain-PyTorch build: 9,408 stem + 192 class token + 12,480 positions + 4·444,864 blocks + 384 final norm + 1,930 head = 1,803,850."
+}
