@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Networks follow `.double()`, `.half()` and `.to(dtype=...)`.** Casting a
+  built network casts its parameters, and now its runtime contract as well: a
+  network cast to float64 accepts float64 inputs and returns float64 outputs,
+  and `.float()` puts it back. Graphs without parameters follow the cast too.
+  Integer and boolean ports --- token ids, masks --- keep the dtype the plan
+  declared, because those casts leave non-floating state alone. Copies made
+  with `copy.deepcopy` carry the dtype the original was cast to, and casting a
+  copy leaves the original alone.
+
 ## 0.2.0 (2026-09-21)
 
 A feature release driven by HyperGAN's migration to HNDL: networks copy
