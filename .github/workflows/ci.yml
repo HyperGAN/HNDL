@@ -61,9 +61,9 @@ jobs:
           assert restored.semantic_digest == plan.semantic_digest
           registry = Registry.builtins()
 
-          @registry.operator("scale", identity="example.scale", summary="Scale features.",
+          @registry.operator("gain", identity="example.gain", summary="Scale features.",
                              shape="x[B, ...] -> out[B, ...]", args={"gain": Arg(float, 2.0, help="Multiplier.")})
-          class Scale(nn.Module):
+          class Gain(nn.Module):
               def __init__(self, gain):
                   super().__init__()
                   self.gain = gain
@@ -71,7 +71,7 @@ jobs:
               def forward(self, x):
                   return x * self.gain
 
-          model = network("z1, z2 = split(64); linear(z1); features = reshape(32, 4, 4); adaptive_norm(features, z2); scale()",
+          model = network("z1, z2 = split(64); linear(z1); features = reshape(32, 4, 4); adaptive_norm(features, z2); gain()",
                           input_shape=("B", 128), output_shape=("B", 32, 4, 4), registry=registry, device="cpu")
           assert model(torch.randn(2, 128)).shape == (2, 32, 4, 4)
           print(model)
