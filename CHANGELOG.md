@@ -25,6 +25,11 @@
   needs. Only a ragged pool to more than 64 windows still falls back to
   `F.adaptive_avg_pool2d`, whose CUDA backward is nondeterministic. Values,
   shapes, arguments, and the module `repr` are unchanged.
+- **Spectral normalization.** `linear`, `conv`, `conv1d`, and `deconv` accept
+  `spectral_norm=True`, wrapping the weight with
+  `torch.nn.utils.parametrizations.spectral_norm` for GAN discriminators. The
+  learned tensor is then registered as `parametrizations.weight.original`, which
+  is the name `init` and `trainable` overrides must target.
 
 ## 0.1.2 (2026-09-21)
 

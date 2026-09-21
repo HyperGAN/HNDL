@@ -3,6 +3,7 @@
 import pytest
 import torch
 from torch import nn
+from torch.nn.utils import parametrizations
 
 from hndl import HNDLError, resolve
 from hndl.torch import DTYPES, build
@@ -159,3 +160,60 @@ def test_rank_two_and_rank_four_inputs_are_rejected():
     for input_shape, output_shape in ((("B", 16), ("B", 4, 16)), (("B", 2, 8, 8), ("B", 4, 8, 8))):
         with pytest.raises(HNDLError, match="E_CONSTRAINT"):
             resolve(conv1d_source(4, 3, 1, 1, 1, 1), input_shape=input_shape, output_shape=output_shape)
+
+
+def spectral_singular_value(weight):
+    return torch.linalg.matrix_norm(weight.detach().reshape(weight.shape[0], -1), 2).item()
+
+
+def test_spectral_norm_matches_torch_and_renames_the_registered_state(device):
+    source = conv1d_source(8, 4, 2, 1, 1, 1).replace(")", ", spectral_norm=True)")
+    plan = resolve(source, input_shape=("B", 4, 32), output_shape=("B", 8, 16))
+    assert plan.nodes[0].args["spectral_norm"] is True
+    model = build(plan, device=device, initialization_seed=7)
+    module = model[plan.nodes[0].id]
+    assert sorted(name for name, _ in module.named_parameters()) == ["bias", "parametrizations.weight.original"]
+    reference = parametrizations.spectral_norm(torch_conv(4, 8, 4, 2, 1, 1, 1)).to(device)
+    reference.load_state_dict(module.state_dict())
+
+    x = torch.randn(3, 4, 32, device=device)
+    actual_input = x.clone().requires_grad_()
+    expected_input = x.clone().requires_grad_()
+    actual = model(x=actual_input)["output"]
+    expected = reference(expected_input)
+    torch.testing.assert_close(actual, expected)
+    (actual.square().mean()).backward()
+    (expected.square().mean()).backward()
+    torch.testing.assert_close(actual_input.grad, expected_input.grad)
+    torch.testing.assert_close(module.parametrizations.weight.original.grad,
+                               reference.parametrizations.weight.original.grad)
+
+
+def test_spectral_norm_drives_the_effective_kernel_to_unit_norm(device):
+    source = conv1d_source(16, 4, 2, 1, 1, 1).replace(")", ", spectral_norm=True)")
+    plan = resolve(source, input_shape=("B", 8, 32), output_shape=("B", 16, 16))
+    model = build(plan, device=device, initialization_seed=11)
+    module = model[plan.nodes[0].id]
+    for _ in range(20):
+        model(x=torch.randn(2, 8, 32, device=device))
+    assert spectral_singular_value(module.weight) >= 1.0 - 1e-5
+    assert spectral_singular_value(module.weight) == pytest.approx(1.0, abs=1e-2)
+
+
+def test_spectral_norm_does_not_change_shape_inference():
+    source = "linear()\nreshape(2)\nconv1d(4, kernel_size=3, padding=1, spectral_norm=True)"
+    plan = resolve(source, input_shape=("B", 16), output_shape=("B", 4, 8))
+    assert plan.nodes[0].args["out_features"] == 16
+    assert plan.nodes[1].output_shapes["out"] == ("B", 2, 8)
+    assert plan.nodes[2].args["in_channels"] == 2
+    plain = resolve(source.replace(", spectral_norm=True", ""),
+                    input_shape=("B", 16), output_shape=("B", 4, 8))
+    assert [dict(n.output_shapes) for n in plan.nodes] == [dict(n.output_shapes) for n in plain.nodes]
+
+
+def test_plain_convolution_is_unchanged_when_spectral_norm_is_disabled():
+    plan = resolve(conv1d_source(4, 3, 1, 1, 1, 1), input_shape=("B", 2, 16), output_shape=("B", 4, 16))
+    assert plan.nodes[0].args["spectral_norm"] is False
+    module = build(plan, device="cpu", initialization_seed=3)[plan.nodes[0].id]
+    assert sorted(name for name, _ in module.named_parameters()) == ["bias", "weight"]
+    assert not list(module.named_buffers())

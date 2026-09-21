@@ -22,6 +22,7 @@ x[B, ..., D_in] -> out[B, ..., D_out]
 | `out_features` (positional) | int | inferred | >= 1; <= 2147483647; binds `D_out` | Output width. Omit it to infer the width from what follows. |
 | `in_features` | int | inferred | >= 1; <= 2147483647; binds `D_in` | Input width. Normally inferred from the incoming tensor. |
 | `bias` | bool | `True` | — | Add a learned bias vector. |
+| `spectral_norm` | bool | `False` | — | Divide the weight by its largest singular value, estimated by power iteration. |
 
 ## Description
 
@@ -29,6 +30,24 @@ Computes ``out = x @ weight.T + bias`` with ``weight`` of shape
 ``[out_features, in_features]``, applied to the last axis of ``[B, D]``
 or ``[B, T, D]`` inputs. No activation is applied; add one explicitly.
 Parameters are ``weight`` and, when enabled, ``bias``.
+
+## Spectral normalization
+
+With ``spectral_norm=True`` the weight is reparametrized as ``weight /
+sigma(weight)``, where ``sigma`` is the largest singular value estimated
+by one power iteration per forward pass
+(``torch.nn.utils.parametrizations.spectral_norm``). Each layer is then
+1-Lipschitz, which is the standard constraint for a GAN discriminator.
+
+The parametrization renames the registered state: the learned tensor
+becomes ``parametrizations.weight.original`` and ``weight`` turns into a
+computed attribute, with persistent buffers
+``parametrizations.weight.0._u`` and ``parametrizations.weight.0._v``
+holding the power-iteration vectors. ``init`` and ``trainable``
+overrides must therefore target ``parametrizations.weight.original``
+instead of ``weight``; ``bias`` is unaffected. The power iteration
+refreshes the buffers in training mode only, so evaluation is a pure
+function of the stored state.
 
 ## Examples
 
@@ -91,3 +110,25 @@ index  name  operation  input shapes   output shapes
 ```
 
 Parameters: 2,632
+
+### Example 4
+
+A spectrally normalized GAN critic head: every layer is 1-Lipschitz by construction.
+
+```python
+linear(128, spectral_norm=True)
+leaky_relu(0.2)
+linear(spectral_norm=True)
+```
+
+Input `['B', 256]` → output `['B', 1]`.
+
+```text
+Network: [B, 256] -> [B, 1]  dtype=float32
+index  name  operation   input shapes  output shapes
+0      n0    linear      x=[B, 256]    out=[B, 128]
+1      n1    leaky_relu  x=[B, 128]    out=[B, 128]
+2      n2    linear      x=[B, 128]    out=[B, 1]
+```
+
+Parameters: 33,025

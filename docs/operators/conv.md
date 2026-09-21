@@ -31,6 +31,7 @@ Relation: `H_out = floor((H_in + 2*padding - dilation*(kernel_size - 1) - 1) / s
 | `dilation` | pair | `(1, 1)` | >= 1 | Spacing between kernel taps. |
 | `groups` | int | `1` | >= 1 | Channel groups; must divide input and output channels. |
 | `bias` | bool | `True` | — | Add a learned per-channel bias. |
+| `spectral_norm` | bool | `False` | — | Divide the weight by its largest singular value, estimated by power iteration. |
 
 ## Description
 
@@ -45,7 +46,7 @@ H_out = floor((H_in + 2*padding - dilation*(kernel_size - 1) - 1) / stride + 1)
 and the same formula on the width axis. Parameters are ``weight`` with
 shape ``[out_channels, in_channels / groups, kH, kW]`` and, when
 ``bias=True``, ``bias`` with shape ``[out_channels]``. Behavior is
-identical in training and evaluation.
+identical in training and evaluation unless ``spectral_norm`` is enabled.
 
 Inverse inference from a known output extent may leave an interval of
 valid input sizes; that ambiguity is reported rather than resolved
@@ -57,6 +58,27 @@ stack of ``down2`` convolutions resolves backward from the output contract
 alone. An explicit argument contradicting the policy fails with
 ``E_POLICY_CONFLICT``; an odd input extent under the policy fails with
 ``E_CONSTRAINT``.
+
+## Spectral normalization
+
+With ``spectral_norm=True`` the weight is reparametrized as ``weight /
+sigma(weight)``, where ``sigma`` is the largest singular value of the
+weight viewed as an ``[out_channels, -1]`` matrix, estimated by one power
+iteration per forward pass
+(``torch.nn.utils.parametrizations.spectral_norm``). This is the
+discriminator constraint from SN-GAN; pair it with ``policy="down2"`` for
+the usual downsampling critic.
+
+The parametrization renames the registered state: the learned tensor
+becomes ``parametrizations.weight.original`` and ``weight`` turns into a
+computed attribute, with persistent buffers
+``parametrizations.weight.0._u`` and ``parametrizations.weight.0._v``
+holding the power-iteration vectors. ``init`` and ``trainable``
+overrides must therefore target ``parametrizations.weight.original``
+instead of ``weight``; ``bias`` is unaffected. The power iteration
+refreshes the buffers in training mode only, so evaluation is a pure
+function of the stored state — the one case where this operator's
+behavior differs between training and evaluation.
 
 ## Examples
 
@@ -122,6 +144,34 @@ index  name  operation   input shapes       output shapes
 2      n2    conv        x=[B, 64, 16, 16]  out=[B, 128, 8, 8]
 3      n3    flatten     x=[B, 128, 8, 8]   out=[B, 8192]
 4      n4    linear      x=[B, 8192]        out=[B, 1]
+```
+
+Parameters: 142,529
+
+### Example 4
+
+An SN-GAN discriminator: the same downsampling stack with every weight constrained to unit spectral norm.
+
+```python
+conv(64, policy="down2", spectral_norm=True)
+leaky_relu(0.2)
+conv(128, policy="down2", spectral_norm=True)
+leaky_relu(0.2)
+flatten()
+linear(spectral_norm=True)
+```
+
+Input `['B', 3, 32, 32]` → output `['B', 1]`.
+
+```text
+Network: [B, 3, 32, 32] -> [B, 1]  dtype=float32
+index  name  operation   input shapes       output shapes
+0      n0    conv        x=[B, 3, 32, 32]   out=[B, 64, 16, 16]
+1      n1    leaky_relu  x=[B, 64, 16, 16]  out=[B, 64, 16, 16]
+2      n2    conv        x=[B, 64, 16, 16]  out=[B, 128, 8, 8]
+3      n3    leaky_relu  x=[B, 128, 8, 8]   out=[B, 128, 8, 8]
+4      n4    flatten     x=[B, 128, 8, 8]   out=[B, 8192]
+5      n5    linear      x=[B, 8192]        out=[B, 1]
 ```
 
 Parameters: 142,529
