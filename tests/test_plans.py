@@ -22,7 +22,7 @@ def mlp_plan():
         input_shape=("B", 3), output_shape=("B", 2), output_ref="node:head/out"))
 
 
-def test_schema_one_canonical_encoding_vector():
+def test_canonical_encoding_vector():
     value = {"b": (2, 3), "a": "✓"}
     assert canonical(value) == '{"a":"✓","b":[2,3]}'
     assert digest(value) == "afc375fca79ef9ed177bab6269d54c2e2b50bcc6d7a0a670a4cd64489e85ebfa"
@@ -109,7 +109,7 @@ def test_persisted_omission_cannot_be_silently_reinferred():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("schema_version", 2), ("resolution_version", 2),
+    ("schema_version", 3), ("resolution_version", 2),
     ("schema_version", True), ("resolution_version", True),
 ])
 def test_unknown_and_boolean_versions_rejected(field, value):

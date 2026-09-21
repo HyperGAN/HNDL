@@ -8,6 +8,8 @@ from types import MappingProxyType
 from collections.abc import Mapping
 
 from .errors import HNDLError
+from .settings import (normalize_initialization, normalize_trainability,
+                       validate_initialization, validate_trainability)
 
 
 def freeze(value):
@@ -46,12 +48,16 @@ class Node:
     inputs: Mapping = field(default_factory=dict)
     outputs: tuple = ("out",)
     source: object = None
+    initialization: Mapping = field(default_factory=normalize_initialization, kw_only=True)
+    trainability: Mapping = field(default_factory=normalize_trainability, kw_only=True)
 
     def __post_init__(self):
         object.__setattr__(self, "args", freeze(self.args))
         object.__setattr__(self, "inputs", freeze(self.inputs))
         object.__setattr__(self, "outputs", tuple(self.outputs))
         object.__setattr__(self, "source", freeze(self.source))
+        object.__setattr__(self, "initialization", freeze(validate_initialization(self.initialization)))
+        object.__setattr__(self, "trainability", freeze(validate_trainability(self.trainability)))
 
 
 @dataclass(frozen=True)
@@ -85,7 +91,8 @@ class ResolvedNode(Node):
 
     def to_dict(self, *, semantic=False):
         result = {key: plain(getattr(self, key)) for key in (
-            "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes", "state_bytes", "state_version"
+            "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes", "state_bytes", "state_version",
+            "initialization", "trainability"
         )}
         if not semantic:
             result.update(source=plain(self.source), provenance=plain(self.provenance))
@@ -101,7 +108,7 @@ class ResolvedPlan:
     dtype: str = "float32"
     frontend: str = "python_config@1"
     registry: object = field(default=None, repr=False, compare=False)
-    schema_version: int = 1
+    schema_version: int = 2
     resolution_version: int = 1
 
     def __post_init__(self):
@@ -155,9 +162,9 @@ class ResolvedPlan:
                         "output_ref", "dtype", "frontend", "semantic_digest", "artifact_digest"}
             if set(data) != expected:
                 raise ValueError("unexpected or missing plan fields")
-            if (type(data["schema_version"]) is not int or data["schema_version"] != 1
+            if (type(data["schema_version"]) is not int or data["schema_version"] != 2
                     or type(data["resolution_version"]) is not int or data["resolution_version"] != 1):
-                raise HNDLError("E_STATE_VERSION", "Only plan schema/resolution version 1 is supported")
+                raise HNDLError("E_STATE_VERSION", "Expected plan schema 2 and resolution version 1; older alpha plans must be re-resolved from their author source with explicit construction settings")
             artifact = data.pop("artifact_digest")
             if artifact != digest(data):
                 raise HNDLError("E_INTEGRITY", "Saved plan artifact digest does not match its contents")
@@ -168,6 +175,10 @@ class ResolvedPlan:
                 raise HNDLError("E_SCHEMA", "Saved nodes must be a list")
             if len(serialized_nodes) > _limits(limits)["max_nodes"]:
                 raise HNDLError("E_RESOURCE", "Saved plan exceeds max_nodes")
+            required_node_fields = {"id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
+                                    "state_bytes", "state_version", "initialization", "trainability", "source", "provenance"}
+            if any(type(item) is not dict or set(item) != required_node_fields for item in serialized_nodes):
+                raise HNDLError("E_SCHEMA", "Saved schema 2 nodes require all canonical fields, including initialization and trainability")
             nodes = tuple(ResolvedNode(**item) for item in serialized_nodes)
             plan = cls(nodes=nodes, registry=registry, **data)
             if semantic != plan.semantic_digest:
@@ -194,4 +205,5 @@ class ResolvedPlan:
         lines = [repr(self), f"Semantic digest: {self.semantic_digest}", f"Registered state bound: {self.state_bytes} bytes"]
         for node in self.nodes:
             lines.append(f"{node.id}: " + ", ".join(f"{key}={plain(value)}" for key, value in node.provenance.items()))
+            lines.append(f"  initialization={plain(node.initialization)}, trainability={plain(node.trainability)}")
         return "\n".join(lines)
