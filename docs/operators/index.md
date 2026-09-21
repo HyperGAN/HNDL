@@ -26,6 +26,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | Operator | Summary |
 | --- | --- |
 | [`add`](add.md) | Elementwise sum of two tensors with identical shapes. |
+| [`broadcast_add`](broadcast_add.md) | Elementwise sum of two tensors of equal rank, broadcasting size-1 axes. |
 | [`clamp`](clamp.md) | Saturate every element into the closed interval [min, max]. |
 | [`mul`](mul.md) | Elementwise product of two tensors with identical shapes. |
 | [`scale`](scale.md) | Multiply a tensor by a fixed scalar. |
