@@ -75,7 +75,7 @@ cls_token()
 linear(4)
 ```
 
-Input `['B', 6]` → output `['B', 7, 4]`. Graph input dtype: `int64`.
+Input `['B', 6]` (`input_dtype="int64"`) → output `['B', 7, 4]`.
 
 ```text
 Network: [B, 6] -> [B, 7, 4]  dtype=float32  input_dtype=int64

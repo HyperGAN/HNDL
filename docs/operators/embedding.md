@@ -61,7 +61,7 @@ embedding(1000, 32)
 linear(8)
 ```
 
-Input `['B', 16]` → output `['B', 16, 8]`. Graph input dtype: `int64`.
+Input `['B', 16]` (`input_dtype="int64"`) → output `['B', 16, 8]`.
 
 ```text
 Network: [B, 16] -> [B, 16, 8]  dtype=float32  input_dtype=int64
@@ -81,7 +81,7 @@ embedding(64)
 relu()
 ```
 
-Input `['B', 8]` → output `['B', 8, 5]`. Graph input dtype: `int64`.
+Input `['B', 8]` (`input_dtype="int64"`) → output `['B', 8, 5]`.
 
 ```text
 Network: [B, 8] -> [B, 8, 5]  dtype=float32  input_dtype=int64
@@ -103,7 +103,7 @@ pos_embed(32)
 linear(4)
 ```
 
-Input `['B', 6]` → output `['B', 7, 4]`. Graph input dtype: `int64`.
+Input `['B', 6]` (`input_dtype="int64"`) → output `['B', 7, 4]`.
 
 ```text
 Network: [B, 6] -> [B, 7, 4]  dtype=float32  input_dtype=int64

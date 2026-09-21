@@ -77,7 +77,7 @@ pos_embed(32)
 linear(4)
 ```
 
-Input `['B', 12]` → output `['B', 12, 4]`. Graph input dtype: `int64`.
+Input `['B', 12]` (`input_dtype="int64"`) → output `['B', 12, 4]`.
 
 ```text
 Network: [B, 12] -> [B, 12, 4]  dtype=float32  input_dtype=int64

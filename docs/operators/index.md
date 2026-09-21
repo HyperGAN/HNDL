@@ -61,6 +61,9 @@ are generated from those declarations by `python -m hndl.docs`.
 | Operator | Summary |
 | --- | --- |
 | [`attention`](attention.md) | Multi-head self-attention over a [B, T, D] sequence. |
+| [`cls_token`](cls_token.md) | Prepend one learned classification token to a sequence. |
+| [`embedding`](embedding.md) | Look up a learned vector for every integer token id. |
+| [`pos_embed`](pos_embed.md) | Add a learned position vector to every position of a sequence. |
 
 ## shape
 
