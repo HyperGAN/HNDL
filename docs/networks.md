@@ -457,6 +457,72 @@ index  name       operation        input shapes         output shapes
 
 Parameters: 11,689,512. He et al., "Deep Residual Learning for Image Recognition" (CVPR 2016), configuration ResNet-18; the count equals torchvision.models.resnet18(), sum(p.numel() for p in m.parameters()) == 11,689,512, because hndl's resblock is torchvision's BasicBlock — bias-free 3×3 convolutions with batch norm, and a 1×1 convolution plus norm on each downsampling shortcut.
 
+## SAGAN self-attention block
+
+The self-attention block of the Self-Attention GAN over a 64-channel 16×16 feature map: three 1×1 projections, a 256×256 attention map built with matmul and softmax, and a learned gate that starts at zero so the block begins as the identity. The flattening reshapes keep the batch symbolic, and the whole block is written from registered operators — no attention operator is involved.
+
+`examples/networks/sagan_attention.hndl`
+
+```python
+# A SAGAN self-attention block (Zhang et al. 2018, section 3) over a
+# [B, 64, 16, 16] feature map. Every position attends to every other, so the
+# block sees the whole map where a 3x3 convolution sees a neighbourhood.
+#
+# N = 16*16 = 256 positions, C = 64 channels, and the query/key width is
+# C/8 = 8 as in the paper.
+
+saved = x
+
+# 1x1 projections: f (query) and g (key) are narrow, h (value) keeps C.
+f = conv(x, 8, kernel_size=1, name="f")        # [B, 8, 16, 16]
+g = conv(x, 8, kernel_size=1, name="g")        # [B, 8, 16, 16]
+h = conv(x, 64, kernel_size=1, name="h")       # [B, 64, 16, 16]
+
+# Flatten the spatial axes: [B, C', H, W] -> [B, C', N].
+fn = reshape(f, 8)                             # [B, 8, 256]
+gn = reshape(g, 8)                             # [B, 8, 256]
+hn = reshape(h, 64)                            # [B, 64, 256]
+
+# energy[i, j] = f[:, i] . g[:, j] over the query width.
+ft = transpose(fn, 1, 2)                       # [B, 256, 8]
+energy = matmul(ft, gn)                        # [B, 256, 256]
+beta = softmax(energy, -1)                     # attention over the key positions
+
+# out[:, i] = sum_j beta[i, j] * h[:, j]; beta is transposed so that the sum
+# runs over the key axis, as in the reference implementation.
+bt = transpose(beta, 1, 2)                     # [B, 256, 256]
+o = matmul(hn, bt)                             # [B, 64, 256]
+o = reshape(o, 64, 16, 16)                     # back to the image layout
+
+# The learned gate starts at 0, so the block starts as the identity and the
+# network decides how much attention to admit.
+o = learned_scale(o, name="gamma")
+add(o, saved)
+```
+
+Input `['B', 64, 16, 16]` → output `['B', 64, 16, 16]`.
+
+```text
+Network: [B, 64, 16, 16] -> [B, 64, 16, 16]  dtype=float32
+index  name   operation      input shapes                          output shapes
+0      f      conv           x=[B, 64, 16, 16]                     out=[B, 8, 16, 16]
+1      g      conv           x=[B, 64, 16, 16]                     out=[B, 8, 16, 16]
+2      h      conv           x=[B, 64, 16, 16]                     out=[B, 64, 16, 16]
+3      n3     reshape        x=[B, 8, 16, 16]                      out=[B, 8, 256]
+4      n4     reshape        x=[B, 8, 16, 16]                      out=[B, 8, 256]
+5      n5     reshape        x=[B, 64, 16, 16]                     out=[B, 64, 256]
+6      n6     transpose      x=[B, 8, 256]                         out=[B, 256, 8]
+7      n7     matmul         a=[B, 256, 8], b=[B, 8, 256]          out=[B, 256, 256]
+8      n8     softmax        x=[B, 256, 256]                       out=[B, 256, 256]
+9      n9     transpose      x=[B, 256, 256]                       out=[B, 256, 256]
+10     n10    matmul         a=[B, 64, 256], b=[B, 256, 256]       out=[B, 64, 256]
+11     n11    reshape        x=[B, 64, 256]                        out=[B, 64, 16, 16]
+12     gamma  learned_scale  x=[B, 64, 16, 16]                     out=[B, 64, 16, 16]
+13     n13    add            a=[B, 64, 16, 16], b=[B, 64, 16, 16]  out=[B, 64, 16, 16]
+```
+
+Parameters: 5,201. Zhang, Goodfellow, Metaxas & Odena, "Self-Attention Generative Adversarial Networks" (ICML 2019, arXiv 2018), section 3: f and g project to C/8 = 8 channels, h keeps C = 64, the attention map is softmax(f(x)^T g(x)) over the key positions, and the output is y = gamma * o + x with gamma initialized to 0. The count matches the same block in plain torch — three Conv2d(1×1) layers with bias (64·8+8 twice and 64·64+64) plus the single gamma — which also gives 5,201.
+
 ## Small U-Net
 
 An encoder–decoder with skip connections for 32×32 segmentation: two 16- and 32-channel down stages, a 64-channel bottleneck, and two up stages that concatenate the matching encoder tensor before convolving. The single output channel of the 1×1 head is inferred from the output contract.
