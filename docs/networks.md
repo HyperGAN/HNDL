@@ -125,6 +125,69 @@ index  name  operation  input shapes      output shapes
 
 Parameters: 235,146. Classic MNIST baseline; 784·256+256 + 256·128+128 + 128·10+10 = 235,146 parameters.
 
+## ResNet-18
+
+The 18-layer residual network: a 7×7/2 stem with max pooling, then four stages of two basic blocks at 64, 128, 256 and 512 channels, a global average pool, and one classifier whose 1000 outputs come from the output contract.
+
+`examples/networks/resnet18.hndl`
+
+```python
+# ResNet-18 (He et al., 2015) for 224x224 ImageNet classification.
+# Four stages of two basic blocks each; every stage but the first halves
+# height and width and doubles the channel count, ending at 512 on 7x7.
+
+# Stem: 7x7/2 convolution, then 3x3/2 max pooling. 224 -> 112 -> 56.
+# The convolution omits its bias because the batch norm that follows cancels it.
+conv(64, kernel_size=7, stride=2, padding=3, bias=False, name="stem_conv")
+batch_norm(name="stem_norm")
+relu()
+max_pool(3, stride=2, padding=1, name="stem_pool")
+
+# layer1: 64 channels at 56x56. Both shortcuts are identities - stride 1, same width.
+resblock(64, name="layer1_0")
+resblock(64, name="layer1_1")
+
+# layer2: 128 channels at 28x28. A strided block projects its shortcut with 1x1 conv + norm.
+resblock(128, stride=2, name="layer2_0")
+resblock(128, name="layer2_1")
+
+# layer3: 256 channels at 14x14.
+resblock(256, stride=2, name="layer3_0")
+resblock(256, name="layer3_1")
+
+# layer4: 512 channels at 7x7.
+resblock(512, stride=2, name="layer4_0")
+resblock(512, name="layer4_1")
+
+# Head: average each of the 512 channels over 7x7, then one classifier.
+# Its 1000 outputs are inferred from the output contract.
+global_avg_pool()
+linear(name="fc")
+```
+
+Input `['B', 3, 224, 224]` → output `['B', 1000]`.
+
+```text
+Network: [B, 3, 224, 224] -> [B, 1000]  dtype=float32
+index  name       operation        input shapes         output shapes
+0      stem_conv  conv             x=[B, 3, 224, 224]   out=[B, 64, 112, 112]
+1      stem_norm  batch_norm       x=[B, 64, 112, 112]  out=[B, 64, 112, 112]
+2      n2         relu             x=[B, 64, 112, 112]  out=[B, 64, 112, 112]
+3      stem_pool  max_pool         x=[B, 64, 112, 112]  out=[B, 64, 56, 56]
+4      layer1_0   resblock         x=[B, 64, 56, 56]    out=[B, 64, 56, 56]
+5      layer1_1   resblock         x=[B, 64, 56, 56]    out=[B, 64, 56, 56]
+6      layer2_0   resblock         x=[B, 64, 56, 56]    out=[B, 128, 28, 28]
+7      layer2_1   resblock         x=[B, 128, 28, 28]   out=[B, 128, 28, 28]
+8      layer3_0   resblock         x=[B, 128, 28, 28]   out=[B, 256, 14, 14]
+9      layer3_1   resblock         x=[B, 256, 14, 14]   out=[B, 256, 14, 14]
+10     layer4_0   resblock         x=[B, 256, 14, 14]   out=[B, 512, 7, 7]
+11     layer4_1   resblock         x=[B, 512, 7, 7]     out=[B, 512, 7, 7]
+12     n12        global_avg_pool  x=[B, 512, 7, 7]     out=[B, 512]
+13     fc         linear           x=[B, 512]           out=[B, 1000]
+```
+
+Parameters: 11,689,512. He et al., "Deep Residual Learning for Image Recognition" (CVPR 2016), configuration ResNet-18; the count equals torchvision.models.resnet18(), sum(p.numel() for p in m.parameters()) == 11,689,512, because hndl's resblock is torchvision's BasicBlock — bias-free 3×3 convolutions with batch norm, and a 1×1 convolution plus norm on each downsampling shortcut.
+
 ## Tiny Vision Transformer
 
 A ViT-Tiny-shaped classifier for 32×32 RGB images: a 4×4 patch stem of width 192, a learned class token and position table, four pre-norm transformer blocks with 3 heads, then a final layer norm and a linear head read off the class position.
