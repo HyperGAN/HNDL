@@ -88,6 +88,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`pool_tokens`](pool_tokens.md) | Reduce a [B, T, D] sequence to one [B, D] vector per example. |
 | [`pos_embed`](pos_embed.md) | Add a learned position vector to every position of a sequence. |
 | [`swiglu`](swiglu.md) | SwiGLU feed-forward block: a SiLU-gated projection folded back to the input width. |
+| [`transformer_block`](transformer_block.md) | Pre-norm transformer block: residual self-attention followed by a residual feed-forward. |
 
 ## shape
 
