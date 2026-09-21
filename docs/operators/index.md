@@ -64,3 +64,10 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`reshape`](reshape.md) | View the tensor with new non-batch dimensions, preserving the element count. |
 | [`split`](split.md) | Cut one axis into a first section and the remainder. |
 | [`sum`](sum.md) | Add up one non-batch axis. |
+
+## spatial
+
+| Operator | Summary |
+| --- | --- |
+| [`adaptive_avg_pool`](adaptive_avg_pool.md) | Average-pool [B, C, H, W] images to a fixed output height and width. |
+| [`global_avg_pool`](global_avg_pool.md) | Average each channel over height and width, producing one value per channel. |
