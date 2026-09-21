@@ -13,7 +13,8 @@ from .types import contract_header
 
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
-SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names"})
+SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names",
+                             "_input_names", "_input_dtypes", "_output_dtypes"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
           "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}

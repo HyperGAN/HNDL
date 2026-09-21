@@ -1,5 +1,6 @@
 """Named external inputs and outputs across both frontends and the backend."""
 
+import copy
 import json
 
 import pytest
@@ -121,6 +122,9 @@ def test_named_ports_build_and_run_with_real_tensors(device):
     graph = build(model.plan, device=device, initialization_seed=3)
     graph.load_state_dict(model.state_dict())
     torch.testing.assert_close(graph(x=x, y=y)["logits"], result["logits"])
+    copied = copy.deepcopy(model)
+    assert copied.plan is model.plan and copied._input_names == model._input_names
+    torch.testing.assert_close(copied(x, y)["features"], result["features"])
     with pytest.raises(TypeError):
         len(model)
 

@@ -99,10 +99,10 @@ CASES = {
     "conditional": (CONDITIONAL, {"z": ("B", 8), "y": ("B", 4)},
                     {"logits": ("B", 1), "features": ("B", 16)}, [
         ("joined", "concat@1", {"axis": 1, "input_count": 2}, {"x0": ("B", 8), "x1": ("B", 4)}, {"out": ("B", 12)}),
-        ("project", "linear@1", {"out_features": 16, "in_features": 12, "bias": True},
+        ("project", "linear@1", {"out_features": 16, "in_features": 12, "bias": True, "spectral_norm": False},
          {"x": ("B", 12)}, {"out": ("B", 16)}),
         ("features", "relu@1", {}, {"x": ("B", 16)}, {"out": ("B", 16)}),
-        ("head", "linear@1", {"out_features": 1, "in_features": 16, "bias": True},
+        ("head", "linear@1", {"out_features": 1, "in_features": 16, "bias": True, "spectral_norm": False},
          {"x": ("B", 16)}, {"out": ("B", 1)}),
     ]),
 }
