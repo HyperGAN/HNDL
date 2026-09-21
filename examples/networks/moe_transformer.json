@@ -1,0 +1,9 @@
+{
+  "title": "Mixture-of-experts transformer",
+  "description": "A causal language model on 32 token ids: learned token and position embeddings, two pre-norm blocks that pair 4-head causal attention with a top-2-of-4 sparse mixture of experts, then a final norm and a bias-free vocabulary head whose width comes from the output contract.",
+  "input_shape": ["B", 32],
+  "output_shape": ["B", 32, 100],
+  "input_dtype": "int64",
+  "parameters": 181888,
+  "reference": "Top-k expert routing follows Shazeer et al. 2017 (\"Outrageously Large Neural Networks\") and the Switch Transformer (Fedus et al. 2021); the count was checked against an equivalent plain-PyTorch build: embedding 100·64 = 6,400, positions 32·64 = 2,048, five layer norms 5·128 = 640, two attentions 2·4·(64·64+64) = 33,280, two MoE layers 2·(4·64 + 4·(128·64+128 + 64·128+64)) = 133,120, head 100·64 = 6,400, total 181,888."
+}
