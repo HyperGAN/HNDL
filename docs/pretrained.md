@@ -113,7 +113,7 @@ registry.pretrained_provider("encoder", Encoder)   # trusted host code
 model = network(
     f"""
     pretrained("encoder.pth", provider="encoder", sha256="{digest}", layer="features.2", name="perceptual")
-    conv(8, kernel_size=3)
+    conv(8, kernel_size=3, padding=1)
     """,
     input_shape=("B", 3, 32, 32),
     output_shape=("B", 8, 32, 32),
