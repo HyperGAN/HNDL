@@ -39,6 +39,34 @@ and repeat a single element when ``k > n`` (an upsampling by replication,
 which torch permits). The operation has no parameters and behaves
 identically in train and eval mode.
 
+### Determinism and higher-order gradients
+
+Every path produces the values of `torch.nn.functional.adaptive_avg_pool2d`
+within floating-point tolerance, but which path runs decides whether the
+backward pass is deterministic on CUDA:
+
+| Case | Implementation | Deterministic on CUDA |
+| --- | --- | --- |
+| `H_in % H_out == 0` and `W_in % W_out == 0` | reshape to `[B, C, H_out, H_in//H_out, W_out, W_in//W_out]`, then `mean` over the two window axes | yes |
+| ragged extents, `H_out * W_out <= 64` | the windows written out with slicing and `stack` | yes |
+| ragged extents, `H_out * W_out > 64` | `F.adaptive_avg_pool2d` | **no** |
+
+The first two paths are built from `reshape`, `mean`, slicing and `stack`,
+none of which accumulate with atomics, so they do not raise under
+`torch.use_deterministic_algorithms(True)`, they repeat bit-identical
+gradients run to run, and they differentiate to arbitrary order. That
+makes the common critic pooling — a power-of-two map pooled to 4x4 —
+usable with a gradient penalty, which takes a second derivative through
+the pool.
+
+The third path falls back to torch's own kernel, whose CUDA backward
+accumulates with atomic adds: it raises ``adaptive_avg_pool2d_backward_cuda
+does not have a deterministic implementation`` under
+`torch.use_deterministic_algorithms(True)`, and its gradients are only
+reproducible run to run on the CPU. It is reached only by a ragged pool to
+more than 64 windows; pool to a divisor of the input extents, or to a
+smaller grid, to stay on a deterministic path.
+
 Shape inference runs forward only for the spatial axes: ``H_out`` and
 ``W_out`` come from ``output_size``, but ``H_in`` and ``W_in`` are *not*
 inferable backward, because every input extent maps to the requested
