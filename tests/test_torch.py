@@ -388,7 +388,9 @@ def test_deepcopy_keeps_lookup_moves_and_the_state_consistency_check():
     assert clone._runtime_device == torch.device("cpu")
     x = torch.randn(2, 4)
     clone.eval()(x)
-    object.__setattr__(clone, "_state_keys", clone._state_keys[:-1] + ((("ghost",), (), ()),))
+    module, _, buffers, children = clone._state_program[-1]
+    object.__setattr__(clone, "_state_program",
+                       clone._state_program[:-1] + ((module, ("ghost",), buffers, children),))
     with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
         clone(x)
 
@@ -406,6 +408,106 @@ def test_state_registered_during_forward_is_rejected():
             return data
 
     model = network("grows_state()", input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=registry)
+    with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
+        model(torch.randn(2, 4))
+
+
+class _Spare(nn.Module):
+    """A submodule with one parameter, for the mutation cases below to disturb."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+
+
+class _Alt(nn.Module):
+    """A stand-in for :class:`_Spare` registering a differently named parameter."""
+
+    def __init__(self):
+        super().__init__()
+        self.other = nn.Parameter(torch.zeros(1))
+
+
+class _LazyProj(nn.Module):
+    """The textbook lazy-init bug: a declared-empty module slot filled mid-forward.
+
+    ``build()`` hands the caller a module whose ``parameters()`` is empty, so
+    the optimizer never sees the projection that appears on the first call ---
+    it never trains, ``initialization_seed`` never reaches it, and it breaks a
+    ``load_state_dict`` round-trip against the checkpoint the plan describes.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.register_module("proj", None)
+
+    def forward(self, data):
+        if self.proj is None:
+            self.proj = nn.Linear(data.shape[-1], data.shape[-1])
+        return self.proj(data)
+
+
+def _fills_declared_none_parameter(module):
+    module.late = nn.Parameter(torch.zeros(1))
+
+
+def _fills_declared_none_buffer(module):
+    module.late_buffer = torch.zeros(1)
+
+
+def _empties_a_parameter_slot(module):
+    # Assigning None routes through register_parameter(name, None), which keeps
+    # the registration key and drops the tensor.
+    module.spare.weight = None
+
+
+def _deletes_a_parameter(module):
+    del module.spare._parameters["weight"]
+
+
+def _replaces_a_submodule(module):
+    module.spare = _Alt()
+
+
+def _deletes_a_submodule(module):
+    del module._modules["spare"]
+
+
+def _fills_declared_none_submodule(module):
+    module.lazy(torch.zeros(2, 4))
+
+
+@pytest.mark.parametrize("mutate", [
+    _fills_declared_none_parameter,
+    _fills_declared_none_buffer,
+    _empties_a_parameter_slot,
+    _deletes_a_parameter,
+    _replaces_a_submodule,
+    _deletes_a_submodule,
+    _fills_declared_none_submodule,
+])
+def test_every_kind_of_state_mutation_during_forward_is_rejected(mutate):
+    """Every way an operator can change its registered state mid-forward."""
+    registry = Registry.builtins()
+    alias = mutate.__name__.strip("_")
+
+    @registry.operator(alias, identity=f"tests.{alias}",
+                       summary="Change registered state during forward.",
+                       shape="data[B, F] -> value[B, F]")
+    class Mutates(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.spare = _Spare()
+            self.lazy = _LazyProj()
+            self.register_parameter("late", None)
+            self.register_buffer("late_buffer", None)
+
+        def forward(self, data):
+            mutate(self)
+            return data
+
+    model = network(f"{alias}()", input_shape=("B", 4), output_shape=("B", 4),
                     device="cpu", registry=registry)
     with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
         model(torch.randn(2, 4))

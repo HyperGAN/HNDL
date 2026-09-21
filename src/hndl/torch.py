@@ -15,7 +15,7 @@ from .types import batch_multiple, contract_header
 
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
-SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names",
+SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes",
                              "_input_names", "_input_dtypes", "_output_dtypes", "_build_dtype",
                              "_spec_inputs", "_spec_outputs", "_spec_in", "_spec_out"})
 
@@ -114,13 +114,7 @@ class GraphModule(nn.Module):
                 produced[f"node:{node.id}/{port}"] = plan.dtype if declared[port] == "any" else declared[port]
         self._output_dtypes = MappingProxyType(
             {name: DTYPES[produced[entry["ref"]]] for name, entry in plan.outputs.items()})
-        self._state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
-        # The registration keys of every module, recorded once so the
-        # forward-time integrity check compares small tuples instead of walking
-        # the module tree and rebuilding every dotted state name per call.
-        self._state_modules = tuple(self.modules())
-        self._state_keys = tuple((tuple(m._parameters), tuple(m._buffers), tuple(m._modules))
-                                 for m in self._state_modules)
+        self._state_program = self._state_snapshot()
         # Contract shapes with their batch entries pre-parsed; _resolve_shapes
         # turns these into concrete expectations once per distinct batch size.
         self._spec_inputs = {name: _compile_shape(entry["shape"]) for name, entry in plan.inputs.items()}
@@ -198,6 +192,38 @@ class GraphModule(nn.Module):
         non-floating state alone.
         """
         return self._runtime_dtype if dtype is not None and dtype == self._build_dtype else dtype
+
+    def _state_snapshot(self):
+        """Record what ``named_parameters``/``named_buffers`` see, per module.
+
+        The dotted names those walks produce are a pure function of three
+        things: the order ``modules()`` visits, each module's path from the
+        root, and the keys each module contributes. Freezing the visited
+        modules in one flat tuple --- alongside the child mapping that fixes
+        every path --- lets :meth:`_execute` re-derive the same answer without
+        recursing through ``named_modules`` or building a single string.
+
+        Each row is ``(module, parameter_keys, buffer_keys, children)``.
+        ``children`` is the module's ``_modules`` mapping as key/value pairs,
+        so a submodule swapped out under an unchanged key is still a change.
+        The key tuples are filtered exactly as PyTorch filters them: ``None``
+        slots are skipped, and a tensor already seen earlier in the walk is
+        skipped, with parameters and buffers de-duplicated independently.
+        """
+        program, seen_parameters, seen_buffers = [], set(), set()
+        for module in self.modules():
+            keys = []
+            for store, seen in ((module._parameters, seen_parameters),
+                                (module._buffers, seen_buffers)):
+                contributed = []
+                for key, value in store.items():
+                    if value is None or id(value) in seen:
+                        continue
+                    seen.add(id(value))
+                    contributed.append(key)
+                keys.append(tuple(contributed))
+            program.append((module, keys[0], keys[1], tuple(module._modules.items())))
+        return tuple(program)
 
     @staticmethod
     def _resolve(spec, batch):
@@ -310,12 +336,21 @@ class GraphModule(nn.Module):
             value = values[ref]
             check(value, expected, name, dtype)
             outputs[name] = value
-        # Comparing registration keys catches state a module created or removed
-        # during forward without walking the module tree; the one case it misses
-        # is a forward that fills an already-declared ``None`` slot in place.
-        for module, keys in zip(self._state_modules, self._state_keys):
-            if (tuple(module._parameters) != keys[0] or tuple(module._buffers) != keys[1]
-                    or tuple(module._modules) != keys[2]):
+        # Replay the build-time walk against the flat program instead of
+        # recursing through the module tree again. Pinning every module's child
+        # mapping keeps the two trees identical --- nothing can be grafted in
+        # unseen --- so comparing each module's contributed keys answers exactly
+        # what comparing the dotted name tuples used to answer. ``set.add``
+        # returns None, so its clause always passes and only records the tensor.
+        seen_parameters, seen_buffers = set(), set()
+        for module, parameters, buffers, children in self._state_program:
+            if (tuple(module._modules.items()) != children
+                    or tuple([key for key, value in module._parameters.items()
+                              if value is not None and id(value) not in seen_parameters
+                              and not seen_parameters.add(id(value))]) != parameters
+                    or tuple([key for key, value in module._buffers.items()
+                              if value is not None and id(value) not in seen_buffers
+                              and not seen_buffers.add(id(value))]) != buffers):
                 raise HNDLError("E_RUNTIME", "A module created or removed registered state during forward")
         return outputs
 

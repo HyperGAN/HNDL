@@ -108,25 +108,38 @@
   dtype changes, and each node's module handle, port labels and expected
   shapes are baked into a flat program instead of being rebuilt from f-strings
   and `ModuleDict` lookups per call. The fixed per-node overhead drops from
-  about 12 us to about 4 us on the reference machine: in
+  about 13 us to about 5 us on the reference machine: in
   `tests/benchmark/test_parity_vs_handwritten_pytorch.py` the MLP's parity
-  ratio against hand-written PyTorch improves from 1.46x to 1.19x at batch 256
-  and from ~2.5x to ~1.5x at batch 32, and `transformer_block` from 1.49x to
-  1.27x. Validation is unchanged: every shape, dtype and device check still
+  ratio against hand-written PyTorch improves from 1.41x to 1.19x at batch 256
+  and from ~2.5x to ~1.6x at batch 32, and `transformer_block` from ~1.44x to
+  ~1.29x. Validation is unchanged: every shape, dtype and device check still
   runs on every port of every call, in the same order, with the same
   `E_RUNTIME` messages.
 
-- **The forward-time state-integrity check compares registration keys.** The
-  check that catches a module creating or removing registered state mid-forward
-  used to rebuild every dotted parameter and buffer name by walking the module
-  tree on each call; it now compares each module's cached `_parameters`,
-  `_buffers` and `_modules` key tuples. This is *stricter* in three cases it
-  previously missed — a stateless submodule attached or detached during
-  forward, a parameter re-registered under a second alias, and registration
-  keys reordered — and *narrower* in exactly one: a forward that fills an
-  already-declared `None` slot (for example assigning `self.bias` on a module
-  built with `bias=False`) adds no new key and is no longer reported. The slot
-  was declared at build time, so nothing structurally new appears.
+- **The forward-time state-integrity check replays a recorded walk.** The check
+  that catches a module creating or removing registered state mid-forward used
+  to rebuild every dotted parameter and buffer name by recursing through the
+  module tree on each call. It now records that walk once at build time — the
+  modules it visited, each one's child mapping, and the registration keys each
+  one contributed — and replays it against that flat list, comparing key
+  tuples instead of formatting names. Pinning each visited module's `_modules`
+  mapping by key *and* by child identity is what makes the flat list safe:
+  nothing can be grafted into the tree unseen, so the recorded visit order and
+  every module's path are still the ones the dotted names were built from.
+  `None` slots and tensors already seen earlier in the walk are filtered
+  exactly as `named_parameters` and `named_buffers` filter them. Detection is
+  therefore unchanged from 0.5.0 — including a forward that fills a
+  declared-`None` parameter, buffer or submodule slot (the lazy-initialization
+  bug, where `build()` hands the caller an empty `parameters()` and the real
+  weights appear on the first call, never trained, never seeded, and absent
+  from the checkpoint the plan describes), a submodule swapped out under an
+  unchanged attribute name, and a parameter dropped with `self.weight = None`
+  — except in one case, where it is now *stricter*: attaching, detaching or
+  swapping a submodule that registers no parameters or buffers of its own
+  contributes no dotted name, so 0.5.0 let that through and this check reports
+  it. As in 0.5.0, registering an already-registered tensor under a second
+  name is not reported, because de-duplication drops the alias from the old
+  name tuple and the new key tuple alike.
 
 ## 0.5.0 (2026-09-21)
 

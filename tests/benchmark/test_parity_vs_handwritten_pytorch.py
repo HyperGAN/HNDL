@@ -18,15 +18,15 @@ validates every node's shape, dtype and device on each forward call (see
 allowed to cost. These assertions are meant to fail loudly rather than skip if
 that overhead ever grows unreasonable.
 
-That overhead is a roughly **constant** cost per forward call — about 4 us per
-node on this machine, so ~20 us for the five-node MLP, independent of batch
+That overhead is a roughly **constant** cost per forward call — about 5 us per
+node on this machine, so ~27 us for the five-node MLP, independent of batch
 size — which means the ratio a case reports depends on how much arithmetic the
 batch gives it to amortize against. The MLP is timed at batch 256 for that
-reason; at batch 32 the same network measures about 1.5x, which is the fixed
+reason; at batch 32 the same network measures about 1.6x, which is the fixed
 overhead weighing on a 40 us forward pass rather than a per-element slowdown.
-(Both figures were ~3x larger before the resolved-shape and baked-program
-caches landed: the per-call cost used to be ~12 us per node and batch 32
-measured ~2.4x.)
+(Both figures were ~2.5x larger before the resolved-shape and baked-program
+caches landed: the per-call cost used to be ~13 us per node and batch 32
+measured ~2.5x.)
 
 Run with ``-s`` to see each case's two timings and their ratio.
 """
