@@ -105,6 +105,65 @@ index  name    operation   input shapes        output shapes
 
 Parameters: 2,765,633. Radford, Metz & Chintala, "Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks" (2015), in the form of the PyTorch DCGAN example; the count was checked against the equivalent torch.nn stack — 3·64·4·4+64 + 64·128·4·4 + 2·128 + 128·256·4·4 + 2·256 + 256·512·4·4 + 2·512 + 8192+1 = 2,765,633.
 
+## DCGAN generator
+
+Project a 100-dimensional latent vector to a 4×4×1024 seed, then upsample with four doubling transposed convolutions to a 3×64×64 image. The projection width, the seed size and the three output channels are all inferred from the contract.
+
+`examples/networks/dcgan_generator.hndl`
+
+```python
+# DCGAN generator (Radford et al. 2015, figure 1): a 100-dimensional latent
+# vector becomes a 64×64 RGB image. Four doubling stages divide 64 by 16, so
+# the contract fixes the seed at 4×4 and the projection at 1024·4·4 = 16384.
+# Every convolution that feeds a batch_norm drops its bias, as in the reference.
+
+linear(bias=False, name="project")            # [B, 100] -> [B, 16384]
+reshape(1024, name="seed")                    # -> [B, 1024, 4, 4]
+batch_norm(name="seed_norm")
+relu()
+
+deconv(512, policy="up2", bias=False, name="up8")    # 4×4 -> 8×8
+batch_norm()
+relu()
+
+deconv(256, policy="up2", bias=False, name="up16")   # 8×8 -> 16×16
+batch_norm()
+relu()
+
+deconv(128, policy="up2", bias=False, name="up32")   # 16×16 -> 32×32
+batch_norm()
+relu()
+
+# 32×32 -> 64×64. The 3 output channels come from the contract, and this last
+# stage keeps its bias because no normalization follows it.
+deconv(policy="up2", name="to_rgb")
+tanh()                                               # images in (-1, 1)
+```
+
+Input `['B', 100]` → output `['B', 3, 64, 64]`.
+
+```text
+Network: [B, 100] -> [B, 3, 64, 64]  dtype=float32
+index  name       operation   input shapes        output shapes
+0      project    linear      x=[B, 100]          out=[B, 16384]
+1      seed       reshape     x=[B, 16384]        out=[B, 1024, 4, 4]
+2      seed_norm  batch_norm  x=[B, 1024, 4, 4]   out=[B, 1024, 4, 4]
+3      n3         relu        x=[B, 1024, 4, 4]   out=[B, 1024, 4, 4]
+4      up8        deconv      x=[B, 1024, 4, 4]   out=[B, 512, 8, 8]
+5      n5         batch_norm  x=[B, 512, 8, 8]    out=[B, 512, 8, 8]
+6      n6         relu        x=[B, 512, 8, 8]    out=[B, 512, 8, 8]
+7      up16       deconv      x=[B, 512, 8, 8]    out=[B, 256, 16, 16]
+8      n8         batch_norm  x=[B, 256, 16, 16]  out=[B, 256, 16, 16]
+9      n9         relu        x=[B, 256, 16, 16]  out=[B, 256, 16, 16]
+10     up32       deconv      x=[B, 256, 16, 16]  out=[B, 128, 32, 32]
+11     n11        batch_norm  x=[B, 128, 32, 32]  out=[B, 128, 32, 32]
+12     n12        relu        x=[B, 128, 32, 32]  out=[B, 128, 32, 32]
+13     to_rgb     deconv      x=[B, 128, 32, 32]  out=[B, 3, 64, 64]
+14     n14        tanh        x=[B, 3, 64, 64]    out=[B, 3, 64, 64]
+```
+
+Parameters: 12,658,435. Radford, Metz & Chintala 2015 (DCGAN), figure 1: project and reshape to 4×4×1024, then 8×8×512, 16×16×256, 32×32×128, 64×64×3. The count was checked by building the same stack in plain torch — Linear(100, 16384, bias=False), four ConvTranspose2d(kernel 4, stride 2, padding 1) with bias=False under each of the four BatchNorm2d layers and bias=True on the final RGB stage — which also gives 12,658,435. The PyTorch DCGAN tutorial differs: it starts from a 100×1×1 ConvTranspose2d rather than a linear projection, and its ngf=64 feature maps make the stack 512/256/128/64/3 instead of the paper's 1024/512/256/128/3.
+
 ## Tiny GPT
 
 A 64-token GPT-2-style decoder: learned token and position embeddings, four causal pre-norm transformer blocks with a tanh-approximated GELU feed-forward, a final layer norm, and an untied language-model head whose width is inferred from the output contract.
