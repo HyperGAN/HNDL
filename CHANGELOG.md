@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-09-21)
+
+A minor release for HyperGAN's multiscale discriminators: one pretrained forward pass returns several intermediate layers, operators may declare variadic output ports, and `.hndl` files count as Python on GitHub.
 
 - **Several layers from one pretrained forward pass.** A provider checkpoint
   can now return more than one intermediate tensor:
