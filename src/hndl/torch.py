@@ -296,7 +296,7 @@ def _state_bytes(module):
     return sum(storages.values())
 
 
-def _build(plan, *, device, initialization_seed=None, registry=None, facade=False):
+def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None):
     if plan.dtype != "float32":
         raise HNDLError("E_SCHEMA", f"Unsupported plan dtype {plan.dtype!r}")
     device = torch.device(device)
@@ -315,7 +315,7 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
         from .registry import Registry
         registry = Registry.builtins()
     from .resolver import validate_concrete_plan
-    plan = validate_concrete_plan(plan, registry=registry)
+    plan = validate_concrete_plan(plan, registry=registry, limits=limits)
     # Validate all required implementations before constructing any modules.
     custom = {}
     port_orders = {}
@@ -354,9 +354,9 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     return cls(plan, modules, device, receipt, port_orders)
 
 
-def build(plan, *, device, initialization_seed=None, registry=None):
+def build(plan, *, device, initialization_seed=None, registry=None, limits=None):
     """Build a concrete plan; forward accepts named inputs and returns a dict."""
-    return _build(plan, device=device, initialization_seed=initialization_seed, registry=registry)
+    return _build(plan, device=device, initialization_seed=initialization_seed, registry=registry, limits=limits)
 
 
 def _network(resolve_name, source, *, input_shape, output_shape, device,
@@ -366,7 +366,7 @@ def _network(resolve_name, source, *, input_shape, output_shape, device,
     plan = resolve(source, input_shape=input_shape, output_shape=output_shape,
                    dtype=dtype, registry=registry, limits=limits)
     return _build(plan, device=device, initialization_seed=initialization_seed,
-                  registry=registry, facade=True)
+                  registry=registry, facade=True, limits=limits)
 
 
 def network(source, *, input_shape, output_shape, device, dtype="float32",

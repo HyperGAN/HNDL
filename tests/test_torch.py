@@ -251,6 +251,8 @@ def test_direct_plan_tampering_rejected_before_module_allocation(monkeypatch):
     monkeypatch.setattr(nn, "Linear", forbidden)
     with pytest.raises(HNDLError, match="E_INTEGRITY"):
         build(forged, device="cpu")
+    with pytest.raises(HNDLError, match="E_RESOURCE"):
+        build(plan, device="cpu", limits={"max_state_bytes": 1})
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available on this host")
