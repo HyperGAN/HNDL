@@ -73,7 +73,7 @@ last_layer = model[-1]
 features = model[:2]                     # nn.Sequential sharing these layers
 ```
 
-Unnamed operations receive IDs such as `n0`; `model["n0"]` and `model[0]` return the same module. Optional names appear in the branching example below. Slices reuse their parameters, so training a slice also updates the original model. The complete model retains its resolved shape contract; a slice is a regular PyTorch sequence. Standard `state_dict()`, `train()`, and `eval()` remain available.
+Unnamed operations receive IDs such as `n0`; `model["n0"]` and `model[0]` return the same module. Optional names appear in the branching example below. Slices reuse their parameters, so training a slice also updates the original model. The complete model retains its resolved shape contract; a slice is a regular PyTorch sequence. Standard `state_dict()`, `train()`, and `eval()` remain available, and `copy.deepcopy(model)` returns an independent model --- its own parameters and buffers, the same trainability flags and training mode, and no draw on the random state --- which is what a moving-average copy of a model needs. The resolved plan is immutable, so the copy shares it. To store a model, save `model.plan.to_json()` next to `torch.save(model.state_dict())` and rebuild it; pickling the module itself is not supported.
 
 Initial weights use PyTorch’s normal random state. For repeatable initialization in the same environment, call [`torch.manual_seed(7)`](https://docs.pytorch.org/docs/stable/notes/randomness.html#pytorch-random-number-generator) before constructing the network.
 

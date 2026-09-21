@@ -2,12 +2,17 @@
 
 from collections import OrderedDict
 from contextlib import contextmanager
+import copy
 from types import MappingProxyType
 
 import torch
 from torch import nn
 
 from .errors import HNDLError
+
+# Build metadata a copied network shares with its original: immutable records
+# describing the resolved architecture, never the parameters that train.
+SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes", "_state_names"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
           "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
@@ -89,6 +94,37 @@ class GraphModule(nn.Module):
         if name in ("nodes", "plan"):
             raise TypeError("HNDL architecture is fixed; resolve and build a new plan")
         super().__delattr__(name)
+
+    def __deepcopy__(self, memo):
+        """Copy every module, parameter and buffer; share the resolved plan.
+
+        ``nn.Module`` has no copy protocol of its own, so the default one
+        pickles the instance dictionary, which the plan's frozen mappings
+        refuse. Copying the dictionary entry by entry instead preserves the
+        module internals exactly --- parameters with their ``requires_grad``
+        flags, buffers, submodules, hooks and the training mode --- while the
+        architecture records are shared rather than duplicated.
+        """
+        result = type(self).__new__(type(self))
+        memo[id(self)] = result
+        for name, value in self.__dict__.items():
+            # The architecture lock guards attribute writes; this rebuilds the
+            # instance dictionary directly, exactly as unpickling would.
+            object.__setattr__(result, name, value if name in SHARED_METADATA
+                               else copy.deepcopy(value, memo))
+        return result
+
+    def __copy__(self):
+        """A second handle on the same graph: every tensor stays shared."""
+        result = type(self).__new__(type(self))
+        result.__dict__.update(self.__dict__)
+        return result
+
+    def __reduce__(self):
+        raise TypeError(
+            f"{type(self).__name__} cannot be pickled because its plan holds frozen mappings; "
+            "save plan.to_json() next to torch.save(model.state_dict()) and rebuild with "
+            "hndl.torch.build(), or use copy.deepcopy() for an in-memory copy")
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)

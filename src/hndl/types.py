@@ -12,6 +12,23 @@ from .settings import (normalize_initialization, normalize_trainability,
                        validate_initialization, validate_trainability)
 
 
+class Immutable:
+    """A record that never changes once constructed, so copies can share it.
+
+    These records hold frozen mappings, which cannot be pickled, and they are
+    compared by value, so copying one would only cost memory. Returning
+    ``self`` keeps ``copy.deepcopy`` of anything that references a plan --- a
+    built network, for one --- cheap and correct.
+    """
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        memo[id(self)] = self
+        return self
+
+
 def freeze(value):
     if isinstance(value, Mapping):
         return MappingProxyType({key: freeze(item) for key, item in value.items()})
@@ -41,7 +58,7 @@ def digest(value):
 
 
 @dataclass(frozen=True)
-class Node:
+class Node(Immutable):
     id: str
     op: str
     args: Mapping = field(default_factory=dict)
@@ -61,7 +78,7 @@ class Node:
 
 
 @dataclass(frozen=True)
-class Graph:
+class Graph(Immutable):
     nodes: tuple
     input_shape: tuple
     output_shape: tuple
@@ -101,7 +118,7 @@ class ResolvedNode(Node):
 
 
 @dataclass(frozen=True)
-class ResolvedPlan:
+class ResolvedPlan(Immutable):
     nodes: tuple
     input_shape: tuple
     output_shape: tuple

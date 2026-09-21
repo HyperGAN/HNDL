@@ -1,5 +1,7 @@
 """Numerical and integration checks for the PyTorch backend."""
 
+import copy
+import pickle
 import subprocess
 import sys
 from dataclasses import replace
@@ -308,3 +310,103 @@ def test_file_and_callable_capture_once(tmp_path):
     repr(captured)
     captured(x)
     assert len(calls) == 1
+
+
+def _stateful(**kwargs):
+    """An MLP whose batch norm gives the graph buffers as well as parameters."""
+    return network('linear(5, name="hidden"); batch_norm(name="norm"); relu(); linear(name="head")',
+                   input_shape=("B", 4), output_shape=("B", 2), **kwargs)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_deepcopy_gives_independent_state_and_shares_the_plan(device):
+    model = _stateful(device=device, initialization_seed=23)
+    model.eval()
+    model["hidden"].bias.requires_grad_(False)
+    x = torch.randn(3, 4, device=device)
+    model.train()(x)  # move the batch-norm buffers away from their defaults
+    model.eval()
+
+    before = torch.get_rng_state().clone()
+    clone = copy.deepcopy(model)
+    assert torch.equal(before, torch.get_rng_state())
+
+    assert type(clone) is type(model) and clone is not model
+    assert clone.plan is model.plan and clone.build_receipt is model.build_receipt
+    assert clone.training is False and repr(clone) == repr(model)
+    torch.testing.assert_close(clone(x), model(x))
+
+    names = tuple(model.state_dict())
+    assert names == tuple(clone.state_dict()) and "nodes.n_norm.running_mean" in names
+    originals = dict(model.named_parameters()) | dict(model.named_buffers())
+    copies = dict(clone.named_parameters()) | dict(clone.named_buffers())
+    for name, original in originals.items():
+        assert copies[name] is not original and copies[name].data_ptr() != original.data_ptr()
+        assert copies[name].requires_grad == original.requires_grad
+        torch.testing.assert_close(copies[name], original)
+    assert originals["nodes.n_hidden.bias"].requires_grad is False
+    assert originals["nodes.n_hidden.weight"].requires_grad is True
+
+    expected = model(x)
+    with torch.no_grad():
+        for tensor in (*clone.parameters(), *clone.buffers()):
+            tensor.add_(1)
+    torch.testing.assert_close(model(x), expected)
+    assert not torch.allclose(clone(x), expected)
+
+
+def test_deepcopy_of_a_branched_graph_keeps_the_architecture_locked():
+    source = '''
+    left, right = split(2, name="parts")
+    a = linear(left, 3, name="left")
+    b = linear(right, 3, name="right")
+    add(a, b, name="join")
+    '''
+    model = network(source, input_shape=("B", 6), output_shape=("B", 3),
+                    device="cpu", initialization_seed=12)
+    clone = copy.deepcopy(model)
+    x = torch.randn(2, 6)
+    torch.testing.assert_close(clone(x), model(x))
+    assert clone["left"] is not model["left"] and clone["left"] is clone.nodes["n_left"]
+    with pytest.raises(TypeError, match="architecture is fixed"):
+        clone.nodes.add_module("n_extra", nn.Identity())
+    with pytest.raises(TypeError, match="architecture is fixed"):
+        del clone.nodes["n_left"]
+    with pytest.raises(TypeError, match="architecture is fixed"):
+        clone.plan = model.plan
+    with pytest.raises(TypeError):
+        clone[0]
+
+
+def test_deepcopy_keeps_lookup_moves_and_the_state_consistency_check():
+    model = _stateful(device="cpu")
+    clone = copy.deepcopy(model)
+    assert len(clone) == 4 and clone[0] is clone["hidden"] and clone[-1] is clone["head"]
+    assert list(clone) == [clone[i] for i in range(4)]
+    assert isinstance(clone[:2], nn.Sequential)
+    clone.to("cpu")
+    assert clone._runtime_device == torch.device("cpu")
+    x = torch.randn(2, 4)
+    clone.eval()(x)
+    object.__setattr__(clone, "_state_names", model._state_names + ("ghost",))
+    with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
+        clone(x)
+
+
+def test_immutable_records_are_shared_and_modules_refuse_to_pickle(tmp_path):
+    model = _mlp(device="cpu")
+    plan = model.plan
+    assert copy.deepcopy(plan) is plan and copy.copy(plan) is plan
+    assert copy.deepcopy(plan.nodes[0]) is plan.nodes[0]
+    operator = plan.registry.by_identity(plan.nodes[0].op)
+    assert copy.deepcopy(operator) is operator
+    assert copy.deepcopy({"plan": plan})["plan"] is plan
+
+    shallow = copy.copy(model)
+    assert shallow is not model and shallow.nodes is model.nodes and shallow.plan is model.plan
+    torch.testing.assert_close(shallow(torch.ones(2, 4)), model(torch.ones(2, 4)))
+
+    with pytest.raises(TypeError, match="cannot be pickled.*state_dict"):
+        pickle.dumps(model)
+    with pytest.raises(TypeError, match="cannot be pickled.*state_dict"):
+        torch.save(model, tmp_path / "model.pt")
