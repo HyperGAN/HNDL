@@ -27,6 +27,8 @@ model = network(
 
 Here, `B` is a variable batch size. The final `linear()` has no width argument, so the output constraint determines its 10 output features. HNDL resolves the dimensions before constructing any modules. The implicit current tensor starts at the network input, so a simple chain needs no assignments or tensor arguments.
 
+Activations are explicit operations. Here, `relu()` follows the first linear layer; the final linear layer has no activation. Place an activation wherever you want it in the sequence. `linear`, `conv`, and `deconv` do not add one automatically.
+
 This string is a declarative subset of Python: registered operation calls, optional assignments, literal arguments, and comments. HNDL parses it into a graph without executing it as Python.
 
 Use `print(model)` to inspect it. HNDL supplies the shape table as its module representation:

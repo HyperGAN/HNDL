@@ -62,6 +62,8 @@ An unresolved dimension must not quietly become an operator default when inferen
 
 HNDL does not infer color space, value range, activation choice, layout conversion, mixed precision, or broadcasting. A declared `tanh` is an explicit operation; an image output contract does not imply it. Joins must not insert resizing or broadcasting.
 
+Activations are separate explicit graph operations in both v1 frontends. Built-in `linear`, `conv`, and `deconv` contain no activation and accept no activation shorthand. An activation consumes its explicitly supplied tensor or current, following the same binding rules as other single-input operations. Thus `linear(64); relu(); linear()` applies ReLU only between the two linear layers. The resolver and construction policies must not insert, remove, or relocate activations, including at the network output. Registered composite operations may contain activations as part of their declared operator semantics.
+
 ## 4. Author specification and graph
 
 The canonical internal model is a finite directed acyclic graph. Both frontends produce this graph before resolution. Structured graph input remains available for named multi-input/multi-output networks.
