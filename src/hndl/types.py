@@ -79,8 +79,6 @@ class Graph:
 class ResolvedNode(Node):
     input_shapes: Mapping = field(default_factory=dict)
     output_shapes: Mapping = field(default_factory=dict)
-    state_bytes: int = 0
-    state_version: int = 1
     provenance: Mapping = field(default_factory=dict)
 
     def __post_init__(self):
@@ -91,7 +89,7 @@ class ResolvedNode(Node):
 
     def to_dict(self, *, semantic=False):
         result = {key: plain(getattr(self, key)) for key in (
-            "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes", "state_bytes", "state_version",
+            "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
             "initialization", "trainability"
         )}
         if not semantic:
@@ -131,10 +129,6 @@ class ResolvedPlan:
     @property
     def semantic_digest(self):
         return digest(self._data(semantic=True))
-
-    @property
-    def state_bytes(self):
-        return sum(node.state_bytes for node in self.nodes)
 
     def to_json(self):
         data = self._data()
@@ -176,7 +170,7 @@ class ResolvedPlan:
             if len(serialized_nodes) > _limits(limits)["max_nodes"]:
                 raise HNDLError("E_RESOURCE", "Saved plan exceeds max_nodes")
             required_node_fields = {"id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
-                                    "state_bytes", "state_version", "initialization", "trainability", "source", "provenance"}
+                                    "initialization", "trainability", "source", "provenance"}
             if any(type(item) is not dict or set(item) != required_node_fields for item in serialized_nodes):
                 raise HNDLError("E_SCHEMA", "Saved schema 1 nodes require all canonical fields, including initialization and trainability")
             nodes = tuple(ResolvedNode(**item) for item in serialized_nodes)
@@ -190,19 +184,29 @@ class ResolvedPlan:
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError, OverflowError) as error:
             raise HNDLError("E_SCHEMA", f"Invalid saved plan: {error}") from error
 
+    def _operation_name(self, op):
+        if self.registry is not None:
+            try:
+                return self.registry.by_identity(op).alias
+            except HNDLError:
+                pass
+        return op
+
     def __repr__(self):
         def shape(value):
             return "[" + ", ".join(str(part) for part in value) + "]"
-        lines = [f"Network: {shape(self.input_shape)} -> {shape(self.output_shape)}  dtype={self.dtype}",
-                 "index  name  operation  input shapes  output shapes"]
+        lines = [f"Network: {shape(self.input_shape)} -> {shape(self.output_shape)}  dtype={self.dtype}"]
+        rows = [("index", "name", "operation", "input shapes", "output shapes")]
         for index, node in enumerate(self.nodes):
             inputs = ", ".join(f"{key}={shape(value)}" for key, value in node.input_shapes.items())
             outputs = ", ".join(f"{key}={shape(value)}" for key, value in node.output_shapes.items())
-            lines.append(f"{index}  {node.id}  {node.op}  {inputs}  {outputs}")
+            rows.append((str(index), node.id, self._operation_name(node.op), inputs, outputs))
+        widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+        lines.extend("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip() for row in rows)
         return "\n".join(lines)
 
     def describe(self):
-        lines = [repr(self), f"Semantic digest: {self.semantic_digest}", f"Registered state bound: {self.state_bytes} bytes"]
+        lines = [repr(self), f"Semantic digest: {self.semantic_digest}"]
         for node in self.nodes:
             lines.append(f"{node.id}: " + ", ".join(f"{key}={plain(value)}" for key, value in node.provenance.items()))
             lines.append(f"  initialization={plain(node.initialization)}, trainability={plain(node.trainability)}")

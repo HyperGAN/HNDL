@@ -2,12 +2,13 @@
 
 import math
 import struct
-import subprocess
-import sys
 
 import pytest
+import torch
 
-from hndl import Argument, HNDLError, Registry, ResolvedPlan, ops, preserves_shape
+from torch import nn
+
+from hndl import Arg, HNDLError, Registry, ResolvedPlan, ops
 from hndl import resolve, resolve_callable
 from hndl.capture import capture_callable
 from hndl.config import capture_config
@@ -146,10 +147,19 @@ def test_native_nonfinite_initializers_fail_before_creating_nodes(value):
 
 def test_custom_arguments_stay_separate_from_exact_nested_parameter_settings():
     registry = Registry.builtins()
-    registry.register(
-        "block", identity="tests.block", version=1, shape=preserves_shape,
-        arguments={"gain": Argument(float, default=1.0)}, max_state_bytes=4096,
-    )
+
+    @registry.operator("block", identity="tests.block", summary="Gain block.", shape="x[B, ...] -> out[B, ...]",
+                       args={"gain": Arg(float, 1.0, help="Multiplier.")})
+    class Block(nn.Module):
+        def __init__(self, gain):
+            super().__init__()
+            self.gain = gain
+            self.projection = nn.Sequential(nn.Linear(8, 8))
+            self._scale = nn.Parameter(torch.ones(1))
+
+        def forward(self, x):
+            return self.projection(x) * self.gain * self._scale
+
     source = '''
     block(0.5, init={"projection.0.weight": 0, "_scale": 1},
           trainable={"projection.0.weight": False}, name="configured")
@@ -209,11 +219,11 @@ def test_parameter_map_and_path_limits_preserve_capture_state(field):
 def test_settings_names_are_reserved_against_custom_scalar_and_input_port_collisions(field):
     registry = Registry.builtins()
     with pytest.raises(HNDLError, match="E_REGISTRY"):
-        registry.register("scalar", identity="tests.scalar", version=1, shape=preserves_shape,
-                          arguments={field: Argument(bool, default=False)}, max_state_bytes=0)
+        registry.operator("scalar", identity="tests.scalar", summary="Bad.", shape="x[B, ...] -> out[B, ...]",
+                          args={field: Arg(bool, False, help="Reserved name.")})(nn.Identity)
     with pytest.raises(HNDLError, match="E_REGISTRY"):
-        registry.register("port", identity="tests.port", version=1, shape=preserves_shape,
-                          input_ports=(field,), max_state_bytes=0)
+        registry.operator("port", identity="tests.port", summary="Bad.",
+                          shape=f"{field}[B, ...] -> out[B, ...]")(nn.Identity)
 
 
 @pytest.mark.parametrize("invalid", [
@@ -235,22 +245,3 @@ def test_metadata_dictionaries_do_not_widen_config_execution_permissions(invalid
     with pytest.raises(HNDLError, match="E_SYNTAX"):
         capture_config(f"linear(4)\n{invalid}", registry=registry, **SHAPES)
     assert calls == []
-
-
-def test_settings_and_roundtrip_do_not_import_torch():
-    script = '''
-import builtins
-original = builtins.__import__
-def guarded(name, *args, **kwargs):
-    if name == "torch" or name.startswith("torch."):
-        raise AssertionError("construction planning imported torch")
-    return original(name, *args, **kwargs)
-builtins.__import__ = guarded
-from hndl import ResolvedPlan, ops, resolve, resolve_callable
-kwargs = dict(input_shape=("B", 8), output_shape=("B", 4))
-first = resolve('linear(4, init={"weight": 0}, trainable=False)', **kwargs)
-second = resolve_callable(lambda x: ops.linear(4, init={"weight": 0}, trainable=False), **kwargs)
-assert first.semantic_digest == second.semantic_digest
-assert ResolvedPlan.from_json(first.to_json()).semantic_digest == first.semantic_digest
-'''
-    subprocess.run([sys.executable, "-c", script], check=True, timeout=15)

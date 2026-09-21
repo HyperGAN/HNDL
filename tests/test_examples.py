@@ -72,31 +72,6 @@ def test_frontends_files_and_saved_plan_have_same_numerical_identity(tmp_path):
     assert "[B, 10]" in str(config_plan)
 
 
-def test_pure_resolve_and_restore_never_import_torch():
-    # A fresh process catches accidental transitive backend imports even when
-    # other tests in this process have already imported torch.
-    script = '''
-import sys
-import importlib.abc
-class RejectTorch(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "torch" or fullname.startswith("torch."):
-            raise AssertionError("pure HNDL imported torch")
-sys.meta_path.insert(0, RejectTorch())
-from hndl import resolve
-plan = resolve("linear(64); relu(); linear()",
-               input_shape=("B", 128), output_shape=("B", 10))
-restored = type(plan).from_json(plan.to_json())
-assert restored.semantic_digest == plan.semantic_digest
-assert "torch" not in sys.modules
-print("pure core passed")
-'''
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                            text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "pure core passed"
-
-
 def test_many_concat_edges_stay_within_a_bounded_resolution_time():
     # This source fits the parser budgets. Non-concatenated dimensions must
     # propagate once per edge rather than comparing every pair of inputs.

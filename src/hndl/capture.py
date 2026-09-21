@@ -101,18 +101,19 @@ class Capture:
         ports = tuple(op.input_ports)
         bindings = {}
 
-        if getattr(op, "variadic_inputs", False):
+        if op.variadic is not None:
+            prefix = op.variadic
             count = 0
             while args and isinstance(args[0], Symbol):
-                bindings[f"x{count}"] = self._symbol(args.pop(0), source)
+                bindings[f"{prefix}{count}"] = self._symbol(args.pop(0), source)
                 count += 1
             for key in tuple(kwargs):
-                if re.fullmatch(r"x[0-9]+", key):
+                if re.fullmatch(re.escape(prefix) + r"[0-9]+", key):
                     if key in bindings:
                         raise _error("E_BINDING", f"Duplicate input binding {key}", source)
                     bindings[key] = self._symbol(kwargs.pop(key), source)
-            if len(bindings) < 2 or set(bindings) != {f"x{i}" for i in range(len(bindings))}:
-                raise _error("E_BINDING", "Variadic inputs require contiguous x0...xN bindings with at least two tensors", source)
+            if len(bindings) < 2 or set(bindings) != {f"{prefix}{i}" for i in range(len(bindings))}:
+                raise _error("E_BINDING", f"Variadic inputs require contiguous {prefix}0...{prefix}N bindings with at least two tensors", source)
             if "input_count" in kwargs and (type(kwargs["input_count"]) is not int
                                              or kwargs["input_count"] != len(bindings)):
                 raise _error("E_BINDING", "input_count does not match supplied tensors", source)
@@ -150,21 +151,23 @@ class Capture:
             raise _error("E_RESOURCE", "Graph exceeds max_nodes", source)
 
         explicit = set(kwargs)
-        explicit.update(("shape",) if op.identity == "reshape" and args else op.argument_names[:len(args)])
+        if args:
+            explicit.update((op.positional_rest,) if op.positional_rest is not None else op.positional_names[:len(args)])
         try:
             normalized = normalize_arguments(op, tuple(args), kwargs, policy=policy)
         except HNDLError as exc:
             if source is not None and exc.line is None:
                 raise _error(exc.code, exc.message, source) from None
             raise
-        policy_fields = {"kernel_size", "stride", "padding", "dilation", "output_padding", "groups"} if policy else set()
+        profile = op.policies[policy] if policy else None
+        policy_fields = set(profile.requires) if profile else set()
         metadata = dict(source or {})
         metadata["argument_origins"] = {
             key: "explicit" if key in explicit else "policy-selected" if key in policy_fields else "operator default"
             for key in normalized
         }
-        if policy:
-            metadata["policy"] = "spatial.up2_transpose@1" if policy == "up2" else policy
+        if profile:
+            metadata["policy"] = profile.identity
         node = Node(id=name, op=op.key, args=normalized,
                     inputs={port: symbol.ref for port, symbol in bindings.items()},
                     outputs=tuple(op.output_ports), source=metadata,

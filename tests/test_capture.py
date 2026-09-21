@@ -3,7 +3,9 @@ from threading import Barrier
 
 import pytest
 
-from hndl import HNDLError, Registry, ops, preserves_shape
+from torch import nn
+
+from hndl import HNDLError, Registry, ops
 from hndl.capture import capture_callable
 
 
@@ -150,8 +152,11 @@ def test_concurrent_captures_keep_independent_current_tensors():
 
 def test_registry_factories_require_selected_exact_identity():
     registry = Registry.builtins()
-    registry.register("silu", identity="example.silu", version=1,
-                      shape=preserves_shape, max_state_bytes=0)
+
+    @registry.operator("silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
+    class SiLU(nn.SiLU):
+        pass
+
     with pytest.raises(HNDLError, match="E_STATE_VERSION"):
         capture(lambda x: registry.ops.silu())
     graph = capture(lambda x: registry.ops.silu(), registry=registry)

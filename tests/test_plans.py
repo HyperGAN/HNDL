@@ -9,8 +9,10 @@ import sys
 
 import pytest
 
+from torch import nn
+
+from hndl import Registry
 from hndl.errors import HNDLError
-from hndl.registry import Registry, preserves_shape
 from hndl.resolver import resolve_graph, validate_concrete_plan
 from hndl.types import Graph, Node, ResolvedPlan, canonical, digest
 
@@ -61,7 +63,6 @@ def test_plan_round_trip_is_canonical_and_retains_identity():
     assert restored.to_json() == encoded
     assert restored.semantic_digest == plan.semantic_digest
     assert len(plan.semantic_digest) == 64
-    assert restored.state_bytes == (3 * 4 + 4 + 4 * 2 + 2) * 4
     assert "Semantic digest" in restored.describe()
 
 
@@ -90,7 +91,6 @@ def test_corruption_and_duplicate_json_fields_rejected():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("state_bytes", 0),
     ("output_shapes", {"out": ["B", 999]}),
     ("input_shapes", {"x": ["B", 999]}),
 ])
@@ -119,19 +119,22 @@ def test_unknown_and_boolean_versions_rejected(field, value):
         ResolvedPlan.from_json(rehash(data))
 
 
-def test_state_versions_and_allocation_bounds_checked_on_restore():
+def test_operator_versions_are_exact_on_restore():
     data = json.loads(mlp_plan().to_json())
-    data["nodes"][0]["state_version"] = 2
+    data["nodes"][0]["op"] = "linear@2"
     with pytest.raises(HNDLError, match="E_STATE_VERSION"):
         ResolvedPlan.from_json(rehash(data))
     with pytest.raises(HNDLError, match="E_RESOURCE"):
-        ResolvedPlan.from_json(mlp_plan().to_json(), limits={"max_state_bytes": 1})
+        ResolvedPlan.from_json(mlp_plan().to_json(), limits={"max_nodes": 1})
 
 
 def test_custom_plan_requires_explicit_exact_registration():
     registry = Registry.builtins()
-    registry.register("smooth", identity="example.smooth", version=1,
-                      shape=preserves_shape, max_state_bytes=0)
+
+    @registry.operator("smooth", identity="example.smooth", summary="Identity.", shape="x[B, ...] -> out[B, ...]")
+    class Smooth(nn.Identity):
+        pass
+
     plan = resolve_graph(Graph((Node("n0", "example.smooth@1", {}, {"x": "input:x"}),),
                                ("B", 3), ("B", 3), "node:n0/out"), registry)
     with pytest.raises(HNDLError, match="E_STATE_VERSION"):
@@ -141,12 +144,12 @@ def test_custom_plan_requires_explicit_exact_registration():
 
 def test_validation_rejects_changed_shape_before_backend_build():
     plan = mlp_plan()
-    forged = replace(plan, nodes=(replace(plan.nodes[0], state_bytes=0), plan.nodes[1]))
+    forged = replace(plan, nodes=(replace(plan.nodes[0], output_shapes={"out": ("B", 5)}), plan.nodes[1]))
     with pytest.raises(HNDLError, match="E_INTEGRITY"):
         validate_concrete_plan(forged)
 
 
-def test_fresh_process_restore_without_torch(tmp_path):
+def test_fresh_process_restore_without_author_code(tmp_path):
     path = tmp_path / "plan.json"
     plan = mlp_plan()
     path.write_text(plan.to_json())
@@ -157,7 +160,6 @@ import sys
 from pathlib import Path
 from hndl.types import ResolvedPlan
 plan = ResolvedPlan.from_json(Path(sys.argv[1]).read_text())
-assert "torch" not in sys.modules
 print(plan.semantic_digest)
 '''
     result = subprocess.run([sys.executable, "-c", script, str(path)], env=env,

@@ -1,14 +1,12 @@
 """Persisted construction settings, gradients, and exact parameter targets."""
-# ruff: noqa: E402 -- the PyTorch backend is optional.
 
 import pytest
-
-torch = pytest.importorskip("torch")
+import torch
 from torch import nn
 
-from examples.adaptive_normalization import mapping_model, make_registry
-from hndl import HNDLError, Registry, ResolvedPlan, preserves_shape, resolve
-from hndl.torch import build, network, register_torch
+from examples.adaptive_normalization import mapping_model
+from hndl import HNDLError, Registry, ResolvedPlan, resolve
+from hndl.torch import build, network
 
 
 DEVICES = ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else [])
@@ -102,11 +100,14 @@ def test_settings_preserve_default_rng_and_explicit_rng_scope(device):
         assert all(torch.equal(a, b) for a, b in zip(cuda_before, torch.cuda.get_rng_state_all()))
 
 
-def custom_registry(factory, *, state_bound=128):
+def custom_registry(factory):
     registry = Registry.builtins()
-    registry.register("custom", identity="example.settings", version=1,
-                      shape=preserves_shape, max_state_bytes=state_bound)
-    register_torch(registry, "custom", module=factory, state_version=1)
+
+    @registry.operator("custom", identity="example.settings", summary="Test module.", shape="x[B, ...] -> out[B, ...]")
+    class Custom(nn.Module):
+        def __new__(cls):
+            return factory()
+
     return registry
 
 
@@ -260,9 +261,7 @@ def test_declared_adaptive_style_initialization_survives_plan_restoration():
     model = mapping_model()
     style = next(node for node in model.plan.nodes if node.id == "style")
     assert dict(style.initialization["overrides"]) == {"weight": 0.0, "bias": 0.0}
-    registry = make_registry()
-    restored = build(ResolvedPlan.from_json(model.plan.to_json(), registry=registry),
-                     registry=registry, device="cpu", initialization_seed=11)
+    restored = build(ResolvedPlan.from_json(model.plan.to_json()), device="cpu", initialization_seed=11)
     assert torch.count_nonzero(restored["style"].weight) == 0
     assert torch.count_nonzero(restored["style"].bias) == 0
 

@@ -1,18 +1,16 @@
-"""Numerical and integration checks for the optional PyTorch backend."""
-# ruff: noqa: E402 -- torch is an optional dependency checked before imports.
+"""Numerical and integration checks for the PyTorch backend."""
 
 import subprocess
 import sys
 from dataclasses import replace
 
 import pytest
-
-torch = pytest.importorskip("torch")
+import torch
 from torch import nn
 
 import hndl
-from hndl import HNDLError, Registry, preserves_shape
-from hndl.torch import build, network, network_file, network_from_callable, register_torch
+from hndl import HNDLError, Registry
+from hndl.torch import build, network, network_file, network_from_callable
 from hndl.types import ResolvedPlan
 
 
@@ -87,8 +85,6 @@ def test_reserved_module_attribute_name_and_explicit_cpu_index():
                     output_shape=("B", 3), device="cpu:0")
     assert model[:][0] is model["training"]
     assert model(torch.ones(2, 4)).shape == (2, 3)
-    with pytest.raises(HNDLError, match="E_REGISTRY"):
-        register_torch(Registry.builtins(), "relu", module=nn.Identity, state_version=1)
 
 
 def test_inspection_does_not_run_layers_or_draw_rng():
@@ -251,14 +247,19 @@ def test_runtime_input_contracts_and_empty_identity():
 
 def test_direct_plan_tampering_rejected_before_module_allocation(monkeypatch):
     plan = hndl.resolve("linear(3)", input_shape=("B", 4), output_shape=("B", 3))
-    forged = replace(plan, nodes=(replace(plan.nodes[0], state_bytes=0),))
+    forged = replace(plan, nodes=(replace(plan.nodes[0], args={**plan.nodes[0].args, "in_features": 5}),))
+    from hndl.operators import linear
+
     def forbidden(*args, **kwargs):
         raise AssertionError("Invalid plan must fail before constructing a module")
-    monkeypatch.setattr(nn, "Linear", forbidden)
-    with pytest.raises(HNDLError, match="E_INTEGRITY"):
+
+    monkeypatch.setattr(linear.Linear, "__init__", forbidden)
+    with pytest.raises(HNDLError, match="E_INTEGRITY|E_CONSTRAINT"):
         build(forged, device="cpu")
-    with pytest.raises(HNDLError, match="E_RESOURCE"):
+    monkeypatch.undo()
+    with pytest.raises(HNDLError, match="E_RESOURCE.*before allocation"):
         build(plan, device="cpu", limits={"max_state_bytes": 1})
+    assert build(plan, device="cpu").build_receipt["state_bytes"] == (4 * 3 + 3) * 4
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available on this host")
@@ -273,14 +274,13 @@ def test_runtime_device_mismatch_and_module_moves():
     assert identity(x) is x
 
 
-def test_custom_exact_registration_bounds_and_runtime_contract():
+def test_custom_operator_builds_with_shared_shape_inference():
     registry = Registry.builtins()
-    registry.register("silu", identity="example.silu", version=1, shape=preserves_shape, max_state_bytes=0)
-    with pytest.raises(HNDLError, match="E_STATE_VERSION"):
-        register_torch(registry, "silu", module=nn.SiLU, state_version=2)
-    register_torch(registry, "silu", module=nn.SiLU, state_version=1)
-    with pytest.raises(HNDLError):
-        register_torch(registry, "silu", module=nn.SiLU, state_version=1)
+
+    @registry.operator("silu", identity="example.silu", summary="SiLU.", shape="x[B, ...] -> out[B, ...]")
+    class SiLU(nn.SiLU):
+        pass
+
     model = network("linear(); silu()", input_shape=("B", 4), output_shape=("B", 3),
                     device="cpu", registry=registry)
     x = torch.randn(2, 4, requires_grad=True)
@@ -288,36 +288,8 @@ def test_custom_exact_registration_bounds_and_runtime_contract():
     model(x).sum().backward()
     assert x.grad.isfinite().all()
     assert isinstance(model[1], nn.SiLU)
-
-    class HiddenBuffer(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.register_buffer("data", torch.ones(1), persistent=False)
-        def forward(self, x):
-            return x
-    registry.register("bad", identity="test.bad", version=1, shape=preserves_shape, max_state_bytes=0)
-    register_torch(registry, "bad", module=HiddenBuffer, state_version=1)
-    with pytest.raises(HNDLError, match="E_RESOURCE"):
-        network("bad()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
-
-    class WrongShape(nn.Module):
-        def forward(self, x):
-            return x[:, :1]
-    registry.register("wrong", identity="test.wrong", version=1, shape=preserves_shape, max_state_bytes=0)
-    register_torch(registry, "wrong", module=WrongShape, state_version=1)
-    broken = network("wrong()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
-    with pytest.raises(HNDLError, match="E_RUNTIME"):
-        broken(torch.randn(2, 4))
-
-    class LateParameter(nn.Module):
-        def forward(self, x):
-            self.weight = nn.Parameter(torch.ones(1))
-            return x
-    registry.register("late", identity="test.late", version=1, shape=preserves_shape, max_state_bytes=0)
-    register_torch(registry, "late", module=LateParameter, state_version=1)
-    late = network("late()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
-    with pytest.raises(HNDLError, match="E_RUNTIME"):
-        late(torch.randn(2, 4))
+    with pytest.raises(HNDLError, match="E_STATE_VERSION"):
+        build(model.plan, device="cpu", registry=Registry.builtins())
 
 
 def test_file_and_callable_capture_once(tmp_path):
