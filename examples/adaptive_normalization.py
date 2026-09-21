@@ -62,7 +62,7 @@ linear(256, name="mapping")
 w = relu(name="w")
 linear(w, name="project")
 features = reshape(64, 4, 4, name="seed")
-style = linear(w, name="style")
+style = linear(w, name="style", init={"weight": 0, "bias": 0})
 adaptive_norm(features, style, name="norm")
 '''
 
@@ -75,13 +75,9 @@ adaptive_norm(features, z2, name="norm")
 
 
 def mapping_model(*, device="cpu", initialization_seed=7):
-    """Fan one mapping tensor into feature projection and a style affine."""
-    model = network(MAPPING_CONFIG, input_shape=("B", 128), output_shape=("B", 64, 4, 4),
-                    registry=make_registry(), device=device, initialization_seed=initialization_seed)
-    # Initialization is an explicit host action, saved in the model state.
-    nn.init.zeros_(model["style"].weight)
-    nn.init.zeros_(model["style"].bias)
-    return model
+    """Fan mapping features into projection and a declaratively zeroed affine."""
+    return network(MAPPING_CONFIG, input_shape=("B", 128), output_shape=("B", 64, 4, 4),
+                   registry=make_registry(), device=device, initialization_seed=initialization_seed)
 
 
 def split_model(*, device="cpu", initialization_seed=7):
