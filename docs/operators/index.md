@@ -63,9 +63,11 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`flatten`](flatten.md) | Collapse every non-batch axis into one feature axis. |
 | [`mean`](mean.md) | Average one non-batch axis away. |
 | [`pad`](pad.md) | Enlarge trailing axes with constant, reflected, or replicated borders. |
+| [`permute`](permute.md) | Reorder the non-batch axes, keeping the batch axis first. |
 | [`reshape`](reshape.md) | View the tensor with new non-batch dimensions, preserving the element count. |
 | [`split`](split.md) | Cut one axis into a first section and the remainder. |
 | [`sum`](sum.md) | Add up one non-batch axis. |
+| [`transpose`](transpose.md) | Swap two non-batch axes of the tensor. |
 
 ## spatial
 
