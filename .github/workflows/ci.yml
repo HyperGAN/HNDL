@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install build twine ruff
-      - run: ruff check src tests
+      - run: ruff check src tests examples
       - run: python -m build
       - run: python -m twine check --strict dist/*
       - name: Install the wheel outside the checkout
@@ -53,11 +53,29 @@ jobs:
           cd /tmp
           /tmp/hndl-wheel/bin/python - <<'PY'
           import sys
-          from hndl import resolve
+          from hndl import Argument, Dim, Registry, ResolvedPlan, ShapeRule, resolve
           plan = resolve("linear(64); relu(); linear()", input_shape=("B", 128), output_shape=("B", 10))
           assert plan.nodes[-1].output_shapes["out"] == ("B", 10)
           assert "torch" not in sys.modules
           print(plan)
+          registry = Registry.builtins()
+          registry.register(
+              "adaptive_norm", identity="example.adaptive_norm", version=1,
+              shape=ShapeRule(
+                  inputs={"x": ("B", "C", "H", "W"), "params": ("B", Dim("C", scale=2))},
+                  outputs={"out": ("B", "C", "H", "W")},
+              ),
+              arguments={"eps": Argument(float, default=1e-5, minimum=0, exclusive_minimum=True)},
+              max_state_bytes=0,
+          )
+          plan = resolve(
+              "z1, z2 = split(64); linear(z1); features = reshape(32, 4, 4); adaptive_norm(features, z2)",
+              input_shape=("B", 128), output_shape=("B", 32, 4, 4), registry=registry,
+          )
+          restored = ResolvedPlan.from_json(plan.to_json(), registry=registry)
+          assert restored.semantic_digest == plan.semantic_digest
+          assert plan.nodes[1].args["out_features"] == 512
+          assert "torch" not in sys.modules
           PY
       - uses: actions/upload-artifact@v4
         with:

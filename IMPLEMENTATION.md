@@ -17,8 +17,12 @@ in this alpha.
   Contradictions fail; the resolver does not choose arbitrary missing sizes.
 - PyTorch modules, shape tables, name lookup, sequence indexing and shared
   slices, ordinary autograd, state dictionaries, and CPU/CUDA construction.
-- Separate, versioned registration of unary shape-preserving operations and
-  trusted PyTorch constructors, including the README's SiLU example.
+- Separate, versioned registration of custom operations and trusted PyTorch
+  constructors: scalar argument schemas, ordered input/output ports, and
+  bidirectional shape rules with shared or integer-scaled dimensions. The
+  unary `preserves_shape` helper remains available.
+- An executable AdaIN-style example with inferred feature/style projections,
+  split/remainder routing, shared branches, and numerical/gradient checks.
 - Immutable resolved graph data, canonical JSON plan persistence, digests,
   exact operator/state-version checks, and `build(plan)` without recapturing an
   author function. JSON is a persistence format, not an authoring language.
@@ -114,8 +118,9 @@ as loading declarative source.
 
 ## Remaining v1 work
 
-- General custom operators with explicit argument/port schemas and custom
-  bidirectional shape relations; the adaptive instance-normalization fixture.
+- Custom shape relations beyond equality and integer scaling, inferable custom
+  scalar arguments, argument-dependent shapes and state bounds, and opaque
+  asserted contracts. Arbitrary custom shape callbacks are not accepted.
 - General custom construction policies, initializer overrides, and persisted
   per-node trainability masks.
 - Full derivation chains and source provenance for every inferred value.

@@ -208,9 +208,7 @@ This branched model still accepts and returns a tensor. Layer lookup uses names;
 
 ### Feed a branch into adaptive normalization
 
-This is a planned v1 extension. The initial alpha supports custom unary operations that preserve shape; custom multi-input shape rules and the adaptive-normalization fixture are not implemented yet.
-
-With the custom `adaptive_norm` operation described in the spec registered, a config can route features and style parameters:
+The runnable [adaptive-normalization example](examples/adaptive_normalization.py) registers an operation with two inputs: image features and per-channel style parameters. With that registry, a config can route a split directly into normalization:
 
 ```python
 z1, z2 = split(64)
@@ -311,7 +309,34 @@ model = network(
 
 Configs now understand `silu()`. Native functions use `registry.ops.silu()` and pass that same registry to `network_from_callable`. `preserves_shape` tells the resolver that input and output dimensions, layout, and dtype are equal, so constraints propagate in both directions. `max_state_bytes=0` declares that this operation has no parameter or buffer storage. The backend constructs an `nn.SiLU` for execution. Registration carries the operation's version; network text uses its plain name.
 
-This helper covers unary operations with no author arguments. Custom operations that change shapes or accept several inputs are planned for a later release, as described in [SPEC.md](SPEC.md#8-custom-operators-and-minimal-graphs). Custom implementations still need numerical and gradient checks; declaring a shape rule does not prove their code correct.
+For operations with several inputs or different output dimensions, declare the relationship between their shapes. The adaptive-normalization example uses:
+
+```python
+from hndl import Argument, Dim, ShapeRule
+
+registry.register(
+    "adaptive_norm",
+    identity="example.adaptive_norm",
+    version=1,
+    shape=ShapeRule(
+        inputs={
+            "x": ("B", "C", "H", "W"),
+            "params": ("B", Dim("C", scale=2)),
+        },
+        outputs={"out": ("B", "C", "H", "W")},
+    ),
+    arguments={
+        "eps": Argument(float, default=1e-5, minimum=0, exclusive_minimum=True),
+    },
+    max_state_bytes=0,
+)
+```
+
+The shared `C` means both shapes use the same channel count; `Dim("C", scale=2)` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model.
+
+Attach the implementation with `register_torch`, as in the SiLU example. The backend passes resolved scalar arguments to its constructor and tensors to `forward` in the declared input order. The [complete example](examples/adaptive_normalization.py) includes the module, registration, and a model you can run with `python examples/adaptive_normalization.py` from a checkout installed with `.[torch]`.
+
+Shape rules are declarations made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct.
 
 ## Experiment with less boilerplate
 

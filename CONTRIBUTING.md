@@ -8,7 +8,7 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev,torch]'
 python -m pytest
-ruff check src tests
+ruff check src tests examples
 ```
 
 PyTorch is optional for configuration capture and shape resolution. Install

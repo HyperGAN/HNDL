@@ -498,7 +498,7 @@ linear()
 )
 ```
 
-`Registry.builtins()` returns an independently extensible registry containing the fixed built-in aliases. `register(alias, *, identity, version, shape, max_state_bytes, state_version=1)` binds a new alias to its exact operator identity/version. The no-argument unary helper shown here supplies an empty argument schema, input port `x`, output port `out`, default state compatibility version `1`, and unqualified capability status. State compatibility metadata belongs to the pure registration, so resolution can record it without loading a backend. More complex operators must declare their schemas/ports explicitly through the full extension API.
+`Registry.builtins()` returns an independently extensible registry containing the fixed built-in aliases. `register(alias, *, identity, version, shape, max_state_bytes, state_version=1, arguments=None, input_ports=None, output_ports=None)` binds a new alias to its exact operator identity/version. The no-argument unary helper shown here supplies an empty argument schema, input port `x`, output port `out`, default state compatibility version `1`, and unqualified capability status. State compatibility metadata belongs to the pure registration, so resolution can record it without loading a backend. More complex operators must declare their schemas/ports explicitly through the full extension API.
 
 `max_state_bytes` is an explicit nonnegative per-node upper bound on registered parameter and buffer storage, including nonpersistent buffers, recorded in the pure registration and plan. The SiLU example declares zero because it owns neither parameters nor buffers; shape preservation alone does not imply this. Full providers may supply a pure bound derived from resolved arguments. The planner sums bounds before building, and the backend checks registered storage against the declaration after construction. These are trusted implementation contracts, not a sandbox for builder code or a bound on temporary allocations.
 
@@ -507,6 +507,38 @@ linear()
 `register_torch(registry, alias, *, module, state_version)` attaches a backend constructor to the alias's already registered exact identity/version. Missing bindings, duplicate backend registration, and a state version differing from the pure declaration fail. In the no-argument unary form, the builder constructs `module()` once per node, invokes it with the `x` tensor, and binds its tensor result to `out`. There is no constructor introspection or assumption about other module arguments. `nn.SiLU` here uses its ordinary non-in-place constructor behavior.
 
 Pure registration and `resolve()` remain usable without importing torch, even though the combined example imports torch to register a backend. Resolution must not call the backend constructor. Backend bindings stay separate from serializable arguments; neither configuration nor saved data can import a module class. The plan stores `example.silu@1` and its state compatibility requirement, not executable Python. Building without its explicitly registered backend must fail.
+
+### Declarative custom schemas and shape rules
+
+The current extension API exports `Argument`, `Dim`, and `ShapeRule` from the torch-free `hndl` package:
+
+```python
+from hndl import Argument, Dim, ShapeRule
+
+registry.register(
+    "adaptive_norm", identity="example.adaptive_norm", version=1,
+    shape=ShapeRule(
+        inputs={"x": ("B", "C", "H", "W"),
+                "params": ("B", Dim("C", scale=2))},
+        outputs={"out": ("B", "C", "H", "W")},
+    ),
+    arguments={"eps": Argument(float, default=1e-5,
+                               minimum=0, exclusive_minimum=True)},
+    max_state_bytes=0,
+)
+```
+
+Input/output mapping order defines port order. Explicit `input_ports` and `output_ports`, if supplied, must match that order exactly. A sole input can use the implicit current tensor regardless of its port name. Multiple inputs must all be explicit. Multiple outputs return an ordered symbolic tuple and clear current. Input ports and scalar argument names must be distinct; frontend metadata names `name` and `policy` are reserved.
+
+`arguments` is an ordered mapping of scalar names to `Argument` declarations. Scalar positional arguments follow tensor inputs in that mapping's order; keyword arguments use their declared names. Supported types are `int`, `float`, `bool`, and `str`. Integers and booleans are distinct; float arguments accept finite integer or float literals and normalize them to floats. An argument without a default is required. Numeric `minimum` and `maximum` are inclusive unless their corresponding `exclusive_minimum` or `exclusive_maximum` flag is true. Defaults pass the same validation as explicit values and become concrete plan arguments. Custom scalars are not inferred in this implementation.
+
+Each shape pattern has rank two or four and starts with `"B"`, which denotes the graph's shared batch contract. Non-batch entries are positive integer literals, named dimensions such as `"C"`, or `Dim("C", scale=k)` for a positive integer `k`. Names are scoped to one operator instance, so unrelated nodes do not share a dimension merely because both use `"C"`. The same name appearing on different ports or axes denotes equality. Scaling is exact: a known extent of 65 cannot satisfy `Dim("C", scale=2)`. Contradictions fail; unresolved dimensions remain ambiguous rather than receiving guessed values. All ports use the graph's qualified dtype and rank-based layout.
+
+Rules refine dimensions in both directions and participate in the existing fixed-point solver. They are finite data, not executable shape callbacks: registration bounds pattern/schema size, and resolution applies the ordinary dimension, element, and iteration limits. Shape expressions cannot reference configuration code, import providers, or perform arbitrary arithmetic. Argument-dependent shape expressions, inferred custom scalars, custom callback rules, and computed state bounds remain future extensions. `max_state_bytes` is currently a fixed per-node integer upper bound.
+
+The PyTorch constructor receives all concrete scalar arguments by keyword once per node. `forward` receives tensors positionally in declared input-port order. A single output must be a tensor; multiple outputs may be a tuple/list in declared output order or a dictionary with exactly those output names. HNDL validates each result's shape, dtype, and device. A genuine unary chain supports indexing and shared sequential slices even when its ports use names other than `x` and `out`.
+
+Saved plans contain concrete shapes and arguments plus the exact operator/state versions. Shape rules and constructors remain in the explicitly supplied registry; artifacts cannot import them. Restoring a custom plan revalidates its concrete equations against that registry. Providers must change their semantic version when changing a schema or shape relation.
 
 ### Required affine instance-normalization fixture
 
@@ -543,7 +575,7 @@ normalized = (x - mean) / sqrt(variance + eps)
 out = (1 + delta_gamma)[B,C,1,1] * normalized + beta[B,C,1,1]
 ```
 
-`eps` must be positive, defaults to `1e-5` for this fixture version, and is explicit in the plan. Variance is population variance. Both feature and style paths are differentiable. The operation has no running statistics and identical train/eval behavior. The fixture explicitly zero-initializes its style affine, giving unit scale and zero bias on normalized features; arbitrary linear layers do not inherit that initializer.
+`eps` must be positive, defaults to `1e-5` for this fixture version, and is explicit in the plan. Variance is population variance. Both feature and style paths are differentiable. The operation has no running statistics and identical train/eval behavior. The fixture explicitly zero-initializes its style affine, giving unit scale and zero bias on normalized features; arbitrary linear layers do not inherit that initializer. The executable example currently performs this initialization through the built module's ordinary PyTorch parameters; a persisted initializer declaration remains future work. Save and reload its state dictionary to preserve the initialized or trained values.
 
 This is an AdaIN-style extension demonstration, not a faithful StyleGAN implementation. Learned constants, noise blocks, and modulated convolutions are separate future operators. Future stochastic operators should receive caller-owned noise through tensor ports.
 
