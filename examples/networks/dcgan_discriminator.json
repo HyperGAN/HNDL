@@ -1,0 +1,8 @@
+{
+  "title": "DCGAN discriminator",
+  "description": "The DCGAN discriminator for 64×64 RGB images: four \"down2\" convolutions with leaky ReLU, batch-normalized after the first stage, reduce the image to a 512×4×4 map that is flattened and projected to a single logit. The output is a raw score — apply a sigmoid, or use BCEWithLogitsLoss, in the loss rather than in the network.",
+  "input_shape": ["B", 3, 64, 64],
+  "output_shape": ["B", 1],
+  "parameters": 2765633,
+  "reference": "Radford, Metz & Chintala, \"Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks\" (2015), in the form of the PyTorch DCGAN example; the count was checked against the equivalent torch.nn stack — 3·64·4·4+64 + 64·128·4·4 + 2·128 + 128·256·4·4 + 2·256 + 256·512·4·4 + 2·512 + 8192+1 = 2,765,633."
+}

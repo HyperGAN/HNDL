@@ -1,0 +1,25 @@
+# DCGAN discriminator (Radford et al., 2015) for 64x64 RGB images.
+# Four strided convolutions halve the image each time: 64 -> 32 -> 16 -> 8 -> 4.
+# The "down2" policy supplies the canonical kernel 4, stride 2, padding 1.
+
+# The first stage has no normalization, so it keeps its bias.
+conv(64, policy="down2", name="stage1")
+leaky_relu(0.2)
+
+# Every later stage is conv -> batch_norm -> leaky_relu. batch_norm's own bias
+# makes the convolution bias redundant, so bias=False there.
+conv(128, policy="down2", bias=False, name="stage2")
+batch_norm()
+leaky_relu(0.2)
+
+conv(256, policy="down2", bias=False, name="stage3")
+batch_norm()
+leaky_relu(0.2)
+
+conv(512, policy="down2", bias=False, name="stage4")
+batch_norm()
+leaky_relu(0.2)
+
+# The 512x4x4 map flattens to 8192; the head's width follows the output contract.
+flatten()
+linear(name="logit")
