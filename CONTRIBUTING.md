@@ -37,13 +37,34 @@ The distribution version lives in `pyproject.toml` and
 
 ## Publishing
 
-An owner must first configure a [PyPI pending trusted publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
-for project `hndl`, GitHub owner `HyperGAN`, repository `HNDL`, workflow
-`publish.yml`, and environment `pypi`. Set any desired release reviewers on the
-GitHub `pypi` environment. This is account configuration, not a repository secret.
+Releases are published by `.github/workflows/publish.yml` when a GitHub
+release is published. The release tag must be `v<version>`, matching
+`pyproject.toml`. The workflow checks the tag, builds the distributions, installs
+the wheel in a clean environment with the CPU backend, runs the test suite and
+the documentation check against it, and only then uploads. A failure at any
+step prevents publishing. The wheel and source archive are retained as workflow
+artifacts either way.
 
-Once configured, publish a GitHub release tagged `v0.1.0` (or the matching
-future package version). The publishing workflow checks the tag, builds the
-distributions, tests the installed wheel with the CPU backend, and uploads
-using PyPI's short-lived OIDC credentials. A failed test prevents publishing.
-The wheel and source archive are also retained as workflow artifacts.
+The upload authenticates in one of two ways; the first one that applies wins.
+
+1. **API token secret.** Create a PyPI API token and store it as the
+   repository secret `PYPI_API_TOKEN` (or as a secret on the GitHub `pypi`
+   environment). Until the project exists on PyPI the token must be
+   account-scoped; after the first upload it can be replaced with a token
+   scoped to `hndl`.
+2. **Trusted Publishing.** With no secret set, the workflow uses PyPI's
+   short-lived OIDC credentials. Register a [pending trusted publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
+   for project `hndl`, owner `HyperGAN`, repository `HNDL`, workflow
+   `publish.yml`, environment `pypi`. This is PyPI account configuration, not
+   a repository secret.
+
+The `pypi` GitHub environment is created on first use; add release reviewers
+to it if publishing should require approval.
+
+To rehearse without publishing, run the workflow manually from the Actions tab
+(`workflow_dispatch`). The manual run builds and tests the distributions and
+uploads them as artifacts; the publish job is skipped.
+
+To release: update the version in `pyproject.toml` and `src/hndl/_version.py`,
+record the release in `CHANGELOG.md`, merge, then create a GitHub release with
+tag `v<version>` on `master`. Publishing the release triggers the workflow.
