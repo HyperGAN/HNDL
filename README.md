@@ -4,7 +4,7 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: 0.1.1.** Config strings, native Python functions, bidirectional shape inference, branches, a catalog of 59 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](docs/operators/index.md), the [authored networks](docs/networks.md), and the [implementation notes](IMPLEMENTATION.md). Diagnostics below are illustrative.
+**Status: 0.1.2.** Config strings, native Python functions, bidirectional shape inference, branches, a catalog of 59 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
 
 Install on Linux with Python 3.11–3.14:
 
@@ -190,7 +190,7 @@ gpt = network(
 )
 ```
 
-`transformer_block` is a pre-norm block with multi-head attention and a feed-forward branch; `attention`, `cross_attention`, `feed_forward`, `swiglu`, `rms_norm`, `moe`, and `hopfield` are available separately for other layouts. `dtype` selects the parameter and activation dtype for the whole plan; reduced precision is qualified on CUDA. The [catalog](docs/operators/index.md) lists every operator with its arguments, shape relation, and runnable examples, and [docs/networks.md](docs/networks.md) shows complete networks (LeNet, DCGAN, U-Net, ResNet-18, ViT, GPT, and more) written this way.
+`transformer_block` is a pre-norm block with multi-head attention and a feed-forward branch; `attention`, `cross_attention`, `feed_forward`, `swiglu`, `rms_norm`, `moe`, and `hopfield` are available separately for other layouts. `dtype` selects the parameter and activation dtype for the whole plan; reduced precision is qualified on CUDA. The [catalog](https://hypergan.github.io/HNDL/operators/) lists every operator with its arguments, shape relation, and runnable examples, and [docs/networks.md](https://hypergan.github.io/HNDL/networks/) shows complete networks (LeNet, DCGAN, U-Net, ResNet-18, ViT, GPT, and more) written this way.
 
 ## Use a pretrained network
 
@@ -211,7 +211,7 @@ classifier = network(
 )
 ```
 
-The checkpoint's configuration fixes the input contract and the output shape; the plan records the resolved revision so a restore fails if the source changes. The wrapped model stays frozen and in eval mode unless you pass `trainable=True`. Vision checkpoints take images at their native resolution: `pretrained("hf://timm/resnet18.a1_in1k", output="logits")` maps `("B", 3, 224, 224)` to `("B", 1000)`, and CLIP towers are selected with `component="vision"` or `"text"`. Install the loader dependencies with `pip install 'hndl[pretrained]'`; see [docs/pretrained.md](docs/pretrained.md).
+The checkpoint's configuration fixes the input contract and the output shape; the plan records the resolved revision so a restore fails if the source changes. The wrapped model stays frozen and in eval mode unless you pass `trainable=True`. Vision checkpoints take images at their native resolution: `pretrained("hf://timm/resnet18.a1_in1k", output="logits")` maps `("B", 3, 224, 224)` to `("B", 1000)`, and CLIP towers are selected with `component="vision"` or `"text"`. Install the loader dependencies with `pip install 'hndl[pretrained]'`; see [docs/pretrained.md](https://hypergan.github.io/HNDL/pretrained/).
 
 ## Split and reuse tensors
 
@@ -257,7 +257,7 @@ This branched model still accepts and returns a tensor. Layer lookup uses names;
 
 ### Feed a branch into adaptive normalization
 
-The built-in `adaptive_norm` operation takes two inputs: image features and per-channel style parameters. A config can route a split directly into it, as the runnable [adaptive-normalization example](examples/adaptive_normalization.py) does:
+The built-in `adaptive_norm` operation takes two inputs: image features and per-channel style parameters. A config can route a split directly into it, as the runnable [adaptive-normalization example](https://github.com/HyperGAN/HNDL/blob/master/examples/adaptive_normalization.py) does:
 
 ```python
 z1, z2 = split(64)
@@ -322,7 +322,7 @@ model = network(
 )
 ```
 
-The first layer keeps its normal initial values and has frozen parameters. The final layer starts with zero weights and bias and remains trainable. This illustrates the controls; choose initial values to suit your architecture. The [adaptive-normalization example](examples/adaptive_normalization.py) uses a zero-initialized style projection to start with unit scale and zero bias on normalized features.
+The first layer keeps its normal initial values and has frozen parameters. The final layer starts with zero weights and bias and remains trainable. This illustrates the controls; choose initial values to suit your architecture. The [adaptive-normalization example](https://github.com/HyperGAN/HNDL/blob/master/examples/adaptive_normalization.py) uses a zero-initialized style projection to start with unit scale and zero bias on normalized features.
 
 `init` maps parameter names to constant values. `trainable=False` freezes every parameter in that operation; use `trainable={"weight": False}` to freeze only its weight. Unspecified parameters retain their module defaults. Custom operations can use exact nested parameter names such as `"projection.weight"`. These options work in native Python too, for example `ops.linear(64, trainable=False)`.
 
@@ -345,7 +345,7 @@ generator = network_file(
 
 File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, loops, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
 
-The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader applies source, parser, graph, and model-size limits and parses all declarative input in an isolated worker. Even AST parsing can exhaust resources, so syntax restrictions alone are insufficient. See the [loading and trust contract](SPEC.md#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
+The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader applies source, parser, graph, and model-size limits and parses all declarative input in an isolated worker. Even AST parsing can exhaust resources, so syntax restrictions alone are insufficient. See the [loading and trust contract](https://hypergan.github.io/HNDL/SPEC/#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
 
 ## Register your own operation
 
@@ -400,7 +400,7 @@ class AdaptiveNorm(nn.Module):
     def forward(self, x, params): ...
 ```
 
-The shared `C` means both shapes use the same channel count; `2*C` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model. Arguments carry help text, and examples are runnable configs; `python -m hndl.docs` renders both into [docs/operators](docs/operators/index.md). See [docs/ADDING_OPERATORS.md](docs/ADDING_OPERATORS.md) for the complete format, including the `relation=` hook for rules the shape string cannot express.
+The shared `C` means both shapes use the same channel count; `2*C` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model. Arguments carry help text, and examples are runnable configs; `python -m hndl.docs` renders both into [docs/operators](https://hypergan.github.io/HNDL/operators/). See [docs/ADDING_OPERATORS.md](https://hypergan.github.io/HNDL/ADDING_OPERATORS/) for the complete format, including the `relation=` hook for rules the shape string cannot express.
 
 Shape declarations are claims made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct.
 
@@ -423,4 +423,4 @@ print(plan)
 
 Resolution allocates no tensors and constructs no modules. `resolve_file(...)` reads a config file; `resolve_callable(...)` captures a trusted Python function before using the same pure resolver. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences and named branches use the same resolve-then-build workflow.
 
-[SPEC.md](SPEC.md) defines the language, the operator declaration contract, shape rules, and the PyTorch interface. [IMPLEMENTATION.md](IMPLEMENTATION.md) describes what this release implements and its limits. [CHANGELOG.md](CHANGELOG.md) lists releases. HNDL is [MIT licensed](LICENSE).
+[SPEC.md](https://hypergan.github.io/HNDL/SPEC/) defines the language, the operator declaration contract, shape rules, and the PyTorch interface. [IMPLEMENTATION.md](https://hypergan.github.io/HNDL/IMPLEMENTATION/) describes what this release implements and its limits. [CHANGELOG.md](https://hypergan.github.io/HNDL/CHANGELOG/) lists releases. HNDL is [MIT licensed](https://github.com/HyperGAN/HNDL/blob/master/LICENSE).
