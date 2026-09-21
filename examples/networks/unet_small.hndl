@@ -1,0 +1,46 @@
+# A small U-Net for 32×32 segmentation: two down stages, a bottleneck, two up
+# stages. Every 3×3 convolution uses padding 1, so only the pools and the
+# upsamples change the resolution.
+
+# --- Encoder stage 1: 32×32, 16 channels --------------------------------------
+conv(16, kernel_size=3, padding=1)
+relu()
+conv(16, kernel_size=3, padding=1)
+skip1 = relu(name="skip1")           # [B, 16, 32, 32], kept for the last merge
+max_pool(2)                          # -> 16×16
+
+# --- Encoder stage 2: 16×16, 32 channels --------------------------------------
+conv(32, kernel_size=3, padding=1)
+relu()
+conv(32, kernel_size=3, padding=1)
+skip2 = relu(name="skip2")           # [B, 32, 16, 16], kept for the first merge
+max_pool(2)                          # -> 8×8
+
+# --- Bottleneck: 8×8, 64 channels ---------------------------------------------
+conv(64, kernel_size=3, padding=1)
+relu()
+conv(64, kernel_size=3, padding=1)
+relu()
+
+# --- Decoder stage 2: back to 16×16 -------------------------------------------
+upsample(2)                          # nearest-neighbour, no parameters
+conv(32, kernel_size=3, padding=1)   # the "up-conv" that halves the channels
+upconv2 = relu(name="upconv2")
+concat(skip2, upconv2)               # 32 + 32 -> 64 channels
+conv(32, kernel_size=3, padding=1)
+relu()
+conv(32, kernel_size=3, padding=1)
+relu()
+
+# --- Decoder stage 1: back to 32×32 -------------------------------------------
+upsample(2)
+conv(16, kernel_size=3, padding=1)
+upconv1 = relu(name="upconv1")
+concat(skip1, upconv1)               # 16 + 16 -> 32 channels
+conv(16, kernel_size=3, padding=1)
+relu()
+conv(16, kernel_size=3, padding=1)
+relu()
+
+# --- Head: one logit per pixel; the single channel comes from the contract ----
+conv(kernel_size=1, name="logits")

@@ -1,0 +1,8 @@
+{
+  "title": "Small U-Net",
+  "description": "An encoder–decoder with skip connections for 32×32 segmentation: two 16- and 32-channel down stages, a 64-channel bottleneck, and two up stages that concatenate the matching encoder tensor before convolving. The single output channel of the 1×1 head is inferred from the output contract.",
+  "input_shape": ["B", 3, 32, 32],
+  "output_shape": ["B", 1, 32, 32],
+  "parameters": 129841,
+  "reference": "Ronneberger, Fischer & Brox, \"U-Net: Convolutional Networks for Biomedical Image Segmentation\" (MICCAI 2015), scaled down to 16/32/64 channels with padded 3×3 convolutions and nearest-neighbour up-convolutions; the count was checked against the same architecture written as a plain torch.nn.Module (448 + 2320 + 4640 + 9248 + 18496 + 36928 + 18464 + 18464 + 9248 + 4624 + 4624 + 2320 + 17 = 129,841 over its 13 convolutions)."
+}
