@@ -165,8 +165,8 @@ Targets are exact, relative parameter paths (including nested paths such as
 per path. Buffers and nonexistent targets are rejected at build time. Pure
 resolution validates the settings without importing or constructing PyTorch
 modules; it cannot confirm a trusted module's actual parameter names.
-Constants must be finite numbers other than booleans, within float32 range;
-they are rounded to float32 in the plan. Underflow rounds to zero, and the sign
+Constants must be numbers other than booleans and must round to finite
+float32 values; the plan stores those rounded values. Underflow rounds to zero, and the sign
 of zero is preserved. Trainability values must be booleans.
 Aliased parameters cannot receive conflicting declarations. Constant targets
 must materialize as float32, and cannot share storage with a distinct parameter
