@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hndl"
+version = "0.1.0a1"
+description = "Human-readable neural network definitions with explicit shape constraints"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+authors = [{name = "HNDL contributors"}]
+keywords = ["neural-network", "pytorch", "shape-inference", "configuration"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+torch = ["torch>=2.6,<3"]
+test = ["pytest>=8,<10"]
+dev = ["pytest>=8,<10", "build>=1.2,<2", "twine>=6,<7", "ruff>=0.11,<1"]
+
+[project.urls]
+Homepage = "https://github.com/HyperGAN/HNDL"
+Repository = "https://github.com/HyperGAN/HNDL"
+Issues = "https://github.com/HyperGAN/HNDL/issues"
+Specification = "https://github.com/HyperGAN/HNDL/blob/master/SPEC.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hndl = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["cuda: requires an available CUDA device"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
