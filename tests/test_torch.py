@@ -100,6 +100,10 @@ def test_inspection_does_not_run_layers_or_draw_rng():
     text = repr(model)
     handle.remove()
     assert "hidden" in text and "[B, 4]" in text and "[B, 5]" in text and "[B, 2]" in text
+    assert "input shape" in text and "output shape" in text and "linear@" not in text
+    assert "input:x" not in text
+    header, first, _, last = text.splitlines()[1:]
+    assert first.index("hidden") == last.index("head") == header.index("name")
     assert torch.equal(before, torch.get_rng_state())
 
 
@@ -141,6 +145,8 @@ def test_split_branches_execute_once_and_both_paths_have_gradients(device):
     '''
     model = network(source, input_shape=("B", 6), output_shape=("B", 3),
                     device=device, initialization_seed=12)
+    assert "first=[B, 2]" in repr(model) and "rest=[B, 4]" in repr(model)
+    assert "node:parts/rest" in repr(model)
     counts = {name: 0 for name in ("parts", "left", "right", "join")}
     handles = []
     for name in counts:

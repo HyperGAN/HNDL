@@ -223,11 +223,21 @@ class GraphModule(nn.Module):
     def __repr__(self):
         lines = [f"{type(self).__name__}: {_shape_text(self.plan.input_shape)} -> "
                  f"{_shape_text(self.plan.output_shape)}  dtype={self.plan.dtype}"]
-        lines.append("index  name  operation  input shapes  output shapes")
+        rows = [("index", "name", "operation", "input shape", "output shape")
+                if self._chain else ("name", "operation", "input shapes", "output shapes")]
         for i, node in enumerate(self.plan.nodes):
-            inputs = ", ".join(f"{p}={node.inputs[p]}:{_shape_text(s)}" for p, s in node.input_shapes.items())
-            outputs = ", ".join(f"{p}={_shape_text(s)}" for p, s in node.output_shapes.items())
-            lines.append(f"{i}  {node.id}  {node.op}  {inputs}  {outputs}")
+            operation = node.op.split("@")[0]
+            operation = {"conv2d": "conv", "conv_transpose2d": "deconv"}.get(operation, operation)
+            if self._chain:
+                rows.append((str(i), node.id, operation,
+                             _shape_text(node.input_shapes["x"]), _shape_text(node.output_shapes["out"])))
+            else:
+                inputs = ", ".join(f"{p}={node.inputs[p]}:{_shape_text(s)}" for p, s in node.input_shapes.items())
+                outputs = ", ".join(f"{p}={_shape_text(s)}" for p, s in node.output_shapes.items())
+                rows.append((node.id, operation, inputs, outputs))
+        widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+        lines.extend("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip()
+                     for row in rows)
         return "\n".join(lines)
 
 
