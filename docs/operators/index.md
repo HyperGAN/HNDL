@@ -112,3 +112,9 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`max_pool`](max_pool.md) | Two-dimensional max pooling over [B, C, H, W] images. |
 | [`pixel_shuffle`](pixel_shuffle.md) | Trade channels for resolution: rearrange C*r^2 channels into an r-times larger image. |
 | [`upsample`](upsample.md) | Enlarge height and width by an integer factor with a fixed interpolation kernel. |
+
+## vision
+
+| Operator | Summary |
+| --- | --- |
+| [`patch_embed`](patch_embed.md) | Cut an image into non-overlapping patches and embed each one as a token. |
