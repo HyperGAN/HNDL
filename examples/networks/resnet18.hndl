@@ -1,0 +1,31 @@
+# ResNet-18 (He et al., 2015) for 224x224 ImageNet classification.
+# Four stages of two basic blocks each; every stage but the first halves
+# height and width and doubles the channel count, ending at 512 on 7x7.
+
+# Stem: 7x7/2 convolution, then 3x3/2 max pooling. 224 -> 112 -> 56.
+# The convolution omits its bias because the batch norm that follows cancels it.
+conv(64, kernel_size=7, stride=2, padding=3, bias=False, name="stem_conv")
+batch_norm(name="stem_norm")
+relu()
+max_pool(3, stride=2, padding=1, name="stem_pool")
+
+# layer1: 64 channels at 56x56. Both shortcuts are identities - stride 1, same width.
+resblock(64, name="layer1_0")
+resblock(64, name="layer1_1")
+
+# layer2: 128 channels at 28x28. A strided block projects its shortcut with 1x1 conv + norm.
+resblock(128, stride=2, name="layer2_0")
+resblock(128, name="layer2_1")
+
+# layer3: 256 channels at 14x14.
+resblock(256, stride=2, name="layer3_0")
+resblock(256, name="layer3_1")
+
+# layer4: 512 channels at 7x7.
+resblock(512, stride=2, name="layer4_0")
+resblock(512, name="layer4_1")
+
+# Head: average each of the 512 channels over 7x7, then one classifier.
+# Its 1000 outputs are inferred from the output contract.
+global_avg_pool()
+linear(name="fc")
