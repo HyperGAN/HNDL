@@ -4,7 +4,7 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: initial alpha (`0.1.0a1`).** Config strings, native Python functions, shape inference, branches, and the PyTorch backend are implemented. The [implementation notes](IMPLEMENTATION.md) distinguish this release from the remaining v1 work in the spec. Display spacing and diagnostics below are illustrative.
+**Status: 0.1.0.** Config strings, native Python functions, bidirectional shape inference, branches, a catalog of 59 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](docs/operators/index.md), the [authored networks](docs/networks.md), and the [implementation notes](IMPLEMENTATION.md). Diagnostics below are illustrative.
 
 From a checkout, install on Linux with Python 3.11–3.14:
 
@@ -163,6 +163,51 @@ Choose a target divisible by 8 or explicitly change the architecture.
 ```
 
 Literal values remain constraints. Writing `linear(128)` would also fail for the 32 × 32 target because the seed needs 8192 values. Omitted dimensions are inferred when the constraints determine them; a named policy supplies declared construction choices. Multiple valid choices are reported as ambiguous when no selected policy chooses among them. HNDL does not silently crop, broadcast, or replace layers to make them fit.
+
+## Sequences and transformers
+
+Tensors have rank 2 `[B, F]`, rank 3 `[B, T, D]` (a sequence of `T` positions with `D` features), or rank 4 `[B, C, H, W]`. `linear`, the normalizations, and the activations act on the last axis, so a small GPT is a short config. Token ids are integers: declare the input dtype.
+
+```python
+gpt = network(
+    """
+    embedding(256, 128)
+    pos_embed(64)
+    transformer_block(4, activation="gelu_tanh", causal=True)
+    transformer_block(4, activation="gelu_tanh", causal=True)
+    layer_norm()
+    linear(256, bias=False)
+    """,
+    input_shape=("B", 64),
+    input_dtype="int64",
+    output_shape=("B", 64, 256),
+    dtype="bfloat16",
+    device="cuda:0",
+)
+```
+
+`transformer_block` is a pre-norm block with multi-head attention and a feed-forward branch; `attention`, `cross_attention`, `feed_forward`, `swiglu`, `rms_norm`, `moe`, and `hopfield` are available separately for other layouts. `dtype` selects the parameter and activation dtype for the whole plan; reduced precision is qualified on CUDA. The [catalog](docs/operators/index.md) lists every operator with its arguments, shape relation, and runnable examples, and [docs/networks.md](docs/networks.md) shows complete networks (LeNet, DCGAN, U-Net, ResNet-18, ViT, GPT, and more) written this way.
+
+## Use a pretrained network
+
+`pretrained(source)` loads any checkpoint that `transformers` or `timm` can build from its configuration, as one frozen node. Point it at a Hugging Face repository or a directory on disk, then keep building:
+
+```python
+classifier = network(
+    """
+    pretrained("hf://openai-community/gpt2", output="features", name="gpt2")
+    pool_tokens("last")
+    linear(2)
+    """,
+    input_shape=("B", 128),
+    input_dtype="int64",
+    output_shape=("B", 2),
+    dtype="bfloat16",
+    device="cuda:0",
+)
+```
+
+The checkpoint's configuration fixes the input contract and the output shape; the plan records the resolved revision so a restore fails if the source changes. The wrapped model stays frozen and in eval mode unless you pass `trainable=True`. Vision checkpoints take images at their native resolution: `pretrained("hf://timm/resnet18.a1_in1k", output="logits")` maps `("B", 3, 224, 224)` to `("B", 1000)`, and CLIP towers are selected with `component="vision"` or `"text"`. Install the loader dependencies with `pip install 'hndl[pretrained]'`; see [docs/pretrained.md](docs/pretrained.md).
 
 ## Split and reuse tensors
 
@@ -336,14 +381,15 @@ Configs now understand `my_silu()`. Native functions use `registry.ops.my_silu()
 Operations with several inputs, different output dimensions, or scalar arguments declare them in the same place. The built-in adaptive normalization is declared as:
 
 ```python
-from hndl import Arg, operator
+from hndl import Arg, Example, operator
 
 @operator(
     "adaptive_norm",
     summary="Instance-normalize features, then apply a per-example learned scale and bias.",
     shape="x[B, C, H, W], params[B, 2*C] -> out[B, C, H, W]",
     args={"eps": Arg(float, 1e-5, min=0, exclusive_min=True, help="Added to the variance for stability.")},
-    examples=[...],
+    examples=[Example("z1, z2 = split(64)\nlinear(z1)\nf = reshape(32, 4, 4)\nadaptive_norm(f, z2)",
+                      ("B", 128), ("B", 32, 4, 4))],
 )
 class AdaptiveNorm(nn.Module):
     def __init__(self, eps): ...
@@ -373,4 +419,4 @@ print(plan)
 
 Resolution allocates no tensors and constructs no modules. `resolve_file(...)` reads a config file; `resolve_callable(...)` captures a trusted Python function before using the same pure resolver. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences and named branches use the same resolve-then-build workflow.
 
-[SPEC.md](SPEC.md) defines the v1 language, registration, shape rules, and PyTorch interface. [IMPLEMENTATION.md](IMPLEMENTATION.md) describes the current alpha. HNDL is [MIT licensed](LICENSE).
+[SPEC.md](SPEC.md) defines the language, the operator declaration contract, shape rules, and the PyTorch interface. [IMPLEMENTATION.md](IMPLEMENTATION.md) describes what this release implements and its limits. [CHANGELOG.md](CHANGELOG.md) lists releases. HNDL is [MIT licensed](LICENSE).

@@ -390,7 +390,6 @@ class Operator:
     policies: Mapping = field(default_factory=dict)
     validate: object = None
     finalize: object = None
-    expand: object = None
     reference: object = None
     init_symbols: tuple = ()
     init_shapes: tuple = ()
@@ -440,10 +439,6 @@ class Operator:
     def required(self):
         return tuple(name for name, arg in self.args.items() if arg.required)
 
-    @property
-    def is_macro(self):
-        return self.expand is not None
-
 
 def _check_init_signature(cls, args, symbols):
     try:
@@ -475,7 +470,7 @@ def _check_init_signature(cls, args, symbols):
 
 def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=None, examples=(),
                   category="other", relation=None, shape_text=None, positional_rest=None, policies=None,
-                  validate=None, finalize=None, expand=None, reference=None):
+                  validate=None, finalize=None, reference=None):
     if not isinstance(alias, str) or not alias.isidentifier() or alias in ("x", "out") or alias.startswith("_"):
         _registry_error("Operator alias must be an identifier other than x/out without a leading underscore")
     if keyword.iskeyword(alias):
@@ -494,7 +489,7 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
         _registry_error("relation must be a callable receiving the node view")
     if shape_text is not None and type(shape_text) is not str:
         _registry_error("shape_text must be a string describing the relation")
-    for hook, label in ((validate, "validate"), (finalize, "finalize"), (expand, "expand"), (reference, "reference")):
+    for hook, label in ((validate, "validate"), (finalize, "finalize"), (reference, "reference")):
         if hook is not None and not callable(hook):
             _registry_error(f"{label} must be callable")
     args = {} if args is None else args
@@ -538,19 +533,16 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
             normalized_examples.append(Example(*example))
         else:
             _registry_error("examples must be Example(source, input_shape, output_shape) entries")
-    if expand is None:
-        if not (inspect.isclass(cls) and hasattr(cls, "forward")):
-            _registry_error("@operator decorates an nn.Module subclass with a forward method")
-        init_symbols, init_shapes = _check_init_signature(cls, checked, symbols)
-    else:
-        init_symbols, init_shapes = (), ()
+    if not (inspect.isclass(cls) and hasattr(cls, "forward")):
+        _registry_error("@operator decorates an nn.Module subclass with a forward method")
+    init_symbols, init_shapes = _check_init_signature(cls, checked, symbols)
     doc = inspect.getdoc(cls) or ""
     return Operator(
         alias=alias, identity=identity, version=version, summary=summary.strip(), doc=doc, category=category,
         inputs=inputs, outputs=outputs, args=checked, symbols=symbols, shape_text=shape.strip(),
         relation=relation, relation_text=(shape_text or "").strip(), examples=tuple(normalized_examples),
         module=cls, positional_rest=positional_rest,
-        policies=policies, validate=validate, finalize=finalize, expand=expand, reference=reference,
+        policies=policies, validate=validate, finalize=finalize, reference=reference,
         init_symbols=init_symbols, init_shapes=init_shapes,
     )
 

@@ -32,8 +32,8 @@ python -m twine check --strict dist/*
 ```
 
 The distribution version lives in `pyproject.toml` and
-`src/hndl/_version.py`; update both together. The initial version is an alpha,
-`0.1.0a1`. Building a distribution does not publish it to PyPI.
+`src/hndl/_version.py`; update both together, and record the release in
+`CHANGELOG.md`. Building a distribution does not publish it to PyPI.
 
 ## Publishing
 
@@ -42,7 +42,7 @@ for project `hndl`, GitHub owner `HyperGAN`, repository `HNDL`, workflow
 `publish.yml`, and environment `pypi`. Set any desired release reviewers on the
 GitHub `pypi` environment. This is account configuration, not a repository secret.
 
-Once configured, publish a GitHub release tagged `v0.1.0a1` (or the matching
+Once configured, publish a GitHub release tagged `v0.1.0` (or the matching
 future package version). The publishing workflow checks the tag, builds the
 distributions, tests the installed wheel with the CPU backend, and uploads
 using PyPI's short-lived OIDC credentials. A failed test prevents publishing.
