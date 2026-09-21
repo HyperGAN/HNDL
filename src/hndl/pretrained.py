@@ -579,7 +579,9 @@ def _traced_output_shapes(source_key, config_path, output, component, input_shap
     results = result if layers else (result,)
     if any(not isinstance(value, torch.Tensor) for value in results):
         _fail(f"{source.location}: output {output!r} is not a tensor")
-    return tuple(("B", *tuple(int(dimension) for dimension in value.shape[1:])) for value in results)
+    # The trace fixes the non-batch dimensions; the batch entry passes through
+    # unchanged, so a node fed a "2*B" tensor reports "2*B" outputs.
+    return tuple((input_shape[0], *tuple(int(dimension) for dimension in value.shape[1:])) for value in results)
 
 
 output_shape.cache_clear = output_shapes.cache_clear = _traced_output_shapes.cache_clear

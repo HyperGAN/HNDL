@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+- **`concat` joins along the batch axis, tracked as `k*B`.** `axis=0` was
+  rejected; it now stacks examples, so
+  `combined = concat(candidate, context, axis=0)` turns two `[B, C, H, W]`
+  tensors into one `[2*B, C, H, W]` and a shared --- often frozen --- network
+  sees both branches in a single forward pass. Batch stays symbolic: an
+  intermediate contract carries the entry `"2*B"`, meaning two of the plan's
+  batches, and the resolver tracks it separately from `"B"` everywhere ---
+  through ordinary operators, through `pretrained` (including `layers=`), in
+  the saved plan, and in the runtime shape check, which requires `k` times the
+  batch of the call. The sum runs both ways, so `2*B + B` is `3*B` and one
+  unknown input batch is solved from a known total. External `input_shape` and
+  `output_shape` contracts stay one plan batch (`E_SCHEMA`), so a graph chunks
+  a joined tensor back before publishing it.
+
+- **New `chunk` operator: one axis into equal sections.** `a, b = chunk(x, 2)`
+  halves a feature axis and `a, b = chunk(features, 2, dim=0)` takes a `2*B`
+  tensor back apart into two `B` tensors, the inverse of the join above. It
+  produces exactly `chunks` outputs (`1 <= chunks <= 32`), returns a tuple and
+  clears the current tensor like `split`, and its sections are views, so first
+  and second derivatives reach the input through every one of them. Uneven
+  divisions fail at resolution with `E_CONSTRAINT` rather than at a runtime
+  that would only ever see one batch size: an extent of 5 into 2 sections, a
+  `2*B` batch into 3, and a plain `B` batch into 2 are all rejected when the
+  plan is resolved. `chunks=1` is allowed and returns a one-tuple, matching
+  `pretrained(..., layers=("layer1",))`.
+
+- **Plan format: existing plans are byte-identical.** Batch multiples have one
+  spelling each --- `"1*B"`, `"0*B"`, `"B*2"` and leading zeros are rejected
+  with `E_SCHEMA` --- and `"B"` keeps its own, so every plan that does not join
+  or divide the batch axis encodes and digests exactly as it did in 0.3.0. No
+  existing digest changes. A saved plan's internal port contracts may now carry
+  `"k*B"` for `2 <= k <= 1024`; external contracts may not.
+
+- **`outputs_from=` accepts an `int` argument.** A variadic output port could
+  only take its count from the length of a sequence argument; it now also
+  accepts a bounded `int` argument, which is what `chunk`'s `chunks` is.
+  Operators declare how they treat axis 0 with `batch="shared"` (the default:
+  batch passes through every port) or `batch="relation"`, and a relation can
+  read and set batch entries with `s.batch(port)` and `s.share_batch(*ports)`.
+
 ## 0.3.0 (2026-09-21)
 
 A minor release for HyperGAN's multiscale discriminators: one pretrained forward pass returns several intermediate layers, operators may declare variadic output ports, and `.hndl` files count as Python on GitHub.

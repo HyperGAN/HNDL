@@ -98,6 +98,7 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
+| [`chunk`](chunk.md) | Cut one axis into a fixed number of equal sections. |
 | [`concat`](concat.md) | Join two or more tensors along one axis. |
 | [`flatten`](flatten.md) | Collapse every non-batch axis into one feature axis. |
 | [`mean`](mean.md) | Average one non-batch axis away. |

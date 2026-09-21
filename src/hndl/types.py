@@ -16,7 +16,59 @@ from .settings import (normalize_initialization, normalize_trainability,
 EXTERNAL_INPUT = "x"
 EXTERNAL_OUTPUT = "output"
 MAX_EXTERNAL_PORTS = 32
+BATCH = "B"
+MAX_BATCH_MULTIPLE = 1024
 _PORT_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
+_BATCH_MULTIPLE = re.compile(r"([1-9][0-9]{0,6})\*B\Z")
+
+
+def batch_multiple(value):
+    """How many plan batches a symbolic batch entry stands for, or ``None``.
+
+    Batch is the one dimension that stays symbolic after resolution. ``"B"`` is
+    one plan batch; ``"k*B"`` is ``k`` of them, which is what joining tensors
+    along axis 0 produces and what splitting them consumes. Each multiple has
+    exactly one spelling --- ``"1*B"``, ``"0*B"``, ``"B*2"`` and a leading zero
+    are all rejected --- so a plan that never touches the batch axis keeps the
+    encoding, and therefore the digests, it had before multiples existed.
+    """
+    if value == BATCH:
+        return 1
+    if type(value) is not str:
+        return None
+    match = _BATCH_MULTIPLE.fullmatch(value)
+    if match is None:
+        return None
+    multiple = int(match.group(1))
+    return multiple if 2 <= multiple <= MAX_BATCH_MULTIPLE else None
+
+
+def batch_symbol(multiple):
+    """The canonical spelling of ``multiple`` plan batches, or ``None``."""
+    if type(multiple) is not int or not 1 <= multiple <= MAX_BATCH_MULTIPLE:
+        return None
+    return BATCH if multiple == 1 else f"{multiple}*B"
+
+
+def batch_units(value):
+    """The batch count a batch entry carries: ``k`` for ``"k*B"``, the literal
+    itself for a fixed integer batch, or ``None`` when it is neither."""
+    if type(value) is int:
+        return value if value > 0 else None
+    return batch_multiple(value)
+
+
+def batch_dimension(units, symbolic):
+    """Rebuild a batch entry from a unit count, symbolic or fixed."""
+    if type(units) is not int or units < 1:
+        return None
+    return batch_symbol(units) if symbolic else units
+
+
+def batch_extent(value, batch):
+    """The concrete size a batch entry requires of a tensor at runtime."""
+    multiple = batch_multiple(value)
+    return value if multiple is None else multiple * batch
 
 
 class Immutable:
