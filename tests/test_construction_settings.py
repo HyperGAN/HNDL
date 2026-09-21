@@ -9,8 +9,10 @@ import pytest
 from torch import nn
 
 from hndl import Arg, HNDLError, Registry
+from hndl import normal, orthogonal, truncated_normal, xavier_uniform
 from hndl.resolver import resolve_graph, validate_concrete_plan
-from hndl.settings import (normalize_settings, normalize_initialization, normalize_trainability,
+from hndl.settings import (INITIALIZER, INITIALIZER_SCHEMES, initializer, normalize_settings,
+                           normalize_initialization, normalize_trainability,
                            validate_initialization, validate_trainability)
 from hndl.types import Graph, Node, ResolvedPlan, canonical, digest
 
@@ -160,6 +162,67 @@ def test_unsupported_schema_rejected_on_restore_and_direct_validation():
         ResolvedPlan.from_json(rehash(data))
     with pytest.raises(HNDLError, match="E_STATE_VERSION.*Expected plan schema 1"):
         validate_concrete_plan(replace(plan_with_settings(), schema_version=2))
+
+
+def test_scheme_overrides_bump_the_initializer_version_without_touching_constants():
+    assert normalize_initialization({"weight": 0})["kind"] == INITIALIZER
+    assert normalize_initialization()["kind"] == INITIALIZER
+    mixed = normalize_initialization({"weight": xavier_uniform(gain=0.5), "bias": 0})
+    assert mixed["kind"] == INITIALIZER_SCHEMES
+    assert mixed["overrides"] == {"weight": {"kind": "xavier_uniform", "gain": 0.5}, "bias": 0.0}
+    plan = plan_with_settings(init={"weight": orthogonal(), "bias": 0})
+    assert plan.nodes[0].initialization["kind"] == INITIALIZER_SCHEMES
+    assert plan.semantic_digest != plan_with_settings(init={"weight": 0, "bias": 0}).semantic_digest
+    assert plan.semantic_digest != plan_with_settings(init={"weight": orthogonal(gain=2), "bias": 0}).semantic_digest
+    assert plan.to_json() == ResolvedPlan.from_json(plan.to_json()).to_json()
+    assert "xavier" in plan_with_settings(init={"weight": xavier_uniform()}).describe()
+
+
+def test_scheme_arguments_are_float32_and_choices_are_closed():
+    assert initializer("normal", {"std": 0.1})["std"] == struct.unpack("!f", struct.pack("!f", 0.1))[0]
+    assert math.copysign(1.0, initializer("uniform", {"a": -0.0})["a"]) == -1.0
+    assert initializer("truncated_normal") == {"kind": "truncated_normal", "mean": 0.0, "std": 1.0,
+                                               "a": -2.0, "b": 2.0}
+    for kind, arguments in [("glorot", {}), ("normal", {"sigma": 1.0}), ("normal", {"std": float("nan")}),
+                            ("kaiming_normal", {"mode": "fan_avg"}), ("kaiming_normal", {"nonlinearity": "gelu"}),
+                            ("uniform", {"a": True}), ("xavier_uniform", {"gain": 1e40})]:
+        with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+            initializer(kind, arguments)
+    with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+        initializer("normal", [("std", 1.0)])
+
+
+def test_saved_scheme_records_are_validated_not_silently_rewritten():
+    scheme = {"kind": "normal", "mean": 0.0, "std": 1.0}
+    assert validate_initialization({"kind": INITIALIZER_SCHEMES, "overrides": {"weight": scheme}}) == {
+        "kind": INITIALIZER_SCHEMES, "overrides": {"weight": scheme}}
+    # torch_default@1 stays constants-only; torch_default@2 requires a scheme.
+    with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+        validate_initialization({"kind": INITIALIZER, "overrides": {"weight": dict(scheme)}})
+    with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+        validate_initialization({"kind": INITIALIZER_SCHEMES, "overrides": {"weight": 0.0}})
+    with pytest.raises(HNDLError, match="E_STATE_VERSION"):
+        validate_initialization({"kind": "torch_default@3", "overrides": {}})
+    for broken in ({"kind": "normal", "mean": 0.0},
+                   {"kind": "normal", "mean": 0.0, "std": 1.0, "gain": 1.0},
+                   {"kind": "normal", "mean": 0.0, "std": 1},
+                   {"kind": "normal", "mean": 0.0, "std": 0.1},
+                   {"kind": "kaiming_normal", "a": 0.0, "mode": "fan_avg", "nonlinearity": "relu"},
+                   {"mean": 0.0, "std": 1.0}):
+        with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+            validate_initialization({"kind": INITIALIZER_SCHEMES, "overrides": {"weight": broken}})
+
+
+def test_saved_scheme_plans_reject_tampering_even_with_recomputed_digests():
+    data = json.loads(plan_with_settings(init={"weight": truncated_normal(std=0.5)}).to_json())
+    assert data["nodes"][0]["initialization"]["kind"] == INITIALIZER_SCHEMES
+    data["nodes"][0]["initialization"]["overrides"]["weight"]["std"] = 0.1
+    with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+        ResolvedPlan.from_json(rehash(data))
+    data = json.loads(plan_with_settings(init={"weight": normal()}).to_json())
+    data["nodes"][0]["initialization"]["kind"] = INITIALIZER
+    with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+        ResolvedPlan.from_json(rehash(data))
 
 
 @pytest.mark.parametrize("metadata", ["init", "trainable"])

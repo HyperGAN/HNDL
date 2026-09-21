@@ -377,6 +377,26 @@ The first layer keeps its normal initial values and has frozen parameters. The f
 
 `init` maps parameter names to constant values. `trainable=False` freezes every parameter in that operation; use `trainable={"weight": False}` to freeze only its weight. Unspecified parameters retain their module defaults. Custom operations can use exact nested parameter names such as `"projection.weight"`. These options work in native Python too, for example `ops.linear(64, trainable=False)`.
 
+An `init` entry can also name a random initializer scheme instead of a constant:
+
+```python
+model = network(
+    """
+    linear(64, init={"weight": kaiming_normal(mode="fan_out", nonlinearity="relu"), "bias": 0})
+    relu()
+    linear(init={"weight": truncated_normal(std=0.02), "bias": 0})
+    """,
+    input_shape=("B", 128),
+    output_shape=("B", 10),
+    device="cpu",
+    initialization_seed=7,
+)
+```
+
+The schemes are `xavier_uniform`, `xavier_normal`, `kaiming_uniform`, `kaiming_normal`, `truncated_normal`, `normal`, `uniform`, and `orthogonal`. Each one calls the `torch.nn.init` function of the same name, with the same keyword names and the same defaults, so `truncated_normal(std=0.02)` is `torch.nn.init.trunc_normal_(parameter, mean=0.0, std=0.02, a=-2.0, b=2.0)`. Draws happen inside the construction RNG scope, so the same plan and the same `initialization_seed` give the same values every time. Xavier, Kaiming, and orthogonal need a parameter with at least two dimensions, as they do in PyTorch.
+
+The same names are plain functions in native Python: `from hndl import xavier_uniform` and then `ops.linear(64, init={"weight": xavier_uniform(gain=1.0), "bias": 0})` produces an identical plan.
+
 Both settings are saved in the resolved plan and applied whenever you build it. They do not change the inferred shapes. Gradients still flow through frozen layers to their inputs, and `model.train()` and `model.eval()` work normally. A state dictionary saves parameter values, so keep the plan alongside it to reconstruct the architecture and trainability settings.
 
 ## Load a config file

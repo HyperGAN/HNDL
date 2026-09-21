@@ -164,7 +164,9 @@ same isolation boundary as loading declarative source.
 ## Construction settings
 
 `init={"weight": 0, "bias": 0}` selects constant parameter overrides after
-normal module construction. `trainable=False` freezes all parameters in the
+normal module construction, and `init={"weight": xavier_uniform(gain=1.0)}`
+selects a random initializer scheme for that parameter instead.
+`trainable=False` freezes all parameters in the
 operation, while `trainable={"weight": False}` changes only named parameters.
 Omitting either option preserves the constructor's values or `requires_grad`
 flags. Empty mappings have the same meaning as omission. Explicit `None` is
@@ -177,12 +179,29 @@ per path. Buffers and nonexistent targets are rejected at build time.
 Constants must be numbers other than booleans and must round to finite
 float32 values; the plan stores those rounded values and fills them into the
 parameter's dtype. Trainability values must be booleans. Aliased parameters
-cannot receive conflicting declarations. Constant targets cannot share storage
-with a distinct parameter or a registered buffer.
+cannot receive conflicting declarations. Initialization targets cannot share
+storage with a distinct parameter or a registered buffer.
 
-Initialization overrides run under `no_grad` after parameters are materialized.
-`initialization_seed=None` uses the caller's RNG; an explicit seed isolates
-construction and restores the caller's RNG afterward. Freezing affects
+The scheme calls are `xavier_uniform`, `xavier_normal`, `kaiming_uniform`,
+`kaiming_normal`, `truncated_normal`, `normal`, `uniform`, and `orthogonal`,
+each mapping onto the `torch.nn.init` function of the same name with torch's
+keyword names and defaults. They are keyword-only, take numeric literals plus
+the `mode`/`nonlinearity` choice strings, and are accepted only as a direct
+value of an `init` mapping; declarative source rejects them anywhere else.
+Trusted Python imports the same names from `hndl` (or `hndl.initializers`),
+and both frontends build the same canonical record, so equivalent declarations
+share a semantic digest. The eight names are reserved operator aliases.
+A node with at least one scheme override records
+`initialization.kind = "torch_default@2"`; constant-only nodes keep
+`"torch_default@1"` byte for byte.
+
+Initialization overrides run under `no_grad` after parameters are materialized,
+inside the construction RNG scope and in a fixed order, so a scheme fill is
+reproducible from `initialization_seed`. `initialization_seed=None` uses the
+caller's RNG; an explicit seed isolates construction and restores the caller's
+RNG afterward. A scheme that cannot apply to a parameter's shape — Xavier,
+Kaiming, or orthogonal on a parameter of fewer than two dimensions — fails
+with `E_INITIALIZATION` before any node is initialized. Freezing affects
 parameter gradients, not input gradients or train/eval mode.
 
 ## Limits of this release

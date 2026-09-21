@@ -5,7 +5,8 @@ import torch
 from torch import nn
 
 from examples.adaptive_normalization import mapping_model
-from hndl import HNDLError, Registry, ResolvedPlan, resolve
+from hndl import HNDLError, Registry, ResolvedPlan, resolve, resolve_callable, ops
+from hndl import truncated_normal, xavier_uniform
 from hndl.torch import build, network
 
 
@@ -280,3 +281,164 @@ def test_parameterless_operations_reject_named_settings_but_allow_all_freeze():
     plan = resolve('relu(init={"weight": 0})', input_shape=("B", 2), output_shape=("B", 2))
     with pytest.raises(HNDLError, match="E_INITIALIZATION"):
         build(plan, device="cpu")
+
+
+SCHEME_ORACLES = [
+    ('xavier_uniform(gain=1.5)', lambda t: nn.init.xavier_uniform_(t, gain=1.5)),
+    ('xavier_normal()', lambda t: nn.init.xavier_normal_(t, gain=1.0)),
+    ('kaiming_uniform(a=0.25, mode="fan_out", nonlinearity="leaky_relu")',
+     lambda t: nn.init.kaiming_uniform_(t, a=0.25, mode="fan_out", nonlinearity="leaky_relu")),
+    ('kaiming_normal(nonlinearity="relu")',
+     lambda t: nn.init.kaiming_normal_(t, a=0.0, mode="fan_in", nonlinearity="relu")),
+    ('truncated_normal(mean=0.5, std=0.25, a=-1.0, b=1.0)',
+     lambda t: nn.init.trunc_normal_(t, mean=0.5, std=0.25, a=-1.0, b=1.0)),
+    ('normal(mean=-1.0, std=0.125)', lambda t: nn.init.normal_(t, mean=-1.0, std=0.125)),
+    ('uniform(a=-0.5, b=0.5)', lambda t: nn.init.uniform_(t, a=-0.5, b=0.5)),
+    ('orthogonal(gain=0.75)', lambda t: nn.init.orthogonal_(t, gain=0.75)),
+]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("call, apply", SCHEME_ORACLES, ids=[call.split("(")[0] for call, _ in SCHEME_ORACLES])
+def test_scheme_initializers_match_torch_nn_init_applied_by_hand(call, apply, device):
+    model = network(f'linear(4, init={{"weight": {call}}})', input_shape=("B", 8), output_shape=("B", 4),
+                    device=device, initialization_seed=31)
+    # The same RNG scope, the same construction order, the same torch routine.
+    torch.manual_seed(31)
+    with torch.device(device):
+        reference = nn.Linear(8, 4)
+    apply(reference.weight)
+    assert torch.equal(model[0].weight, reference.weight)
+    assert torch.equal(model[0].bias, reference.bias)
+    assert model[0].weight.requires_grad and model[0].bias.requires_grad
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_scheme_and_constant_overrides_mix_in_one_node_and_across_a_graph(device):
+    source = '''
+    linear(4, name="body", init={"weight": kaiming_uniform(nonlinearity="relu"), "bias": 0.25})
+    relu()
+    linear(name="head", init={"weight": xavier_uniform(gain=1.5), "bias": normal(mean=2.0, std=0.5)},
+           trainable={"bias": False})
+    '''
+    model = network(source, input_shape=("B", 8), output_shape=("B", 2), device=device,
+                    initialization_seed=57)
+    torch.manual_seed(57)
+    with torch.device(device):
+        body, head = nn.Linear(8, 4), nn.Linear(4, 2)
+    nn.init.kaiming_uniform_(body.weight, a=0.0, mode="fan_in", nonlinearity="relu")
+    with torch.no_grad():
+        body.bias.fill_(0.25)
+    nn.init.xavier_uniform_(head.weight, gain=1.5)
+    nn.init.normal_(head.bias, mean=2.0, std=0.5)
+    assert torch.equal(model["body"].weight, body.weight)
+    assert torch.equal(model["body"].bias, body.bias)
+    assert torch.equal(model["head"].weight, head.weight)
+    assert torch.equal(model["head"].bias, head.bias)
+    assert not model["head"].bias.requires_grad
+
+
+def test_scheme_fills_are_reproducible_from_the_initialization_seed():
+    source = 'linear(4, init={"weight": orthogonal(gain=1.5), "bias": uniform(a=-0.5, b=0.5)})'
+    plan = ResolvedPlan.from_json(resolve(source, input_shape=("B", 8), output_shape=("B", 4)).to_json())
+    first = build(plan, device="cpu", initialization_seed=404)
+    second = build(plan, device="cpu", initialization_seed=404)
+    other = build(plan, device="cpu", initialization_seed=405)
+    for name in ("weight", "bias"):
+        assert torch.equal(getattr(first[0], name), getattr(second[0], name))
+        assert not torch.equal(getattr(first[0], name), getattr(other[0], name))
+    # An explicit seed still leaves the caller's own RNG untouched.
+    before = torch.get_rng_state().clone()
+    build(plan, device="cpu", initialization_seed=404)
+    assert torch.equal(before, torch.get_rng_state())
+
+
+def test_constant_only_builds_consume_exactly_the_rng_they_always_did():
+    kwargs = {"input_shape": ("B", 4), "output_shape": ("B", 3), "device": "cpu"}
+    torch.manual_seed(11)
+    plain = network("linear(3)", **kwargs)
+    after_plain = torch.get_rng_state().clone()
+    torch.manual_seed(11)
+    constants = network('linear(3, init={"weight": 0})', **kwargs)
+    assert torch.equal(torch.get_rng_state(), after_plain)
+    torch.testing.assert_close(constants[0].bias, plain[0].bias)
+    # A scheme draws inside the same scope, so it advances the caller's RNG.
+    torch.manual_seed(11)
+    network('linear(3, init={"weight": normal()})', **kwargs)
+    assert not torch.equal(torch.get_rng_state(), after_plain)
+
+
+@pytest.mark.parametrize("scheme", ["xavier_uniform()", "xavier_normal()", "kaiming_uniform()",
+                                    "kaiming_normal()", "orthogonal()"])
+def test_matrix_schemes_reject_parameters_with_fewer_than_two_dimensions(scheme):
+    with pytest.raises(HNDLError, match="E_INITIALIZATION.*at least two dimensions"):
+        network(f'linear(2, init={{"bias": {scheme}}})', input_shape=("B", 3), output_shape=("B", 2),
+                device="cpu")
+
+    class Scalar(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gamma = nn.Parameter(torch.ones(()))
+
+        def forward(self, x):
+            return x * self.gamma
+
+    with pytest.raises(HNDLError, match="E_INITIALIZATION.*at least two dimensions"):
+        network(f'custom(init={{"gamma": {scheme}}})', input_shape=("B", 2), output_shape=("B", 2),
+                registry=custom_registry(Scalar), device="cpu")
+
+
+@pytest.mark.parametrize("scheme", ["normal(std=0.25)", "uniform(a=-1.0, b=1.0)",
+                                    "truncated_normal(std=0.5)"])
+def test_elementwise_schemes_accept_one_dimensional_parameters(scheme):
+    model = network(f'linear(2, init={{"bias": {scheme}}})', input_shape=("B", 3), output_shape=("B", 2),
+                    device="cpu", initialization_seed=8)
+    assert model[0].bias.shape == (2,)
+    assert torch.isfinite(model[0].bias).all()
+
+
+def test_scheme_targets_are_validated_before_any_node_is_initialized():
+    layer = Aliased()
+    registry = custom_registry(lambda: layer)
+    with pytest.raises(HNDLError, match="E_INITIALIZATION"):
+        network('custom(init={"weight": 0.5}); linear(2, init={"bias": xavier_uniform()})',
+                input_shape=("B", 2), output_shape=("B", 2), registry=registry, device="cpu",
+                initialization_seed=63)
+    assert torch.equal(layer.weight, torch.ones(2))
+
+
+def test_scheme_aliases_of_one_parameter_must_agree():
+    registry = custom_registry(Aliased)
+    with pytest.raises(HNDLError, match="E_INITIALIZATION.*Conflicting"):
+        network('custom(init={"weight": normal(std=1.0), "alias": normal(std=2.0)})',
+                input_shape=("B", 2), output_shape=("B", 2), registry=registry, device="cpu")
+    with pytest.raises(HNDLError, match="E_INITIALIZATION.*Conflicting"):
+        network('custom(init={"weight": normal(), "alias": 0.0})',
+                input_shape=("B", 2), output_shape=("B", 2), registry=registry, device="cpu")
+    model = network('custom(init={"weight": uniform(a=-1.0, b=1.0), "alias": uniform(a=-1.0, b=1.0)})',
+                    input_shape=("B", 2), output_shape=("B", 2), registry=registry, device="cpu",
+                    initialization_seed=5)
+    assert model[0].weight is model[0].alias
+    assert ((model[0].weight >= -1) & (model[0].weight <= 1)).all()
+
+
+def test_transgan_style_declaration_matches_its_native_python_equivalent():
+    source = '''
+    linear(16, name="stem", init={"weight": xavier_uniform(gain=1.0), "bias": 0.0})
+    attention(4, name="attn", init={"o_proj.weight": truncated_normal(std=0.25)})
+    linear(name="head", init={"weight": truncated_normal(std=0.25), "bias": 0.0})
+    '''
+
+    def author(x):
+        ops.linear(16, name="stem", init={"weight": xavier_uniform(gain=1.0), "bias": 0.0})
+        ops.attention(4, name="attn", init={"o_proj.weight": truncated_normal(std=0.25)})
+        ops.linear(name="head", init={"weight": truncated_normal(std=0.25), "bias": 0.0})
+
+    shapes = {"input_shape": ("B", 6, 8), "output_shape": ("B", 6, 4)}
+    plan = resolve(source, **shapes)
+    assert plan.semantic_digest == resolve_callable(author, **shapes).semantic_digest
+    model = build(plan, device="cpu", initialization_seed=21)
+    assert torch.count_nonzero(model["stem"].bias) == 0
+    assert torch.count_nonzero(model["head"].bias) == 0
+    assert model["attn"].o_proj.weight.std().item() < 1.0
+    assert model(x=torch.ones(2, 6, 8))["output"].shape == (2, 6, 4)
