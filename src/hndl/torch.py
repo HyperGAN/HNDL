@@ -192,12 +192,12 @@ class GraphModule(nn.Module):
                 self._check(value, node.input_shapes[port], batch, f"{node.id}/{port}", dtypes[port])
                 bound.append(value)
             result = self.nodes[f"n_{node.id}"](*bound)
-            if len(node.outputs) == 1:
-                results = (result,)
-            elif isinstance(result, dict) and set(result) == set(node.outputs):
+            if isinstance(result, dict) and set(result) == set(node.outputs):
                 results = tuple(result[port] for port in node.outputs)
             elif isinstance(result, (tuple, list)) and len(result) == len(node.outputs):
                 results = tuple(result)
+            elif len(node.outputs) == 1:
+                results = (result,)
             else:
                 raise HNDLError("E_RUNTIME", f"{node.id}: expected output ports {node.outputs}")
             for port, value in zip(node.outputs, results):

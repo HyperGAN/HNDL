@@ -180,15 +180,22 @@ class Capture:
         }
         if profile:
             metadata["policy"] = profile.identity
+        # A variadic output operator fixes its port count from its own
+        # arguments, so the ports come from the normalized call, not the
+        # declaration alone.
+        output_ports = op.output_ports_for(normalized)
         node = Node(id=name, op=op.key, args=normalized,
                     inputs={port: symbol.ref for port, symbol in bindings.items()},
-                    outputs=tuple(op.output_ports), source=metadata,
+                    outputs=output_ports, source=metadata,
                     initialization=initialization, trainability=trainability)
         self.nodes.append(node)
         self._ids.add(name)
-        outputs = tuple(Symbol(self, f"node:{name}/{port}") for port in op.output_ports)
-        self.current = outputs[0] if len(outputs) == 1 else None
-        return outputs[0] if len(outputs) == 1 else outputs
+        outputs = tuple(Symbol(self, f"node:{name}/{port}") for port in output_ports)
+        if op.returns_tuple(normalized):
+            self.current = None
+            return outputs
+        self.current = outputs[0]
+        return outputs[0]
 
     def finish(self, selected=_DEFAULT):
         if self.named_outputs:

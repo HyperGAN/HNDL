@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from ..operator import Arg, Example, INDEX_DTYPES, operator
+from ..operator import Arg, Example, INDEX_DTYPES, STRS, operator
 from .. import pretrained as sources
 
 
@@ -9,7 +9,9 @@ def _relation(s):
     args = s.args
     source = sources.resolve_source(args["source"], args["config"], args["provider"], args["sha256"])
     s.arg("revision", source.revision)
-    provider = sources.provider_for(source, args["output"], args["component"], args["layer"], args["readout"])
+    layers = args["layers"]
+    provider = sources.provider_for(source, args["output"], args["component"], args["layer"], args["readout"],
+                                    layers)
     contract = provider.contract()
     if contract.kind == "tensor":
         # A provider checkpoint declares no contract of its own; only the dtype is fixed.
@@ -36,18 +38,25 @@ def _relation(s):
     x = s.shape("x")
     if x is None or any(value is None for value in x[1:]):
         return
-    shape = sources.output_shape(args["source"], args["config"], args["output"], args["component"], tuple(x),
-                                 args["provider"], args["sha256"], args["layer"], args["readout"])
-    s.rank("out", len(shape))
-    for axis, value in enumerate(shape):
-        if axis:
-            s.axis("out", axis, value)
+    if layers:
+        # One trace captures every requested submodule, in declared order.
+        shapes = sources.output_shapes(args["source"], args["config"], args["output"], args["component"], tuple(x),
+                                       args["provider"], args["sha256"], layers)
+    else:
+        shapes = (sources.output_shape(args["source"], args["config"], args["output"], args["component"], tuple(x),
+                                       args["provider"], args["sha256"], args["layer"], args["readout"]),)
+    for port, shape in zip(s.outputs, shapes):
+        s.rank(port, len(shape))
+        for axis, value in enumerate(shape):
+            if axis:
+                s.axis(port, axis, value)
 
 
 @operator(
     "pretrained",
     summary="Load a pretrained network from disk or the Hugging Face Hub as one frozen node.",
-    shape="x:any -> out",
+    shape="x:any -> out*",
+    outputs_from="layers",
     relation=_relation,
     shape_text="input contract and output shape come from the checkpoint's configuration (meta-device trace)",
     args={
@@ -68,6 +77,10 @@ def _relation(s):
         "layer": Arg(str, "", positional=False,
                      help='Dotted named_modules() path of the provider submodule whose output the node returns, '
                           'such as "features.16"; empty returns the model\'s own output.'),
+        "layers": Arg(STRS, (), positional=False,
+                      help='Dotted named_modules() paths of several provider submodules, such as '
+                           '("layer1", "layer2", "layer3"); the node returns one output per entry, in that '
+                           "order, from a single forward pass. Mutually exclusive with layer= and readout=."),
         "readout": Arg(str, "", positional=False,
                        help='Name of a readout the host registered with the provider, such as "patch_tokens"; the '
                             'node returns that callable\'s tensor instead of the model\'s own output. Mutually '
@@ -149,7 +162,7 @@ class Pretrained(nn.Module):
     transformers or timm checkpoints, which select ``output=``.
     """
 
-    def __init__(self, source, output, component, config, revision, provider, sha256, layer, readout, *,
+    def __init__(self, source, output, component, config, revision, provider, sha256, layer, layers, readout, *,
                  input_shapes):
         super().__init__()
         materialize = torch.empty(0).device.type != "meta"
@@ -160,8 +173,9 @@ class Pretrained(nn.Module):
         self.output = output
         self.component = component
         self.layer = layer
+        self.layers = tuple(layers)
         self.readout = readout
-        self.provider = sources.provider_for(self.source, output, component, layer, readout)
+        self.provider = sources.provider_for(self.source, output, component, layer, readout, self.layers)
         self.kind = self.provider.contract().kind
         self.model = self.provider.instantiate(weights=materialize)
         self.model.eval()
@@ -181,6 +195,7 @@ class Pretrained(nn.Module):
         component = f", component={self.component!r}" if self.component else ""
         if self.source.kind == "state_dict":
             selected = f", layer={self.layer!r}" if self.layer else ""
+            selected += f", layers={self.layers!r}" if self.layers else ""
             selected += f", readout={self.readout!r}" if self.readout else ""
             return f"source={self.source.spec!r}, provider={self.source.config['provider']!r}{selected}"
         return f"source={self.source.spec!r}, output={self.output!r}{component}"

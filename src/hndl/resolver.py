@@ -62,11 +62,13 @@ def _ordered_nodes(graph, registry, limits):
         if edge_count > limits["max_edges"]:
             raise HNDLError("E_RESOURCE", "Graph exceeds max_edges")
         spec = registry.by_identity(node.op)
-        if tuple(node.outputs) != spec.output_ports:
-            raise HNDLError("E_BINDING", f"{node.id} output ports must be {spec.output_ports}", node=node.id)
         if node.source is not None and not isinstance(node.source, Mapping):
             raise HNDLError("E_SCHEMA", "Node source metadata must be a mapping", node=node.id)
         args = normalize_arguments(spec, (), node.args)
+        # A variadic output operator derives its ports from its own arguments.
+        output_ports = spec.output_ports_for(args)
+        if tuple(node.outputs) != output_ports:
+            raise HNDLError("E_BINDING", f"{node.id} output ports must be {output_ports}", node=node.id)
         if spec.variadic is not None and args["input_count"] > limits["max_edges"]:
             raise HNDLError("E_RESOURCE", f"{spec.alias} input_count exceeds max_edges", node=node.id)
         source = dict(node.source or {})
