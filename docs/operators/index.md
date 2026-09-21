@@ -56,6 +56,7 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
+| [`hopfield`](hopfield.md) | Retrieve learned patterns by iterating the modern Hopfield update on the last axis. |
 | [`moe`](moe.md) | Sparse mixture of experts: route every token to its top-k feed-forward experts. |
 
 ## normalization
