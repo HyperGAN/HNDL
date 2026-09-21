@@ -1,0 +1,8 @@
+{
+  "title": "ResNet-18",
+  "description": "The 18-layer residual network: a 7×7/2 stem with max pooling, then four stages of two basic blocks at 64, 128, 256 and 512 channels, a global average pool, and one classifier whose 1000 outputs come from the output contract.",
+  "input_shape": ["B", 3, 224, 224],
+  "output_shape": ["B", 1000],
+  "parameters": 11689512,
+  "reference": "He et al., \"Deep Residual Learning for Image Recognition\" (CVPR 2016), configuration ResNet-18; the count equals torchvision.models.resnet18(), sum(p.numel() for p in m.parameters()) == 11,689,512, because hndl's resblock is torchvision's BasicBlock — bias-free 3×3 convolutions with batch norm, and a 1×1 convolution plus norm on each downsampling shortcut."
+}
