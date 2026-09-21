@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-09-21)
+
+A patch release for HyperGAN's migration: cast networks check inputs in the
+dtype they were cast to, and provider checkpoints read tensors through
+host-registered readouts.
 
 - **Networks follow `.double()`, `.half()` and `.to(dtype=...)`.** Casting a
   built network casts its parameters, and now its runtime contract as well: a
