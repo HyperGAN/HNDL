@@ -83,7 +83,9 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`cls_token`](cls_token.md) | Prepend one learned classification token to a sequence. |
 | [`cross_attention`](cross_attention.md) | Multi-head attention with queries from one sequence and keys and values from another. |
 | [`embedding`](embedding.md) | Look up a learned vector for every integer token id. |
+| [`feed_forward`](feed_forward.md) | Transformer feed-forward block: widen, activate, project back. |
 | [`pos_embed`](pos_embed.md) | Add a learned position vector to every position of a sequence. |
+| [`swiglu`](swiglu.md) | SwiGLU feed-forward block: a SiLU-gated projection folded back to the input width. |
 
 ## shape
 
