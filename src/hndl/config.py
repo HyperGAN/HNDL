@@ -180,7 +180,8 @@ def _parse(source, aliases):
 
 
 def _interpret(program, capture):
-    locals_ = {"x": capture.input}
+    # Every declared external input is prebound as a local tensor variable.
+    locals_ = dict(capture.inputs)
 
     def evaluate(expression):
         kind = expression["kind"]
@@ -214,6 +215,10 @@ def _interpret(program, capture):
                 locals_.update(zip(names, value))
             else:
                 locals_[names[0]] = value
+    if capture.named_outputs:
+        # Named outputs are selected by binding each declared name as a local.
+        return capture.finish({name: locals_[name] for name in capture.output_contracts
+                               if name in locals_})
     return capture.finish(locals_.get("out", _DEFAULT))
 
 
