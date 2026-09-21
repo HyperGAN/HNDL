@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+- **`attention` learns a 2D relative-position bias.** With
+  `attention(4, spatial_shape=(16, 16), relative_position_bias=True)` the
+  `[B, T, D]` sequence is read as a row-major `H x W` token grid --- token `t`
+  sits at `row = t // W`, `col = t % W` --- and each head learns one bias per
+  query-minus-key offset, the Swin/ViT/TransGAN construction. The learned
+  parameter is `relative_position_bias_table`, of shape
+  `[(2H-1)*(2W-1), heads]`, gathered through a precomputed `[T, T]` index into
+  a `[heads, T, T]` bias that is added to the scaled logits before the softmax.
+  The bias reaches the kernel as an additive `attn_mask`, so
+  `scaled_dot_product_attention` still picks a fused kernel; with
+  `causal=True` as well, the causal `-inf` mask and the bias are summed into
+  one additive mask rather than handed to the kernel separately. The table is
+  constructed at `0.0`, so the layer starts as ordinary attention, and
+  construction overrides target it by name
+  (`init={"relative_position_bias_table": 0.02}`,
+  `trainable={"relative_position_bias_table": False}`). The index is a
+  non-persistent `int64` buffer rebuilt from `spatial_shape`, so it stays out
+  of checkpoints. `H*W` must equal `T`: a grid that does not cover the
+  sequence is `E_CONSTRAINT` at resolution rather than a silent broadcast, and
+  `relative_position_bias=True` without a positive `spatial_shape` --- or a
+  `spatial_shape` without `relative_position_bias=True` --- is `E_ARGUMENT`.
+  The operator carries no windowing of its own: partition a map into windows
+  with `chunk`, reassemble it with `concat`, and give the node the `(H, W)` of
+  one window.
+
+- **`attention` gains per-projection bias flags.** `qkv_bias` and `out_bias`
+  narrow the existing `bias` flag: `q_proj`, `k_proj` and `v_proj` carry a
+  bias when `bias and qkv_bias`, and `o_proj` when `bias and out_bias`. Both
+  default to `True`, so `bias=` on its own behaves exactly as it did --- one
+  flag for all four projections --- while
+  `attention(4, qkv_bias=False, out_bias=True)` gives the unbiased
+  query/key/value projections with a biased output that ViT-style blocks use.
+  A projection built without a bias has no `bias` parameter at all, so its
+  `state_dict` is unchanged from `bias=False`.
+
+- **Plan format: `attention` nodes carry four more arguments.** `qkv_bias`,
+  `out_bias`, `relative_position_bias` and `spatial_shape` are concrete on
+  every resolved `attention` node, so a plan saved by 0.5.0 that contains an
+  `attention` node no longer matches its own digest and must be re-resolved
+  from its configuration; the configuration itself is unchanged. Plans without
+  an `attention` node encode and digest exactly as they did.
+
 ## 0.5.0 (2026-09-21)
 
 A minor release adding a first-class `spatial_attention` operator and an
