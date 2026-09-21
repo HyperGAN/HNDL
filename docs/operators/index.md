@@ -7,6 +7,7 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
+| [`clamp`](clamp.md) | Saturate every element into the closed interval [min, max]. |
 | [`dropout`](dropout.md) | Randomly zero elements during training and rescale the rest. |
 | [`leaky_relu`](leaky_relu.md) | ReLU with a small slope for negative inputs. |
 | [`relu`](relu.md) | Rectified linear unit, max(x, 0). |
@@ -61,6 +62,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | --- | --- |
 | [`flatten`](flatten.md) | Collapse every non-batch axis into one feature axis. |
 | [`mean`](mean.md) | Average one non-batch axis away. |
+| [`pad`](pad.md) | Enlarge trailing axes with constant, reflected, or replicated borders. |
 | [`reshape`](reshape.md) | View the tensor with new non-batch dimensions, preserving the element count. |
 | [`split`](split.md) | Cut one axis into a first section and the remainder. |
 | [`sum`](sum.md) | Add up one non-batch axis. |
