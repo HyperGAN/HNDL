@@ -8,7 +8,7 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev]'
 python -m pytest
-ruff check src tests examples
+ruff check src tests examples scripts
 python -m hndl.docs --check
 ```
 
@@ -34,6 +34,23 @@ python -m twine check --strict dist/*
 The distribution version lives in `pyproject.toml` and
 `src/hndl/_version.py`; update both together, and record the release in
 `CHANGELOG.md`. Building a distribution does not publish it to PyPI.
+
+## Documentation site
+
+<https://hypergan.github.io/HNDL/> is built with MkDocs and the Material theme
+from the Markdown already in the repository. Build it locally with:
+
+```sh
+python -m pip install -e '.[docs]'
+mkdocs serve
+```
+
+`mkdocs.yml` configures the site and `scripts/gen_doc_pages.py` stages the root
+Markdown files into it, rewriting their repository-relative links and
+generating the navigation from `docs/operators/index.md` — a new operator
+appears on the site as soon as `python -m hndl.docs` regenerates that page, with
+no edit to `mkdocs.yml`. Pull requests run `mkdocs build --strict`, which fails
+on a broken internal link; pushes to `master` deploy the site.
 
 ## Publishing
 
