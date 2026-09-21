@@ -168,7 +168,10 @@ modules; it cannot confirm a trusted module's actual parameter names.
 Constants must be finite numbers other than booleans, within float32 range;
 they are rounded to float32 in the plan. Underflow rounds to zero, and the sign
 of zero is preserved. Trainability values must be booleans.
-Aliased parameters cannot receive conflicting declarations.
+Aliased parameters cannot receive conflicting declarations. Constant targets
+must materialize as float32, and cannot share storage with a distinct parameter
+or a registered buffer. Trainability changes touching shared storage require
+consistent effective flags across the parameters using it.
 
 Initialization overrides run under `no_grad` after parameters are materialized.
 Normal constructor initialization still consumes RNG draws even for overridden
