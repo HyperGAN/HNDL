@@ -56,6 +56,12 @@ are generated from those declarations by `python -m hndl.docs`.
 | --- | --- |
 | [`pretrained`](pretrained.md) | Load a pretrained network from disk or the Hugging Face Hub as one frozen node. |
 
+## sequence
+
+| Operator | Summary |
+| --- | --- |
+| [`attention`](attention.md) | Multi-head self-attention over a [B, T, D] sequence. |
+
 ## shape
 
 | Operator | Summary |
