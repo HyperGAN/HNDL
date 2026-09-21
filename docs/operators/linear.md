@@ -1,19 +1,19 @@
 # `linear`
 
-Fully connected layer: a learned affine map on the feature axis.
+Fully connected layer: a learned affine map on the last axis.
 
 **Category:** core · **Identity:** `linear@1`
 
 ## Shape
 
 ```text
-x[B, D_in] -> out[B, D_out]
+x[B, ..., D_in] -> out[B, ..., D_out]
 ```
 
 | Port | Direction | Pattern | dtype |
 | --- | --- | --- | --- |
-| `x` | input | `x[B, D_in]` | compute |
-| `out` | output | `out[B, D_out]` | compute |
+| `x` | input | `x[B, ..., D_in]` | compute |
+| `out` | output | `out[B, ..., D_out]` | compute |
 
 ## Arguments
 
@@ -26,8 +26,9 @@ x[B, D_in] -> out[B, D_out]
 ## Description
 
 Computes ``out = x @ weight.T + bias`` with ``weight`` of shape
-``[out_features, in_features]``. No activation is applied; add one
-explicitly. Parameters are ``weight`` and, when enabled, ``bias``.
+``[out_features, in_features]``, applied to the last axis of ``[B, D]``
+or ``[B, T, D]`` inputs. No activation is applied; add one explicitly.
+Parameters are ``weight`` and, when enabled, ``bias``.
 
 ## Examples
 
@@ -68,3 +69,25 @@ index  name  operation  input shapes  output shapes
 ```
 
 Parameters: 512
+
+### Example 3
+
+On a [B, T, D] sequence the map applies to every position.
+
+```python
+linear(64)
+relu()
+linear()
+```
+
+Input `['B', 16, 32]` → output `['B', 16, 8]`.
+
+```text
+Network: [B, 16, 32] -> [B, 16, 8]  dtype=float32
+index  name  operation  input shapes   output shapes
+0      n0    linear     x=[B, 16, 32]  out=[B, 16, 64]
+1      n1    relu       x=[B, 16, 64]  out=[B, 16, 64]
+2      n2    linear     x=[B, 16, 64]  out=[B, 16, 8]
+```
+
+Parameters: 2,632

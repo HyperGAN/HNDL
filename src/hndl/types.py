@@ -68,11 +68,14 @@ class Graph:
     output_ref: str
     dtype: str = "float32"
     frontend: str = "python_config@1"
+    input_dtype: object = None
 
     def __post_init__(self):
         object.__setattr__(self, "nodes", tuple(self.nodes))
         object.__setattr__(self, "input_shape", tuple(self.input_shape))
         object.__setattr__(self, "output_shape", tuple(self.output_shape))
+        if self.input_dtype is None:
+            object.__setattr__(self, "input_dtype", self.dtype)
 
 
 @dataclass(frozen=True)
@@ -108,11 +111,14 @@ class ResolvedPlan:
     registry: object = field(default=None, repr=False, compare=False)
     schema_version: int = 1
     resolution_version: int = 1
+    input_dtype: object = None
 
     def __post_init__(self):
         object.__setattr__(self, "nodes", tuple(self.nodes))
         object.__setattr__(self, "input_shape", tuple(self.input_shape))
         object.__setattr__(self, "output_shape", tuple(self.output_shape))
+        if self.input_dtype is None:
+            object.__setattr__(self, "input_dtype", self.dtype)
 
     def _data(self, *, semantic=False):
         data = {
@@ -120,7 +126,7 @@ class ResolvedPlan:
             "resolution_version": self.resolution_version,
             "nodes": [node.to_dict(semantic=semantic) for node in self.nodes],
             "input_shape": list(self.input_shape), "output_shape": list(self.output_shape),
-            "output_ref": self.output_ref, "dtype": self.dtype,
+            "output_ref": self.output_ref, "dtype": self.dtype, "input_dtype": self.input_dtype,
         }
         if not semantic:
             data["frontend"] = self.frontend
@@ -153,7 +159,7 @@ class ResolvedPlan:
             if not isinstance(data, dict):
                 raise ValueError("plan must be an object")
             expected = {"schema_version", "resolution_version", "nodes", "input_shape", "output_shape",
-                        "output_ref", "dtype", "frontend", "semantic_digest", "artifact_digest"}
+                        "output_ref", "dtype", "input_dtype", "frontend", "semantic_digest", "artifact_digest"}
             if set(data) != expected:
                 raise ValueError("unexpected or missing plan fields")
             if (type(data["schema_version"]) is not int or data["schema_version"] != 1
@@ -195,7 +201,10 @@ class ResolvedPlan:
     def __repr__(self):
         def shape(value):
             return "[" + ", ".join(str(part) for part in value) + "]"
-        lines = [f"Network: {shape(self.input_shape)} -> {shape(self.output_shape)}  dtype={self.dtype}"]
+        header = f"Network: {shape(self.input_shape)} -> {shape(self.output_shape)}  dtype={self.dtype}"
+        if self.input_dtype != self.dtype:
+            header += f"  input_dtype={self.input_dtype}"
+        lines = [header]
         rows = [("index", "name", "operation", "input shapes", "output shapes")]
         for index, node in enumerate(self.nodes):
             inputs = ", ".join(f"{key}={shape(value)}" for key, value in node.input_shapes.items())

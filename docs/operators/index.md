@@ -22,7 +22,7 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
-| [`linear`](linear.md) | Fully connected layer: a learned affine map on the feature axis. |
+| [`linear`](linear.md) | Fully connected layer: a learned affine map on the last axis. |
 
 ## join
 

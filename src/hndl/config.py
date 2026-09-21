@@ -217,24 +217,25 @@ def _interpret(program, capture):
     return capture.finish(locals_.get("out", _DEFAULT))
 
 
-def capture_config(source, *, input_shape, output_shape, dtype="float32", registry=None, limits=None):
+def capture_config(source, *, input_shape, output_shape, dtype="float32", registry=None, limits=None,
+                   input_dtype=None):
     registry = Registry.builtins() if registry is None else registry
     program = _parse(source, registry.aliases)
     with Capture(input_shape=input_shape, output_shape=output_shape, dtype=dtype,
-                 registry=registry, frontend="python_config@1", limits=limits) as capture:
+                 registry=registry, frontend="python_config@1", limits=limits, input_dtype=input_dtype) as capture:
         return _interpret(program, capture)
 
 
-def resolve(source, *, input_shape, output_shape, dtype="float32", registry=None, limits=None):
+def resolve(source, *, input_shape, output_shape, dtype="float32", registry=None, limits=None, input_dtype=None):
     from .resolver import resolve_graph
 
     registry = Registry.builtins() if registry is None else registry
     graph = capture_config(source, input_shape=input_shape, output_shape=output_shape,
-                           dtype=dtype, registry=registry, limits=limits)
+                           dtype=dtype, registry=registry, limits=limits, input_dtype=input_dtype)
     return resolve_graph(graph, registry=registry, limits=limits)
 
 
-def resolve_file(path, *, input_shape, output_shape, dtype="float32", registry=None, limits=None):
+def resolve_file(path, *, input_shape, output_shape, dtype="float32", registry=None, limits=None, input_dtype=None):
     with open(path, "rb") as source_file:
         raw = source_file.read(MAX_SOURCE_BYTES + 1)
     if len(raw) > MAX_SOURCE_BYTES:
@@ -244,4 +245,4 @@ def resolve_file(path, *, input_shape, output_shape, dtype="float32", registry=N
     except UnicodeDecodeError:
         raise HNDLError("E_SYNTAX", "Configuration file is not valid UTF-8") from None
     return resolve(source, input_shape=input_shape, output_shape=output_shape,
-                   dtype=dtype, registry=registry, limits=limits)
+                   dtype=dtype, registry=registry, limits=limits, input_dtype=input_dtype)

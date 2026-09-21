@@ -42,10 +42,19 @@ uses a Python 3.11 grammar with an explicit AST allowlist in an isolated Linux
 worker. Unsupported platforms fail instead of falling back to in-process
 parsing. Native authoring executes trusted Python; it is not sandboxed.
 
-The backend requires PyTorch 2.6 or newer in the 2.x series. Plans use
-`float32`, with rank-two `BF` or rank-four `NCHW` shapes. Only the batch axis
-may be symbolic (`"B"`). Other dimensions and runtime batch sizes must be
-positive integers. The device is always caller-selected.
+The backend requires PyTorch 2.6 or newer in the 2.x series. Tensors have
+rank two `[B, F]`, rank three `[B, T, D]` (a sequence of `T` positions with
+`D` features; `linear`, normalizations, and activations act on the last axis),
+or rank four `[B, C, H, W]`. Only the batch axis may be symbolic (`"B"`).
+Other dimensions and runtime batch sizes must be positive integers. The device
+is always caller-selected.
+
+Plans carry a compute `dtype` of `float32` (default), `float16`, or
+`bfloat16`; parameters are constructed in that dtype and every floating tensor
+port must match it at runtime. Operators can declare integer ports, such as an
+embedding's `ids[B, T]:int64` input; pass `input_dtype="int64"` when the graph
+input is integer. Edge dtypes are checked at resolution (`E_DTYPE`), so an
+integer tensor cannot reach a floating-point port.
 
 Built-in unary operations take an optional leading tensor or `x=`. Custom
 unary operations use their declared input-port keyword. Every operator,

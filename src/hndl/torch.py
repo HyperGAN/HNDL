@@ -65,9 +65,18 @@ class GraphModule(nn.Module):
         self.plan = plan
         self.nodes = _NodeModules(modules)
         self._runtime_device = device
-        self._dtype = DTYPES[plan.dtype]
         self._chain = _is_chain(plan)
         self._port_orders = port_orders
+        self._input_dtype = DTYPES[plan.input_dtype]
+        self._port_dtypes = {}
+        produced = {"input:x": plan.input_dtype}
+        for node in plan.nodes:
+            spec = plan.registry.by_identity(node.op)
+            self._port_dtypes[node.id] = {port: DTYPES[spec.port_dtype(port, plan.dtype)]
+                                          for port in (*node.inputs, *node.outputs)}
+            for port in node.outputs:
+                produced[f"node:{node.id}/{port}"] = spec.port_dtype(port, plan.dtype)
+        self._output_dtype = DTYPES[produced[plan.output_ref]]
         self._state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
         self.build_receipt = MappingProxyType(receipt)
 
@@ -88,27 +97,28 @@ class GraphModule(nn.Module):
         self._runtime_device = probe.device
         return self
 
-    def _check(self, value, shape, batch, location):
+    def _check(self, value, shape, batch, location, dtype):
         if not isinstance(value, torch.Tensor):
             raise HNDLError("E_RUNTIME", f"{location} must be a tensor")
         expected = tuple(batch if isinstance(d, str) else d for d in shape)
         if tuple(value.shape) != expected or value.ndim == 0 or value.shape[0] <= 0:
             raise HNDLError("E_RUNTIME", f"{location}: expected shape {expected}, got {tuple(value.shape)}")
-        if value.dtype != self._dtype:
-            raise HNDLError("E_RUNTIME", f"{location}: expected dtype {self.plan.dtype}, got {value.dtype}")
+        if value.dtype != dtype:
+            raise HNDLError("E_RUNTIME", f"{location}: expected dtype {dtype}, got {value.dtype}")
         if value.device != self._runtime_device:
             raise HNDLError("E_RUNTIME", f"{location}: expected device {self._runtime_device}, got {value.device}")
 
     def _execute(self, x):
         batch = x.shape[0] if isinstance(x, torch.Tensor) and x.ndim else None
-        self._check(x, self.plan.input_shape, batch, "input:x")
+        self._check(x, self.plan.input_shape, batch, "input:x", self._input_dtype)
         values = {"input:x": x}
         for node in self.plan.nodes:
             bound = []
+            dtypes = self._port_dtypes[node.id]
             for port in self._port_orders[node.id]:
                 ref = node.inputs[port]
                 value = values[ref]
-                self._check(value, node.input_shapes[port], batch, f"{node.id}/{port}")
+                self._check(value, node.input_shapes[port], batch, f"{node.id}/{port}", dtypes[port])
                 bound.append(value)
             result = self.nodes[f"n_{node.id}"](*bound)
             if len(node.outputs) == 1:
@@ -120,10 +130,10 @@ class GraphModule(nn.Module):
             else:
                 raise HNDLError("E_RUNTIME", f"{node.id}: expected output ports {node.outputs}")
             for port, value in zip(node.outputs, results):
-                self._check(value, node.output_shapes[port], batch, f"{node.id}/{port}")
+                self._check(value, node.output_shapes[port], batch, f"{node.id}/{port}", dtypes[port])
                 values[f"node:{node.id}/{port}"] = value
         result = values[self.plan.output_ref]
-        self._check(result, self.plan.output_shape, batch, "output")
+        self._check(result, self.plan.output_shape, batch, "output", self._output_dtype)
         state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
         if state_names != self._state_names:
             raise HNDLError("E_RUNTIME", "A module created or removed registered state during forward")
@@ -168,8 +178,11 @@ class GraphModule(nn.Module):
             return op.split("@")[0]
 
     def __repr__(self):
-        lines = [f"{type(self).__name__}: {_shape_text(self.plan.input_shape)} -> "
-                 f"{_shape_text(self.plan.output_shape)}  dtype={self.plan.dtype}"]
+        header = (f"{type(self).__name__}: {_shape_text(self.plan.input_shape)} -> "
+                  f"{_shape_text(self.plan.output_shape)}  dtype={self.plan.dtype}")
+        if self.plan.input_dtype != self.plan.dtype:
+            header += f"  input_dtype={self.plan.input_dtype}"
+        lines = [header]
         rows = [("index", "name", "operation", "input shape", "output shape")
                 if self._chain else ("name", "operation", "input shapes", "output shapes")]
         for i, node in enumerate(self.plan.nodes):
@@ -346,7 +359,7 @@ def _prepare_parameter_settings(layer, node, dtype):
 
 
 def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None):
-    if plan.dtype not in DTYPES or plan.dtype not in ("float32",):
+    if plan.dtype not in ("float32", "float16", "bfloat16"):
         raise HNDLError("E_SCHEMA", f"Unsupported plan dtype {plan.dtype!r}")
     dtype = DTYPES[plan.dtype]
     device = torch.device(device)
@@ -431,34 +444,34 @@ def build(plan, *, device, initialization_seed=None, registry=None, limits=None)
 
 
 def _network(resolve_name, source, *, input_shape, output_shape, device,
-             dtype="float32", registry=None, initialization_seed=None, limits=None):
+             dtype="float32", registry=None, initialization_seed=None, limits=None, input_dtype=None):
     import hndl
     resolve = getattr(hndl, resolve_name)
     plan = resolve(source, input_shape=input_shape, output_shape=output_shape,
-                   dtype=dtype, registry=registry, limits=limits)
+                   dtype=dtype, registry=registry, limits=limits, input_dtype=input_dtype)
     return _build(plan, device=device, initialization_seed=initialization_seed,
                   registry=registry, facade=True, limits=limits)
 
 
 def network(source, *, input_shape, output_shape, device, dtype="float32",
-            registry=None, initialization_seed=None, limits=None):
+            registry=None, initialization_seed=None, limits=None, input_dtype=None):
     """Resolve declarative source and return a tensor-in/tensor-out module."""
     return _network("resolve", source, input_shape=input_shape, output_shape=output_shape,
                     device=device, dtype=dtype, registry=registry,
-                    initialization_seed=initialization_seed, limits=limits)
+                    initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
 
 
 def network_file(path, *, input_shape, output_shape, device, dtype="float32",
-                 registry=None, initialization_seed=None, limits=None):
+                 registry=None, initialization_seed=None, limits=None, input_dtype=None):
     """Read declarative UTF-8 source and construct its resolved network."""
     return _network("resolve_file", path, input_shape=input_shape, output_shape=output_shape,
                     device=device, dtype=dtype, registry=registry,
-                    initialization_seed=initialization_seed, limits=limits)
+                    initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
 
 
 def network_from_callable(fn, *, input_shape, output_shape, device, dtype="float32",
-                          registry=None, initialization_seed=None, limits=None):
+                          registry=None, initialization_seed=None, limits=None, input_dtype=None):
     """Capture trusted Python exactly once, then construct the resolved network."""
     return _network("resolve_callable", fn, input_shape=input_shape, output_shape=output_shape,
                     device=device, dtype=dtype, registry=registry,
-                    initialization_seed=initialization_seed, limits=limits)
+                    initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)

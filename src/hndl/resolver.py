@@ -6,7 +6,7 @@ from math import prod
 import re
 
 from .errors import HNDLError
-from .operator import ELLIPSIS, NodeView, SUPPORTED_RANKS, Sym
+from .operator import COMPUTE_DTYPES, ELLIPSIS, INDEX_DTYPES, NodeView, SUPPORTED_RANKS, Sym
 from .registry import Registry, normalize_arguments
 from .types import Graph, Node, ResolvedNode, ResolvedPlan
 
@@ -124,6 +124,16 @@ def _ordered_nodes(graph, registry, limits):
     dead = set(lookup) - reachable
     if dead:
         raise HNDLError("E_BINDING", f"Nodes do not reach the selected output: {', '.join(sorted(dead))}")
+    # Port dtypes are static per operator; check every edge once.
+    dtypes = {"input:x": graph.input_dtype}
+    for node in ordered:
+        spec = specs[node.id]
+        for port, ref in node.inputs.items():
+            expected = spec.port_dtype(port, graph.dtype)
+            if dtypes[ref] != expected:
+                raise HNDLError("E_DTYPE", f"Port {port} expects {expected} but {ref} carries {dtypes[ref]}", node=node.id)
+        for port in node.outputs:
+            dtypes[f"node:{node.id}/{port}"] = spec.port_dtype(port, graph.dtype)
     return ordered, specs
 
 
@@ -354,8 +364,12 @@ def resolve_graph(graph, registry=None, limits=None):
     if not isinstance(registry, Registry):
         raise HNDLError("E_REGISTRY", "registry must be an explicit Registry")
     limits = _limits(limits)
-    if graph.dtype != "float32":
-        raise HNDLError("E_SCHEMA", "Only float32 is qualified in this initial implementation")
+    if graph.dtype not in COMPUTE_DTYPES:
+        raise HNDLError("E_SCHEMA", f"dtype must be one of {', '.join(COMPUTE_DTYPES)}")
+    if graph.input_dtype not in COMPUTE_DTYPES + INDEX_DTYPES:
+        raise HNDLError("E_SCHEMA", f"input_dtype must be one of {', '.join(COMPUTE_DTYPES + INDEX_DTYPES)}")
+    if graph.input_dtype in COMPUTE_DTYPES and graph.input_dtype != graph.dtype:
+        raise HNDLError("E_SCHEMA", "A floating-point input_dtype must equal the plan dtype")
     if not isinstance(graph.frontend, str) or len(graph.frontend) > 256:
         raise HNDLError("E_SCHEMA", "Frontend provenance must be a bounded string")
     input_shape = _contract(graph.input_shape, "input_shape", limits)
@@ -365,7 +379,8 @@ def resolve_graph(graph, registry=None, limits=None):
     nodes, specs = _ordered_nodes(graph, registry, limits)
     solver = _Solver(graph, nodes, specs, limits)
     resolved = solver.run()
-    return ResolvedPlan(resolved, input_shape, output_shape, graph.output_ref, graph.dtype, graph.frontend, registry)
+    return ResolvedPlan(resolved, input_shape, output_shape, graph.output_ref, graph.dtype, graph.frontend, registry,
+                        input_dtype=graph.input_dtype)
 
 
 def validate_concrete_plan(plan, *, registry=None, limits=None):
@@ -385,7 +400,8 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
             _contract(shape, f"{node.id} port", bounds)
     graph = Graph(tuple(Node(node.id, node.op, node.args, node.inputs, node.outputs, node.source,
                              initialization=node.initialization, trainability=node.trainability) for node in plan.nodes),
-                  plan.input_shape, plan.output_shape, plan.output_ref, plan.dtype, plan.frontend)
+                  plan.input_shape, plan.output_shape, plan.output_ref, plan.dtype, plan.frontend,
+                  input_dtype=plan.input_dtype)
     verified = resolve_graph(graph, registry, bounds)
     if plan.semantic_digest != verified.semantic_digest:
         raise HNDLError("E_INTEGRITY", "Saved concrete arguments and port shapes are inconsistent; no inferred replacement is accepted")

@@ -453,9 +453,9 @@ def test_required_scalar_types_bounds_and_default_expansion():
 
 @pytest.mark.parametrize("shape", [
     "x[C, B] -> out[B, C]", "x[1, C] -> out[B, C]", "x[B, 0] -> out[B, C]", "x[B, 0*C] -> out[B, C]",
-    "x[B, C, W] -> out[B, C]", "name[B, C] -> out[B, C]", "-> out[B, C]", "x[B, C]",
+    "x[B, C, H, W, D] -> out[B, C]", "name[B, C] -> out[B, C]", "-> out[B, C]", "x[B, C]",
     "x[B, C] -> out[B, C] -> y[B]", "x[B, ..., ...] -> out[B]", "x[..., B] -> out[B, C]",
-    "x[B, B] -> out[B, B]", "x[B, C, H, W, D] -> out[B, C]", "x[B, 2147483648] -> out[B, C]",
+    "x[B, B] -> out[B, B]", "x[B, 2147483648] -> out[B, C]", "x[B] -> out[B]",
     ", ".join(f"p{i}[B, C]" for i in range(33)) + " -> out[B, C]",
     "x*, y -> out", "x -> out*", "x[B, C]:float128 -> out[B, C]",
 ])

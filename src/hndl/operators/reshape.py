@@ -6,7 +6,7 @@ from ..operator import Arg, Example, INTS, MAX_DIMENSION_LITERAL, operator
 
 def _relation(s):
     prefix = s.args["shape"]
-    if len(prefix) >= 2:
+    if len(prefix) >= 3:
         s.rank("out", 4)
     shape = s.shape("out")
     if shape is not None:
@@ -44,6 +44,8 @@ def _finalize(args, input_shapes, output_shapes):
                 "Height and width are inferred from the element count and the output contract."),
         Example("reshape()\nlinear()", ("B", 2, 4, 4), ("B", 10),
                 "A bare reshape flattens when the consumer fixes rank 2."),
+        Example("reshape(16)\nlinear(8)", ("B", 64), ("B", 16, 8),
+                "A one-dimension prefix with a [B, T, D] consumer yields a sequence of 16 tokens."),
     ],
     category="shape",
 )
@@ -51,7 +53,9 @@ class Reshape(nn.Module):
     """Returns ``x.reshape(batch, *shape)``. The batch axis is never reshaped.
     Give the leading dimensions positionally, ``reshape(512, 4, 4)``, or as
     ``shape=(512, 4, 4)``; exactly one omitted factor can be solved from the
-    element count. The plan records the full resolved shape.
+    element count. Three leading dimensions fix an image ``[B, C, H, W]``;
+    shorter prefixes take their rank from the neighbouring operations. The
+    plan records the full resolved shape.
     """
 
     def __init__(self, shape):

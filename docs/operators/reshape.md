@@ -30,7 +30,9 @@ Positional values fill `shape`.
 Returns ``x.reshape(batch, *shape)``. The batch axis is never reshaped.
 Give the leading dimensions positionally, ``reshape(512, 4, 4)``, or as
 ``shape=(512, 4, 4)``; exactly one omitted factor can be solved from the
-element count. The plan records the full resolved shape.
+element count. Three leading dimensions fix an image ``[B, C, H, W]``;
+shorter prefixes take their rank from the neighbouring operations. The
+plan records the full resolved shape.
 
 ## Examples
 
@@ -93,3 +95,23 @@ index  name  operation  input shapes    output shapes
 ```
 
 Parameters: 330
+
+### Example 4
+
+A one-dimension prefix with a [B, T, D] consumer yields a sequence of 16 tokens.
+
+```python
+reshape(16)
+linear(8)
+```
+
+Input `['B', 64]` → output `['B', 16, 8]`.
+
+```text
+Network: [B, 64] -> [B, 16, 8]  dtype=float32
+index  name  operation  input shapes  output shapes
+0      n0    reshape    x=[B, 64]     out=[B, 16, 4]
+1      n1    linear     x=[B, 16, 4]  out=[B, 16, 8]
+```
+
+Parameters: 40
