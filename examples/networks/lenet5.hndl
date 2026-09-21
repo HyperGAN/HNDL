@@ -1,0 +1,22 @@
+# LeNet-5 (LeCun et al. 1998) for 32×32 grayscale digits.
+# Valid 5×5 convolutions and 2×2 average pooling: 32 -> 28 -> 14 -> 10 -> 5.
+
+# C1/S2: six feature maps, then subsampling.
+conv(6, kernel_size=5, name="c1")
+tanh()
+avg_pool(2, name="s2")
+
+# C3/S4: sixteen feature maps, then subsampling. Leaves [B, 16, 5, 5].
+conv(16, kernel_size=5, name="c3")
+tanh()
+avg_pool(2, name="s4")
+
+# C5/F6: the classifier head over the 400 flattened features.
+flatten()
+linear(120, name="c5")
+tanh()
+linear(84, name="f6")
+tanh()
+
+# The output width is inferred from the contract (10 classes).
+linear(name="output")

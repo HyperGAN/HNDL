@@ -1,0 +1,8 @@
+{
+  "title": "LeNet-5",
+  "description": "The classic convolutional digit classifier: two 5×5 convolution and 2×2 average-pooling stages, then 120- and 84-unit tanh layers. The final width is inferred from the output contract.",
+  "input_shape": ["B", 1, 32, 32],
+  "output_shape": ["B", 10],
+  "parameters": 61706,
+  "reference": "LeCun et al., \"Gradient-Based Learning Applied to Document Recognition\" (Proc. IEEE, 1998), in the usual modern reading with fully connected C5/F6 layers; checked against the equivalent torch.nn stack: 156 + 2,416 + 48,120 + 10,164 + 850 = 61,706 parameters."
+}
