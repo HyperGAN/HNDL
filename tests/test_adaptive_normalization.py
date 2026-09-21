@@ -232,6 +232,59 @@ def test_custom_bound_applies_after_dtype_materialization_and_versions_stay_exac
         build(plan, device="cpu", registry=registry)
 
 
+@pytest.mark.parametrize("reuse", ["module", "submodule", "parameter", "buffer", "storage"])
+def test_custom_builder_rejects_accidental_sharing_between_nodes(reuse):
+    registry = Registry.builtins()
+    registry.register("shared", identity="example.shared", version=1,
+                      shape=preserves_shape, max_state_bytes=16)
+    shared_module = nn.Identity()
+    shared_tensor = torch.ones(4)
+    shared_parameter = nn.Parameter(shared_tensor)
+
+    class Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            if reuse == "submodule":
+                self.inner = shared_module
+            elif reuse == "parameter":
+                self.weight = shared_parameter
+            elif reuse == "buffer":
+                self.register_buffer("buffer", shared_tensor)
+            elif reuse == "storage":
+                self.weight = nn.Parameter(shared_tensor.view(4))
+
+        def forward(self, x):
+            raise AssertionError("Construction must reject sharing before any forward call")
+
+    factory = (lambda: shared_module) if reuse == "module" else Layer
+    register_torch(registry, "shared", module=factory, state_version=1)
+    with pytest.raises(HNDLError, match="E_REGISTRY.*independent instance"):
+        network("shared(); shared()", input_shape=("B", 4), output_shape=("B", 4),
+                device="cpu", registry=registry)
+
+
+def test_internal_aliases_and_empty_storages_do_not_imply_cross_node_sharing():
+    registry = Registry.builtins()
+    registry.register("valid", identity="example.valid", version=1,
+                      shape=preserves_shape, max_state_bytes=16)
+
+    class Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(4))
+            self.alias = self.weight
+            self.register_buffer("empty", torch.empty(0))
+
+        def forward(self, x):
+            return x * self.weight
+
+    register_torch(registry, "valid", module=Layer, state_version=1)
+    model = network("valid(); valid()", input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=registry)
+    assert model[0] is not model[1] and model[:][0] is model[0]
+    torch.testing.assert_close(model(torch.ones(2, 4)), torch.ones(2, 4))
+
+
 def test_example_runs_as_script():
     result = subprocess.run([sys.executable, "examples/adaptive_normalization.py", "--device", "cpu"],
                             check=True, capture_output=True, text=True, timeout=30)
