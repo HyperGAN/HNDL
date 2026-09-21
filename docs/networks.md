@@ -35,3 +35,51 @@ index  name  operation  input shapes      output shapes
 ```
 
 Parameters: 235,146. Classic MNIST baseline; 784·256+256 + 256·128+128 + 128·10+10 = 235,146 parameters.
+
+## Tiny Vision Transformer
+
+A ViT-Tiny-shaped classifier for 32×32 RGB images: a 4×4 patch stem of width 192, a learned class token and position table, four pre-norm transformer blocks with 3 heads, then a final layer norm and a linear head read off the class position.
+
+`examples/networks/vit_tiny.hndl`
+
+```python
+# A tiny Vision Transformer (ViT) for 32x32 RGB images.
+# Width 192, depth 4, 3 heads (head width 64) — ViT-Tiny proportions at CIFAR scale.
+
+# Stem: 4x4 patches of a 32x32 image give (32/4)*(32/4) = 64 tokens of width 192.
+patch_embed(192, 4, name="patches")
+
+# Prepend the learned [CLS] summary position, then add absolute positions.
+cls_token(name="cls")
+pos_embed(65)                      # 64 patch tokens + the class token
+
+# Encoder: four pre-norm blocks, gelu feed-forward of width 4*192 = 768.
+transformer_block(3, mlp_ratio=4)
+transformer_block(3, mlp_ratio=4)
+transformer_block(3, mlp_ratio=4)
+transformer_block(3, mlp_ratio=4)
+
+# Head: normalize, read the class position, classify.
+layer_norm(name="final_norm")
+pool_tokens("first")
+linear()                           # 10 classes, inferred from the output contract
+```
+
+Input `['B', 3, 32, 32]` → output `['B', 10]`.
+
+```text
+Network: [B, 3, 32, 32] -> [B, 10]  dtype=float32
+index  name        operation          input shapes      output shapes
+0      patches     patch_embed        x=[B, 3, 32, 32]  out=[B, 64, 192]
+1      cls         cls_token          x=[B, 64, 192]    out=[B, 65, 192]
+2      n2          pos_embed          x=[B, 65, 192]    out=[B, 65, 192]
+3      n3          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
+4      n4          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
+5      n5          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
+6      n6          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
+7      final_norm  layer_norm         x=[B, 65, 192]    out=[B, 65, 192]
+8      n8          pool_tokens        x=[B, 65, 192]    out=[B, 192]
+9      n9          linear             x=[B, 192]        out=[B, 10]
+```
+
+Parameters: 1,803,850. Dosovitskiy et al. 2020, "An Image Is Worth 16x16 Words" (ViT), in the ViT-Tiny configuration (width 192, 3 heads, mlp_ratio 4) at depth 4 with a 4×4 patch stem on 32×32 inputs; checked against an equivalent plain-PyTorch build: 9,408 stem + 192 class token + 12,480 positions + 4·444,864 blocks + 384 final norm + 1,930 head = 1,803,850.

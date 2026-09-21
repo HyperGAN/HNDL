@@ -1,0 +1,20 @@
+# A tiny Vision Transformer (ViT) for 32x32 RGB images.
+# Width 192, depth 4, 3 heads (head width 64) — ViT-Tiny proportions at CIFAR scale.
+
+# Stem: 4x4 patches of a 32x32 image give (32/4)*(32/4) = 64 tokens of width 192.
+patch_embed(192, 4, name="patches")
+
+# Prepend the learned [CLS] summary position, then add absolute positions.
+cls_token(name="cls")
+pos_embed(65)                      # 64 patch tokens + the class token
+
+# Encoder: four pre-norm blocks, gelu feed-forward of width 4*192 = 768.
+transformer_block(3, mlp_ratio=4)
+transformer_block(3, mlp_ratio=4)
+transformer_block(3, mlp_ratio=4)
+transformer_block(3, mlp_ratio=4)
+
+# Head: normalize, read the class position, classify.
+layer_norm(name="final_norm")
+pool_tokens("first")
+linear()                           # 10 classes, inferred from the output contract
