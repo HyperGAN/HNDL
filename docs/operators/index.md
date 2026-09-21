@@ -12,6 +12,14 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`relu`](relu.md) | Rectified linear unit, max(x, 0). |
 | [`tanh`](tanh.md) | Hyperbolic tangent, squashing values into (-1, 1). |
 
+## arithmetic
+
+| Operator | Summary |
+| --- | --- |
+| [`mul`](mul.md) | Elementwise product of two tensors with identical shapes. |
+| [`scale`](scale.md) | Multiply a tensor by a fixed scalar. |
+| [`sub`](sub.md) | Elementwise difference of two tensors with identical shapes. |
+
 ## convolution
 
 | Operator | Summary |
