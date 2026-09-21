@@ -49,6 +49,62 @@ index  name            operation  input shapes      output shapes
 
 Parameters: 209,968. Classic MNIST autoencoder with a 784-128-32-128-784 stack; 784·128+128 + 128·32+32 + 32·128+128 + 128·784+784 = 209,968 parameters, cross-checked against the equivalent torch.nn.Sequential.
 
+## DCGAN discriminator
+
+The DCGAN discriminator for 64×64 RGB images: four "down2" convolutions with leaky ReLU, batch-normalized after the first stage, reduce the image to a 512×4×4 map that is flattened and projected to a single logit. The output is a raw score — apply a sigmoid, or use BCEWithLogitsLoss, in the loss rather than in the network.
+
+`examples/networks/dcgan_discriminator.hndl`
+
+```python
+# DCGAN discriminator (Radford et al., 2015) for 64x64 RGB images.
+# Four strided convolutions halve the image each time: 64 -> 32 -> 16 -> 8 -> 4.
+# The "down2" policy supplies the canonical kernel 4, stride 2, padding 1.
+
+# The first stage has no normalization, so it keeps its bias.
+conv(64, policy="down2", name="stage1")
+leaky_relu(0.2)
+
+# Every later stage is conv -> batch_norm -> leaky_relu. batch_norm's own bias
+# makes the convolution bias redundant, so bias=False there.
+conv(128, policy="down2", bias=False, name="stage2")
+batch_norm()
+leaky_relu(0.2)
+
+conv(256, policy="down2", bias=False, name="stage3")
+batch_norm()
+leaky_relu(0.2)
+
+conv(512, policy="down2", bias=False, name="stage4")
+batch_norm()
+leaky_relu(0.2)
+
+# The 512x4x4 map flattens to 8192; the head's width follows the output contract.
+flatten()
+linear(name="logit")
+```
+
+Input `['B', 3, 64, 64]` → output `['B', 1]`.
+
+```text
+Network: [B, 3, 64, 64] -> [B, 1]  dtype=float32
+index  name    operation   input shapes        output shapes
+0      stage1  conv        x=[B, 3, 64, 64]    out=[B, 64, 32, 32]
+1      n1      leaky_relu  x=[B, 64, 32, 32]   out=[B, 64, 32, 32]
+2      stage2  conv        x=[B, 64, 32, 32]   out=[B, 128, 16, 16]
+3      n3      batch_norm  x=[B, 128, 16, 16]  out=[B, 128, 16, 16]
+4      n4      leaky_relu  x=[B, 128, 16, 16]  out=[B, 128, 16, 16]
+5      stage3  conv        x=[B, 128, 16, 16]  out=[B, 256, 8, 8]
+6      n6      batch_norm  x=[B, 256, 8, 8]    out=[B, 256, 8, 8]
+7      n7      leaky_relu  x=[B, 256, 8, 8]    out=[B, 256, 8, 8]
+8      stage4  conv        x=[B, 256, 8, 8]    out=[B, 512, 4, 4]
+9      n9      batch_norm  x=[B, 512, 4, 4]    out=[B, 512, 4, 4]
+10     n10     leaky_relu  x=[B, 512, 4, 4]    out=[B, 512, 4, 4]
+11     n11     flatten     x=[B, 512, 4, 4]    out=[B, 8192]
+12     logit   linear      x=[B, 8192]         out=[B, 1]
+```
+
+Parameters: 2,765,633. Radford, Metz & Chintala, "Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks" (2015), in the form of the PyTorch DCGAN example; the count was checked against the equivalent torch.nn stack — 3·64·4·4+64 + 64·128·4·4 + 2·128 + 128·256·4·4 + 2·256 + 256·512·4·4 + 2·512 + 8192+1 = 2,765,633.
+
 ## Tiny GPT
 
 A 64-token GPT-2-style decoder: learned token and position embeddings, four causal pre-norm transformer blocks with a tanh-approximated GELU feed-forward, a final layer norm, and an untied language-model head whose width is inferred from the output contract.
