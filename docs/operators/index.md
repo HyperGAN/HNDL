@@ -77,6 +77,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | --- | --- |
 | [`attention`](attention.md) | Multi-head self-attention over a [B, T, D] sequence. |
 | [`cls_token`](cls_token.md) | Prepend one learned classification token to a sequence. |
+| [`cross_attention`](cross_attention.md) | Multi-head attention with queries from one sequence and keys and values from another. |
 | [`embedding`](embedding.md) | Look up a learned vector for every integer token id. |
 | [`pos_embed`](pos_embed.md) | Add a learned position vector to every position of a sequence. |
 
