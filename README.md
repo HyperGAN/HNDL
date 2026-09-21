@@ -4,7 +4,7 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: 0.2.0.** Config strings, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 63 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
+**Status: 0.2.1.** Config strings, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 63 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
 
 Install on Linux with Python 3.11–3.14:
 
