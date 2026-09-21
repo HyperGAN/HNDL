@@ -112,9 +112,10 @@ def _shape_text(shape):
 def _is_chain(plan):
     previous = "input:x"
     for node in plan.nodes:
-        if dict(node.inputs) != {"x": previous} or tuple(node.outputs) != ("out",):
+        if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
+                or len(node.outputs) != 1):
             return False
-        previous = f"node:{node.id}/out"
+        previous = f"node:{node.id}/{node.outputs[0]}"
     return plan.output_ref == previous
 
 
@@ -230,7 +231,8 @@ class GraphModule(nn.Module):
             operation = {"conv2d": "conv", "conv_transpose2d": "deconv"}.get(operation, operation)
             if self._chain:
                 rows.append((str(i), node.id, operation,
-                             _shape_text(node.input_shapes["x"]), _shape_text(node.output_shapes["out"])))
+                             _shape_text(next(iter(node.input_shapes.values()))),
+                             _shape_text(next(iter(node.output_shapes.values())))))
             else:
                 inputs = ", ".join(f"{p}={node.inputs[p]}:{_shape_text(s)}" for p, s in node.input_shapes.items())
                 outputs = ", ".join(f"{p}={_shape_text(s)}" for p, s in node.output_shapes.items())
@@ -352,6 +354,8 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
                 if _state_bytes(layer) > node.state_bytes:
                     raise HNDLError("E_RESOURCE", f"{node.id}: registered parameter/buffer storage exceeds declared {node.state_bytes} bytes")
                 layer = layer.to(device=device, dtype=torch.float32)
+                if _state_bytes(layer) > node.state_bytes:
+                    raise HNDLError("E_RESOURCE", f"{node.id}: materialized parameter/buffer storage exceeds declared {node.state_bytes} bytes")
             else:
                 layer = _builtin(node, device)
                 if layer is None:
