@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.1 (2026-09-21)
+
+A documentation and packaging release. No library code changed.
+
+- **Install from PyPI.** The README now installs with `pip install hndl` and
+  links to the documentation site.
+- **DCGAN-style generator example.** The transposed-convolution settings are
+  spelled out instead of relying on `policy="up2"`.
+- **Documentation site.** Published at <https://hypergan.github.io/HNDL/>, built
+  with MkDocs and deployed from `master` by `docs.yml`.
+- **Release workflow.** PyPI publishing supports either an API token secret or
+  Trusted Publishing.
+
 ## 0.1.0 (2026-09-21)
 
 The first release of HNDL, the human-readable network definition language.

@@ -1,4 +1,4 @@
-# Implementation notes: 0.1.0
+# Implementation notes: 0.1.1
 
 This release implements the contract in [SPEC.md](SPEC.md). [README.md](README.md)
 introduces the APIs with examples; the [operator catalog](docs/operators/index.md)
