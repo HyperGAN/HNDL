@@ -6,13 +6,15 @@ Write your network in Python syntax, as a declarative config or a Python functio
 
 **Status: 0.1.0.** Config strings, native Python functions, bidirectional shape inference, branches, a catalog of 59 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](docs/operators/index.md), the [authored networks](docs/networks.md), and the [implementation notes](IMPLEMENTATION.md). Diagnostics below are illustrative.
 
-From a checkout, install on Linux with Python 3.11–3.14:
+Install on Linux with Python 3.11–3.14:
 
 ```sh
-python -m pip install -e .
+python -m pip install hndl
 ```
 
-PyTorch is a dependency. CPU and CUDA devices are supported; select the device explicitly. Wheel and source distributions are built by CI. PyPI publication requires the one-time setup described in [CONTRIBUTING.md](CONTRIBUTING.md#publishing).
+Use `pip install 'hndl[pretrained]'` to add the checkpoint loader dependencies. From a checkout, `python -m pip install -e .` installs the working tree.
+
+PyTorch is a dependency. CPU and CUDA devices are supported; select the device explicitly. Wheel and source distributions are built by CI.
 
 ## A network in a string
 
@@ -38,6 +40,8 @@ Here, `B` is a variable batch size. The final `linear()` has no width argument, 
 Activations are explicit operations. Here, `relu()` follows the first linear layer; the final linear layer has no activation. Place an activation wherever you want it in the sequence. `linear`, `conv`, and `deconv` do not add one automatically.
 
 This string is a declarative subset of Python: registered operation calls, optional assignments, literal arguments, and comments. HNDL parses it into a graph without executing it as Python.
+
+Full documentation, including the operator catalog and complete example networks, is at **https://hypergan.github.io/HNDL/**.
 
 Use `print(model)` to inspect it. HNDL supplies the shape table as its module representation:
 
@@ -109,11 +113,11 @@ generator_config = """
 linear()
 relu()
 reshape(512)
-deconv(256, policy="up2")
+deconv(256, kernel_size=4, stride=2, padding=1)
 relu()
-deconv(128, policy="up2")
+deconv(128, kernel_size=4, stride=2, padding=1)
 relu()
-deconv(64, policy="up2")
+deconv(64, kernel_size=4, stride=2, padding=1)
 relu()
 conv(3, kernel_size=3, stride=1, padding=1)
 tanh()
@@ -127,7 +131,7 @@ generator = network(
 )
 ```
 
-The `up2` policy selects transposed-convolution settings that exactly double height and width. `reshape(512)` fixes the channels; the following convolution requires an image-shaped tensor, so HNDL infers the remaining height and width. Shapes include batch, channels, height, and width:
+A 4 × 4 transposed convolution with stride 2 and padding 1 exactly doubles height and width. `reshape(512)` fixes the channels; the following convolution requires an image-shaped tensor, so HNDL infers the remaining height and width. Shapes include batch, channels, height, and width:
 
 ```pycon
 >>> print(generator)
