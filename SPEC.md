@@ -1,8 +1,8 @@
 # HNDL v1 technical specification
 
-**Status: proposed; no implementation exists yet.** This document defines the baseline for implementing **HNDL — Human-readable Network Definition Language**, pronounced “handle.” It turns the direction in [DESIGN.md](DESIGN.md) into a standalone technical contract. [README.md](README.md) introduces the same ideas with examples.
+**Status: v1 target specification; an initial alpha is implemented.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records the current alpha's scope and remaining work. [README.md](README.md) introduces the APIs with examples.
 
-“Must” denotes a v1 requirement. Python signatures and JSON examples describe the proposed interface, not an available package. This specification supersedes conflicting public API descriptions in DESIGN.md: the public frontends are a declarative subset of Python syntax and a separately invoked trusted Python callable. Both share an implicit current tensor for single-input operations, accept explicit tensors for branches, and use one graph/resolver. Omitted inferable dimensions replace explicit unknown markers; `name=` alone pins module identity; printing a module shows its resolved shapes. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
+“Must” denotes a v1 requirement, including features beyond the initial alpha. The public frontends are a declarative subset of Python syntax and a separately invoked trusted Python callable. Both share an implicit current tensor for single-input operations, accept explicit tensors for branches, and use one graph/resolver. Omitted inferable dimensions replace explicit unknown markers; `name=` alone pins module identity; printing a module shows its resolved shapes. JSON is an internal graph/persistence format, not a third authoring frontend. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
 
 ## 1. Purpose and boundary
 
@@ -66,7 +66,7 @@ Activations are separate explicit graph operations in both v1 frontends. Built-i
 
 ## 4. Author specification and graph
 
-The canonical internal model is a finite directed acyclic graph. Both frontends produce this graph before resolution. Structured graph input remains available for named multi-input/multi-output networks.
+The canonical internal model is a finite directed acyclic graph. Both frontends produce this graph before resolution. It can represent named ports and multiple outputs internally; public authoring remains focused on the two Python frontends.
 
 | Field | Contract |
 | --- | --- |
@@ -79,7 +79,7 @@ The canonical internal model is a finite directed acyclic graph. Both frontends 
 
 Input, output, and node IDs match `[a-z][a-z0-9_]*`. References are `input:<name>` or `node:<id>/<port>`. Built-in unary nodes consume `x` and produce `out`. Custom operators declare every input and output port.
 
-The following proposed internal/structured JSON encoding defines a two-layer perceptron whose last width is resolved from the output contract. Ordinary users use either Python frontend in §7 instead. Container/key choices shown here are the baseline for the implementation; a machine-readable schema is still required before release.
+The following conceptual internal JSON encoding describes a two-layer perceptron whose last width is resolved from the output contract. Users author either Python frontend in §7. This illustrates the graph model; it is not accepted as source by `resolve()` and is not the alpha's serialized-plan schema.
 
 ```json
 {
@@ -118,7 +118,7 @@ The following proposed internal/structured JSON encoding defines a two-layer per
 }
 ```
 
-Validation must reject duplicate IDs, missing references, undeclared ports, missing required bindings, cycles, and nodes that cannot reach any declared output. Unused output ports of an otherwise reachable node are allowed. Multiple public outputs are allowed. Graph values are tensors; adapters must flatten Python tuple/dict results into declared tensor ports.
+Validation must reject duplicate IDs, missing references, undeclared ports, missing required bindings, cycles, and nodes that cannot reach any declared output. Unused output ports of an otherwise reachable node are allowed. The internal graph can represent multiple outputs; both public authoring frontends select one output. Graph values are tensors; adapters must flatten Python tuple/dict results into declared tensor ports.
 
 Each node owns an independent module instance and executes once per forward. Fan-out reuses a computed tensor. It does not clone the source module, repeat its invocation, or tie parameters between nodes. Explicit weight tying between graph nodes is deferred and must fail if requested. External reuse of built modules through sequence slices is supported as described in §7.
 
@@ -299,7 +299,7 @@ Callable capture is explicitly trusted Python execution. The function and regist
 
 `resolve`, `resolve_file`, `resolve_callable`, and `ops` are exported by `hndl`; construction functions are exported by `hndl.torch`. A string always means source, never a filename or function to execute. File paths are supplied only by the host through the explicit file APIs. A missing registry selects an independent built-in registry. Explicit registry objects supply extensions without a mutable global singleton. Built-in `ops` and explicit `registry.ops` calls capture exact operator identities; a capture using an identity unavailable in the selected resolution registry fails. Both modes use identical operator/policy rules and output contracts. Their graph has external input `x` and public output `output`; `output_shape` constrains the selected tensor. When a configuration binds `out`, its final value must be one tensor symbol and takes precedence over current; otherwise current is selected. Native `None`/fallthrough selects current, while an explicit symbol selects itself and any other value fails. An unset current fails when default selection requires it; an invalid explicit selection always fails. Empty source or a callable with no operator calls using default selection chooses the external input, subject to matching input/output contracts. Unused output ports are allowed, but every created node must reach the selected output.
 
-Both network constructors accept one runtime tensor and return one tensor, even for branched graphs. Printed graphs include all input/output ports, including both split results; a shared producer appears once. The lower-level graph builder retains named-input/dictionary-output behavior for structured graphs.
+Both network constructors accept one runtime tensor and return one tensor, even for branched graphs. Printed graphs include all input/output ports, including both split results; a shared producer appears once. The lower-level `build(plan)` builder provides named-input/dictionary-output behavior for resolved plans.
 
 ### Current input and output selection
 
@@ -324,7 +324,7 @@ The declarative frontend has version `python_config@1`, recorded with source pro
 - Calls name a registered operator alias directly, such as `linear(...)`. Attribute calls such as `ops.linear(...)` are reserved for trusted native Python and fail in configuration. Calls cannot be redirected through local aliases.
 - Tensor ports take symbolic tensors, positionally in declared port order or through their declared keyword names. A single-input operator may omit that port and use current, with remaining positional literals bound to author arguments by its schema. Multi-input operators require every tensor port explicitly; there is no partial default. Duplicate bindings and missing required ports fail.
 - Argument literals are bounded integers, finite floats, booleans, strings, and schema-permitted `None`, plus recursively bounded literal lists, tuples, and dictionaries with unique string keys. Positive/negative numeric literal signs are allowed; arithmetic and computed expressions are not. Containers cannot conceal calls or arbitrary objects. Strings are accepted only where the schema permits them; booleans are not valid integer dimensions. Inferable dimensions are omitted, not written as `None`.
-- `name="hidden"` is reserved node metadata and `policy="up2"` selects a registered policy alias. Neither reaches an operator constructor as an ordinary argument. Schemas with colliding port/argument names must use nonconflicting names or structured data.
+- `name="hidden"` is reserved node metadata and `policy="up2"` selects a registered policy alias. Neither reaches an operator constructor as an ordinary argument. Operator schemas must avoid collisions between metadata, tensor ports, and author arguments.
 - There are no imports, function/class definitions, conditionals, loops, comprehensions, lambdas, arbitrary expressions, arbitrary function calls, attribute/subscript access, decorators, formatted strings, or star/keyword expansion. Expression statements other than registered operator calls, including bare names, literals, and docstrings, fail.
 
 Python comments, whitespace, parentheses, and multiline calls follow the pinned grammar and preserve source locations for diagnostics. They do not change graph identity. Local names use ordinary non-keyword Python identifiers; special double-underscore names are rejected. Rebinding locals, including `x` and `out`, is allowed: evaluate the right-hand side against prior bindings, then bind the target. References to earlier tensors remain valid through other locals; rebinding does not mutate a tensor or rename/rebuild a node. Undefined and forward local references fail. Registered operator aliases cannot be rebound. The registry must reject aliases reserved for external `x` or output `out` in this frontend. If `out` is bound, its final value must hold one symbolic tensor, even if an earlier binding held a tuple. Ordinary local assignment or rebinding, including `x`, does not itself select current.
@@ -395,7 +395,7 @@ features = model[:2]
 
 Module lookup uses explicit or generated node IDs, never local variable names. Unknown IDs raise `KeyError`; out-of-range integer indexes raise `IndexError`. A slice returns ordinary `torch.nn.Sequential` over the existing module objects, sharing parameters, buffers, mode, and device moves. It carries no resolved-plan guarantees. Slicing requires adapters compatible with direct tensor-in/tensor-out chaining; otherwise reject it explicitly. Creating a slice does not alter registrations/state keys on the original model.
 
-Registration remains once under `nodes.n_<node_id>`, without a facade prefix or duplicate registrations. Structural replacement/insertion/deletion through the HNDL container is rejected; ordinary parameter updates remain supported. Architecture changes require a new resolution/build. Actual split/fan-out/join graphs support node-name lookup only, regardless of which frontend authored them. Both network constructors still return the single selected tensor at runtime; structured `build` returns a dictionary-output GraphModule.
+Registration remains once under `nodes.n_<node_id>`, without a facade prefix or duplicate registrations. Structural replacement/insertion/deletion through the HNDL container is rejected; ordinary parameter updates remain supported. Architecture changes require a new resolution/build. Actual split/fan-out/join graphs support node-name lookup only, regardless of which frontend authored them. Both network constructors still return the single selected tensor at runtime; `build(plan)` returns a dictionary-output GraphModule.
 
 ### Worked generator resolution
 
@@ -634,7 +634,7 @@ The following are future gates, not claims about tests already passing:
 | --- | --- |
 | Pure core | Interpret bounded configuration, resolve captured graphs, and serialize without torch/CUDA; malformed specs and unavailable providers fail clearly |
 | Shape resolution | Omitted output widths/channels and reshape suffixes; rank resolution from prefix bounds and connected contracts, including bare reshape using upstream element count; ambiguous rank/factorization rejected; generator targets `32×32`, `64×64`, `32×64`; invalid `30×30`; literal-width conflict; inverse ambiguity; group divisibility and join conflicts |
-| Determinism | Repeated resolution of the same captured graph is identical; equivalent configuration/native/structured graphs with identical node identities and declarations have identical semantic plans; exact alias bindings and policy-order independence |
+| Determinism | Repeated resolution of the same captured graph is identical; equivalent configuration/native/internal graphs with identical node identities and declarations have identical semantic plans; exact alias bindings and policy-order independence |
 | Configuration | AST allowlist rejects executable Python outside the subset; locals rebind without mutating edges; unpacking evaluates RHS once; nested calls follow evaluation order; names/comments do not rename nodes; `name` metadata does; optional explicit `out` overrides current and never silently falls back |
 | Current semantics | Call-only sequences; positional/keyword tensor disambiguation; assignments do not select current; nested argument evaluation before default binding; explicit-input and join updates; split clearing/recovery; invalid explicit output rejection; empty identity contract checks |
 | Loading boundary | Bounded UTF-8 file reads, dedent/source mapping, isolated parse/validation limits, bounded literals, no eval/exec/import dispatch, no fallback between string/file/callable modes |
@@ -667,9 +667,9 @@ A sequence-only first milestone is useful progress, not completion of the graph/
 
 The baseline deliberately leaves these details visible:
 
-- Publish machine-readable author/plan schemas, serialization APIs, full custom-registration schemas, and exact Python graph helpers. The public frontend signatures, local-binding semantics, and unary registration contract are fixed above; the JSON example is proposed encoding.
+- Publish machine-readable author/plan schemas, serialization APIs, full custom-registration schemas, and internal graph helper interfaces. The public frontend signatures, local-binding semantics, and unary registration contract are fixed above; the JSON example illustrates the internal graph model.
 - Complete every built-in argument's type, inference eligibility, scalar/pair normalization, and validation bounds beyond the defaults fixed in §6. In particular, fix normalization/leaky-ReLU defaults and concat axis normalization. Do not inherit changing backend defaults implicitly.
-- Publish the pinned Python parser grammar/runtime compatibility matrix, AST allowlist fixtures, parser-worker budgets, remaining operator call schemas, and explicit backend registry restoration API. Generated IDs and local rebinding semantics follow §7; graph helpers do not replace the public frontends.
+- Publish the pinned Python parser grammar/runtime compatibility matrix, AST allowlist fixtures, parser-worker budgets, remaining operator call schemas, and explicit backend registry restoration API. Generated IDs and local rebinding semantics follow §7; graph helpers remain internal to the two public authoring frontends.
 - Define the supported representation for sharing non-batch dimension variables during resolution. Only batch remains symbolic in a successful plan; no general expression language is implied.
 - Finalize canonical JSON encoding, semantic/artifact digest payloads, and golden test vectors.
 - Fix initialization override and trainability syntax, build-receipt representation, runtime-check controls, and supported PyTorch versions/devices with numerical tolerances.
