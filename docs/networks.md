@@ -331,6 +331,69 @@ index  name  operation  input shapes      output shapes
 
 Parameters: 235,146. Classic MNIST baseline; 784·256+256 + 256·128+128 + 128·10+10 = 235,146 parameters.
 
+## Mixture-of-experts transformer
+
+A causal language model on 32 token ids: learned token and position embeddings, two pre-norm blocks that pair 4-head causal attention with a top-2-of-4 sparse mixture of experts, then a final norm and a bias-free vocabulary head whose width comes from the output contract.
+
+`examples/networks/moe_transformer.hndl`
+
+```python
+# A causal language model whose feed-forward is a sparse mixture of experts.
+# Two pre-norm blocks over 32 token positions of a 100-word vocabulary.
+
+# Stem: token ids -> 64-wide sequence, plus a learned absolute position table.
+embedding(100, 64, name="tokens")
+x0 = pos_embed(32, name="positions")
+
+# Block 1. Pre-norm: normalize a copy, then add the unnormalized stream back.
+h = layer_norm(x0, name="block1_attn_norm")
+a = attention(h, 4, causal=True, name="block1_attn")       # 4 heads of width 16
+r = add(a, x0, name="block1_attn_residual")
+
+h2 = layer_norm(r, name="block1_moe_norm")
+m = moe(h2, 4, 128, top_k=2, name="block1_moe")            # 4 experts, 2 per token
+x1 = add(m, r, name="block1_moe_residual")
+
+# Block 2, identical in shape; every layer is its own module.
+h3 = layer_norm(x1, name="block2_attn_norm")
+a2 = attention(h3, 4, causal=True, name="block2_attn")
+r2 = add(a2, x1, name="block2_attn_residual")
+
+h4 = layer_norm(r2, name="block2_moe_norm")
+m2 = moe(h4, 4, 128, top_k=2, name="block2_moe")
+x2 = add(m2, r2, name="block2_moe_residual")
+
+# Final norm and the untied output head; its width is the vocabulary size,
+# which the output contract already fixes at 100.
+layer_norm(x2, name="final_norm")
+linear(bias=False, name="lm_head")
+```
+
+Input `['B', 32]` (`input_dtype="int64"`) → output `['B', 32, 100]`.
+
+```text
+Network: [B, 32] -> [B, 32, 100]  dtype=float32  input_dtype=int64
+index  name                  operation   input shapes                  output shapes
+0      tokens                embedding   ids=[B, 32]                   out=[B, 32, 64]
+1      positions             pos_embed   x=[B, 32, 64]                 out=[B, 32, 64]
+2      block1_attn_norm      layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
+3      block1_attn           attention   x=[B, 32, 64]                 out=[B, 32, 64]
+4      block1_attn_residual  add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
+5      block1_moe_norm       layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
+6      block1_moe            moe         x=[B, 32, 64]                 out=[B, 32, 64]
+7      block1_moe_residual   add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
+8      block2_attn_norm      layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
+9      block2_attn           attention   x=[B, 32, 64]                 out=[B, 32, 64]
+10     block2_attn_residual  add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
+11     block2_moe_norm       layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
+12     block2_moe            moe         x=[B, 32, 64]                 out=[B, 32, 64]
+13     block2_moe_residual   add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
+14     final_norm            layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
+15     lm_head               linear      x=[B, 32, 64]                 out=[B, 32, 100]
+```
+
+Parameters: 181,888. Top-k expert routing follows Shazeer et al. 2017 ("Outrageously Large Neural Networks") and the Switch Transformer (Fedus et al. 2021); the count was checked against an equivalent plain-PyTorch build: embedding 100·64 = 6,400, positions 32·64 = 2,048, five layer norms 5·128 = 640, two attentions 2·4·(64·64+64) = 33,280, two MoE layers 2·(4·64 + 4·(128·64+128 + 64·128+64)) = 133,120, head 100·64 = 6,400, total 181,888.
+
 ## ResNet-18
 
 The 18-layer residual network: a 7×7/2 stem with max pooling, then four stages of two basic blocks at 64, 128, 256 and 512 channels, a global average pool, and one classifier whose 1000 outputs come from the output contract.
