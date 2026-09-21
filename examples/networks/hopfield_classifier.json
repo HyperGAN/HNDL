@@ -1,0 +1,8 @@
+{
+  "title": "Hopfield classifier",
+  "description": "Classify a 28×28 image by projecting it to a 128-wide query, retrieving from a 64-pattern modern Hopfield memory, and reading out the classes. The final width is inferred from the output contract.",
+  "input_shape": ["B", 1, 28, 28],
+  "output_shape": ["B", 10],
+  "parameters": 109962,
+  "reference": "Hopfield layer of Ramsauer et al., \"Hopfield Networks is All You Need\" (2020), whose only parameter is the stored-pattern matrix; 784·128+128 + 64·128 + 128·10+10 = 109,962 parameters."
+}

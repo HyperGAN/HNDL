@@ -1,0 +1,16 @@
+# A modern Hopfield layer as the hidden layer of a 28×28 grayscale classifier.
+flatten()
+
+# Project the image to the query width; the memory acts on this last axis.
+linear(128, name="query")
+
+# 64 stored patterns of width 128, the only parameters of the layer.
+# beta=0.25 keeps the softmax soft, so a query retrieves a mixture of the
+# patterns it lies closest to instead of snapping to one; a single update is
+# exactly attention with the stored patterns as both keys and values.
+hopfield(64, beta=0.25, steps=1, name="memory")
+
+relu()
+
+# Width inferred from the output contract: 10 classes.
+linear(name="logits")
