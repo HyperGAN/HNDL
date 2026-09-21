@@ -1,6 +1,6 @@
 """Register learned affine instance normalization and build two style graphs.
 
-Run from an installed checkout: ``python examples/adain.py --device cpu``.
+Run from an installed checkout: ``python examples/adaptive_normalization.py --device cpu``.
 CUDA is also supported when available; device selection never falls back.
 This fixture defines its own affine convention, not a full StyleGAN model.
 """
