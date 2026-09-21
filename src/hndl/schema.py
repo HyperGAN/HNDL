@@ -37,6 +37,8 @@ def validate_ports(ports, *, inputs):
             _schema_error("Port names must be non-keyword lowercase identifiers of at most 64 characters")
         if inputs and name in ("name", "policy"):
             _schema_error(f"Input port {name!r} conflicts with reserved frontend metadata")
+        if name in ("init", "trainable"):
+            _schema_error(f"Port {name!r} conflicts with reserved construction metadata")
     if len(set(result)) != len(result):
         _schema_error("Port names must be unique within their input/output namespace")
     return result
@@ -219,7 +221,7 @@ def argument_schema(arguments, *, input_ports, output_ports):
         if (type(name) is not str or len(name) > MAX_NAME_LENGTH or not _PORT.fullmatch(name)
                 or keyword.iskeyword(name)):
             _schema_error("Argument names must be non-keyword lowercase identifiers of at most 64 characters")
-        if name in (*input_ports, *output_ports, "name", "policy"):
+        if name in (*input_ports, *output_ports, "name", "policy", "init", "trainable"):
             _schema_error(f"Argument {name!r} conflicts with a port or reserved frontend metadata")
         if type(schema) is not Argument:
             _schema_error(f"Argument {name!r} must use an Argument schema, not a callback or raw default")
