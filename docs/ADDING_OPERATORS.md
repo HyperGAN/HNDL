@@ -74,7 +74,7 @@ Fields:
   solver sweep and may only add facts: `s.shape(port)`, `s.rank(port, r)`,
   `s.axis(port, i, value)`, `s.equal(p, q)`, `s.arg(name, value)`,
   `s.product(p, q)`, `s.interval(port, i, lo, hi)`, `s.error(code, msg)`,
-  `s.args`, `s.inputs`. Shared relations live in `operators/_relations.py`.
+  `s.args`, `s.inputs`, and `s.policy` (the selected policy identity or None). Shared relations live in `operators/_relations.py`.
   Give `shape_text=` a one-line description for the docs.
 - `args` maps names to `Arg(type, default, ...)`. Omit the default to require
   the value. `inferable=True` lets the resolver solve an omitted dimension;

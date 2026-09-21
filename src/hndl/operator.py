@@ -573,6 +573,7 @@ class NodeView:
         self._refs = refs
         self.inputs = tuple(node.inputs)
         self.outputs = tuple(node.outputs)
+        self.policy = (node.source or {}).get("policy")
 
     def _ref(self, port):
         try:
