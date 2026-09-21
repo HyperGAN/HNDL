@@ -7,6 +7,7 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
+| [`dropout`](dropout.md) | Randomly zero elements during training and rescale the rest. |
 | [`leaky_relu`](leaky_relu.md) | ReLU with a small slope for negative inputs. |
 | [`relu`](relu.md) | Rectified linear unit, max(x, 0). |
 | [`tanh`](tanh.md) | Hyperbolic tangent, squashing values into (-1, 1). |
