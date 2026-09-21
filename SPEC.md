@@ -1,6 +1,6 @@
 # HNDL v1 technical specification
 
-**Status: the implemented 0.1.1 contract.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records what 0.1.1 ships and what remains for v1. [README.md](README.md) introduces the APIs with examples.
+**Status: the implemented 0.1.2 contract.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records what 0.1.2 ships and what remains for v1. [README.md](README.md) introduces the APIs with examples.
 
 “Must” denotes a requirement of this contract. The public frontends are a declarative subset of Python syntax and a separately invoked trusted Python callable. Both share an implicit current tensor for single-input operations, accept explicit tensors for branches, and use one graph/resolver. Every operation — built-in or custom — is an `nn.Module` carrying one `@operator(...)` declaration that the resolver, the backend, the example harness, and the generated documentation all read. Omitted inferable dimensions replace explicit unknown markers; `name=` alone pins module identity; printing a module shows its resolved shapes. JSON is an internal graph/persistence format, not a third authoring frontend. PyTorch is an ordinary hard dependency of the package. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
 

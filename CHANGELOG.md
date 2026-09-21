@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 (2026-09-21)
+
+README links are absolute so they work on the PyPI project page; a test
+keeps them that way. No library code changed.
+
 ## 0.1.1 (2026-09-21)
 
 A documentation and packaging release. No library code changed.
