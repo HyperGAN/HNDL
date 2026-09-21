@@ -40,6 +40,11 @@
   and `strict=True`, and `layer=` returns an intermediate submodule's output
   through a forward hook that stops the pass there — what perceptual losses
   and feature matching need.
+- **`constant` operator.** Emits a `[B, *shape]` tensor filled with `value`
+  (default `0.0`), taking the batch extent and device from the incoming
+  tensor and the compute dtype from the plan. It has no parameters and no
+  buffers, its output is detached from the autograd graph, and the shape may
+  be omitted and read from the output contract.
 
 ## 0.1.2 (2026-09-21)
 

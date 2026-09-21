@@ -15,7 +15,9 @@ from .conftest import all_operators, contract, example_input, operator_examples
 
 def port_input(spec, port, shape, compute, device):
     """A random tensor for one input port, honouring the port's declared dtype."""
-    dtype = DTYPES[spec.port_dtype(port, compute)]
+    declared = spec.port_dtype(port, compute)
+    # A port that accepts any dtype is fed the plan's compute dtype.
+    dtype = DTYPES[compute if declared == "any" else declared]
     if not dtype.is_floating_point:
         return torch.randint(0, 8, (2, *shape[1:]), device=device).to(dtype)
     return torch.randn(2, *shape[1:], device=device, dtype=dtype, requires_grad=True)
@@ -143,6 +145,11 @@ def test_reference_implementation_matches(spec, example, device):
         expected = expected if isinstance(expected, (tuple, list)) else (expected,)
         for a, e in zip(actual, expected):
             torch.testing.assert_close(a, e)
+        if not any(tensor.requires_grad for tensor in actual):
+            # A source such as constant() detaches its output; there is no
+            # gradient to compare, and both sides must agree on that.
+            assert not any(tensor.requires_grad for tensor in expected)
+            continue
         sum(a.square().mean() for a in actual).backward()
         sum(e.square().mean() for e in expected).backward()
         for a, e in zip(inputs, mirrors):
