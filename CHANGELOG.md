@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`.hndl` files count as Python on GitHub.** A `.gitattributes` at the
+  repository root maps `*.hndl` to Python, so Linguist includes network
+  definitions in the repository's language statistics.
+
 ## 0.2.1 (2026-09-21)
 
 A patch release for HyperGAN's migration: cast networks check inputs in the
