@@ -1,0 +1,18 @@
+# A fully connected autoencoder for 28×28 grayscale images (MNIST-sized).
+# The image is flattened to 784 values, squeezed through a 32-unit bottleneck,
+# and reconstructed back into the same [B, 1, 28, 28] shape.
+
+# Encoder: 784 -> 128 -> 32.
+flatten()
+linear(128)
+relu()
+linear(32, name="code")   # The bottleneck; model["code"] is the 32-unit layer.
+relu()
+
+# Decoder: 32 -> 128 -> 784. The final width is inferred from the reshape
+# target, which the output contract fixes at 1·28·28 = 784.
+linear(128)
+relu()
+linear(name="reconstruction")
+sigmoid()                 # Pixels in (0, 1), matching normalized inputs.
+reshape(1, 28, 28)
