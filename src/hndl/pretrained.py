@@ -404,11 +404,13 @@ def capture_layers(model, names, x, location):
     One pass, one hook per requested submodule, and the pass unwinds as soon as
     the last requested submodule has produced its output, so the unused tail of
     the network never runs. Every captured tensor is cloned: an
-    ``nn.ReLU(inplace=True)`` or a residual ``+=`` further along the pass would
-    otherwise bump an intermediate's version counter and make backward through
-    it fail. The clone is differentiable, so gradients and second derivatives
-    still reach the input. A submodule that runs twice before the pass stops
-    fails rather than silently returning one of its calls.
+    ``nn.ReLU(inplace=True)`` --- torchvision's ResNets use them --- or a
+    residual ``+=`` further along the pass writes through the same storage, so
+    an uncloned capture would hand back the overwritten values, and fail with a
+    version-counter error wherever autograd had saved that tensor. The clone is
+    differentiable, so gradients and second derivatives still reach the input.
+    A submodule that runs twice before the pass stops fails rather than
+    silently returning one of its calls.
     """
     targets = {name: submodule(model, name, location) for name in names}
     captured = {}

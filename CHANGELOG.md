@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Several layers from one pretrained forward pass.** A provider checkpoint
+  can now return more than one intermediate tensor:
+  `f1, f2, f3 = pretrained("trunk.pth", provider="resnet18", sha256="<64 hex>",
+  layers=("layer1", "layer2", "layer3"))` gives the node one output per entry,
+  in the order written, each the raw output of that submodule at its native
+  shape --- no pooling, no concatenation --- from a single forward pass that
+  stops after the last requested submodule, so the tail of the network never
+  runs. Every output carries gradients and second derivatives to the network's
+  input: each captured tensor is cloned, so an `nn.ReLU(inplace=True)` or a
+  residual `+=` later in the pass can neither overwrite the values the hook saw
+  nor break backward through them. Both frontends unpack the tuple, which
+  clears the current tensor as `split` does, including for a one-entry
+  `layers=("layer1",)`; an empty `layers=()` means the argument was not given.
+  Duplicate, empty, or unknown entries, a submodule that runs more than once
+  before the pass stops, and a conflict with `layer=` or `readout=` each fail
+  with `E_PRETRAINED`. Because plan digests cover every canonical argument, a
+  plan saved before this release that holds a `pretrained` node fails to
+  restore with `E_INTEGRITY` and must be re-resolved once from its source;
+  plans without a `pretrained` node are unaffected.
+- **Operators may declare variadic output ports.** A shape declaration can
+  write `out*` after the arrow together with `outputs_from="<argument>"`, and
+  the node expands ordinal ports `out0`, `out1`, ... from that sequence
+  argument's length, mirroring the `x0`, `x1` expansion of variadic inputs. An
+  empty sequence leaves the single declared `out` port, so such an operator's
+  existing plans keep their encoding and digests. `Arg` also gains a `"strs"`
+  type: a bounded tuple of strings, written as a tuple literal in
+  configuration.
 - **`.hndl` files count as Python on GitHub.** A `.gitattributes` at the
   repository root maps `*.hndl` to Python, so Linguist includes network
   definitions in the repository's language statistics.

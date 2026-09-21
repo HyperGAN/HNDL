@@ -69,6 +69,10 @@ Fields:
     pair it with `relation=`.
   - `x*` declares a variadic input (`x0`, `x1`, …); declare an `int` argument
     named `input_count`.
+  - `out*` declares a variadic output (`out0`, `out1`, …); it must be the sole
+    output port and the declaration names the sequence argument fixing the
+    count with `outputs_from="<argument>"`. An empty sequence leaves the single
+    declared `out` port; any other length returns a tuple and clears current.
 - `relation=` is a function receiving a node view `s` for rules the DSL
   cannot express (convolution arithmetic, products, splits). It runs in every
   solver sweep and may only add facts: `s.shape(port)`, `s.rank(port, r)`,
@@ -79,7 +83,7 @@ Fields:
 - `args` maps names to `Arg(type, default, ...)`. Omit the default to require
   the value. `inferable=True` lets the resolver solve an omitted dimension;
   `dim="D_out"` ties it to a shape symbol in both directions. Types: `int`,
-  `float`, `bool`, `str`, `"pair"` (int or two ints), `"ints"`. Every `Arg`
+  `float`, `bool`, `str`, `"pair"` (int or two ints), `"ints"`, `"strs"`. Every `Arg`
   needs `help`. Positional order is the mapping order; mark secondary
   arguments `positional=False`.
 - `examples` are runnable configs with their input and output shapes. The

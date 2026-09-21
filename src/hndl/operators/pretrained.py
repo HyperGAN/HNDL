@@ -84,7 +84,7 @@ def _relation(s):
         "readout": Arg(str, "", positional=False,
                        help='Name of a readout the host registered with the provider, such as "patch_tokens"; the '
                             'node returns that callable\'s tensor instead of the model\'s own output. Mutually '
-                            'exclusive with layer=.'),
+                            'exclusive with layer= and layers=.'),
         "revision": Arg(str, inferable=True, positional=False,
                         help="Resolved commit hash or content digest. Filled in at resolution and checked on restore."),
     },
@@ -136,6 +136,33 @@ class Pretrained(nn.Module):
     model's own output. Provider checkpoints declare no input contract, so the
     graph input shape is whatever the module accepts (floating point); the
     meta-device trace checks it.
+
+    ``layers=("layer1", "layer2", "layer3")`` returns several intermediates
+    from *one* forward pass. The node gains one output port per entry ---
+    ``out0``, ``out1``, ``out2`` in the order written --- each carrying that
+    submodule's own output at its native shape, with no pooling and no
+    concatenation::
+
+        f1, f2, f3 = pretrained("/path/weights.pth", provider="resnet18",
+                                sha256="<64 hex>",
+                                layers=("layer1", "layer2", "layer3"))
+
+    A hook on every requested submodule captures its output and the pass
+    unwinds once the last of them has run, so the unused tail of the network
+    never executes. Each captured tensor is cloned: an ``nn.ReLU(inplace=True)``
+    or a residual ``+=`` further along the pass would otherwise overwrite the
+    values the hook saw --- silently, or, where something saved that tensor for
+    backward, as a version-counter failure. The clone is differentiable, so
+    every output carries gradients to the graph input and supports second
+    derivatives. A submodule that runs more than once before the pass stops
+    fails with ``E_PRETRAINED`` naming it, rather than returning one of its
+    calls at random; name the block that contains it instead. A one-entry
+    ``layers=("layer1",)`` is allowed and returns a one-tuple, which --- like
+    any multi-output call --- clears the current tensor, so the next operation
+    must name its input. Duplicate entries, an empty entry, and an unknown
+    submodule each fail with ``E_PRETRAINED``; ``layers=``, ``layer=`` and
+    ``readout=`` are mutually exclusive, and like them ``layers=`` applies to
+    provider checkpoints only, never to transformers or timm sources.
 
     ``readout=`` names host code instead of a submodule, for checkpoints whose
     useful tensor comes from a method rather than ``forward``. The host binds

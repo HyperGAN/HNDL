@@ -19,8 +19,8 @@ and the [authored networks](docs/networks.md) are generated from the code.
 - One `@operator` declaration per operation, on the `nn.Module` that
   implements it: alias and version, a shape relation written as
   `x[B, C, H, W], params[B, 2*C] -> out[B, C, H, W]` (shared symbols, integer
-  scales, literals, `...` for shared middle axes, `x*` variadic inputs, port
-  dtypes) or a relation function over a bounded node view, scalar arguments
+  scales, literals, `...` for shared middle axes, `x*` variadic inputs, `out*`
+  variadic outputs counted from a declared sequence argument, port dtypes) or a relation function over a bounded node view, scalar arguments
   with help text, runnable examples, and hooks for positional rest arguments,
   policies, validation, and finalization. Built-ins are discovered from
   `hndl.operators`; custom operators use the same decorator on a `Registry`.
