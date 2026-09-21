@@ -60,5 +60,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | Operator | Summary |
 | --- | --- |
 | [`flatten`](flatten.md) | Collapse every non-batch axis into one feature axis. |
+| [`mean`](mean.md) | Average one non-batch axis away. |
 | [`reshape`](reshape.md) | View the tensor with new non-batch dimensions, preserving the element count. |
 | [`split`](split.md) | Cut one axis into a first section and the remainder. |
+| [`sum`](sum.md) | Add up one non-batch axis. |
