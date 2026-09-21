@@ -1,0 +1,64 @@
+name: Documentation
+
+# Builds the MkDocs site on every pull request and deploys it to GitHub Pages
+# from master. Pages must be configured with "GitHub Actions" as its source
+# (Settings -> Pages -> Build and deployment -> Source).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the documentation tools
+        # The site is built from Markdown only, so the `docs` extra is installed
+        # without the package and its PyTorch dependency.
+        run: |
+          python - <<'PY' > "$RUNNER_TEMP/docs-requirements.txt"
+          import tomllib
+          from pathlib import Path
+          config = tomllib.loads(Path("pyproject.toml").read_text())
+          print("\n".join(config["project"]["optional-dependencies"]["docs"]))
+          PY
+          python -m pip install -r "$RUNNER_TEMP/docs-requirements.txt"
+      - run: mkdocs build --strict
+      - if: github.event_name == 'push'
+        uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

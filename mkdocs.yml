@@ -1,0 +1,79 @@
+site_name: HNDL
+site_description: Human-readable neural network definitions with explicit shape constraints
+site_url: https://hypergan.github.io/HNDL/
+site_author: HNDL contributors
+copyright: MIT licensed
+
+repo_url: https://github.com/HyperGAN/HNDL
+repo_name: HyperGAN/HNDL
+edit_uri: edit/master/docs/
+
+docs_dir: docs
+site_dir: site
+
+# The navigation is generated: scripts/gen_doc_pages.py stages the repository's
+# root Markdown (README, SPEC, ...) into the site and writes SUMMARY.md, which
+# mkdocs-literate-nav reads. Adding an operator with `python -m hndl.docs` picks
+# it up from docs/operators/index.md without editing this file.
+plugins:
+  - search
+  - gen-files:
+      scripts:
+        - scripts/gen_doc_pages.py
+  - literate-nav:
+      nav_file: SUMMARY.md
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - content.action.edit
+    - content.code.copy
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+      pygments_lang_class: true
+  - pymdownx.superfences
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/HyperGAN/HNDL
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/hndl/
