@@ -184,15 +184,25 @@ class ResolvedPlan:
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError, OverflowError) as error:
             raise HNDLError("E_SCHEMA", f"Invalid saved plan: {error}") from error
 
+    def _operation_name(self, op):
+        if self.registry is not None:
+            try:
+                return self.registry.by_identity(op).alias
+            except HNDLError:
+                pass
+        return op
+
     def __repr__(self):
         def shape(value):
             return "[" + ", ".join(str(part) for part in value) + "]"
-        lines = [f"Network: {shape(self.input_shape)} -> {shape(self.output_shape)}  dtype={self.dtype}",
-                 "index  name  operation  input shapes  output shapes"]
+        lines = [f"Network: {shape(self.input_shape)} -> {shape(self.output_shape)}  dtype={self.dtype}"]
+        rows = [("index", "name", "operation", "input shapes", "output shapes")]
         for index, node in enumerate(self.nodes):
             inputs = ", ".join(f"{key}={shape(value)}" for key, value in node.input_shapes.items())
             outputs = ", ".join(f"{key}={shape(value)}" for key, value in node.output_shapes.items())
-            lines.append(f"{index}  {node.id}  {node.op}  {inputs}  {outputs}")
+            rows.append((str(index), node.id, self._operation_name(node.op), inputs, outputs))
+        widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+        lines.extend("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip() for row in rows)
         return "\n".join(lines)
 
     def describe(self):

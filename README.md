@@ -9,10 +9,10 @@ Write your network in Python syntax, as a declarative config or a Python functio
 From a checkout, install on Linux with Python 3.11–3.14:
 
 ```sh
-python -m pip install -e '.[torch]'
+python -m pip install -e .
 ```
 
-Use `python -m pip install -e .` for the pure resolver without PyTorch. CPU and CUDA devices are supported by the backend; select the device explicitly. Wheel and source distributions are built by CI. PyPI publication requires the one-time setup described in [CONTRIBUTING.md](CONTRIBUTING.md#publishing).
+PyTorch is a dependency. CPU and CUDA devices are supported; select the device explicitly. Wheel and source distributions are built by CI. PyPI publication requires the one-time setup described in [CONTRIBUTING.md](CONTRIBUTING.md#publishing).
 
 ## A network in a string
 
@@ -208,7 +208,7 @@ This branched model still accepts and returns a tensor. Layer lookup uses names;
 
 ### Feed a branch into adaptive normalization
 
-The runnable [adaptive-normalization example](examples/adaptive_normalization.py) registers an operation with two inputs: image features and per-channel style parameters. With that registry, a config can route a split directly into normalization:
+The built-in `adaptive_norm` operation takes two inputs: image features and per-channel style parameters. A config can route a split directly into it, as the runnable [adaptive-normalization example](examples/adaptive_normalization.py) does:
 
 ```python
 z1, z2 = split(64)
@@ -300,22 +300,23 @@ The loader translates an explicitly allowed subset of Python's AST into graph da
 
 ## Register your own operation
 
-Extend the vocabulary with a PyTorch module and its shape rule. Here is a registration for the shape-preserving SiLU activation:
+Every operation, built-in or yours, is an `nn.Module` with an `@operator` declaration above it. The declaration names the operation, describes its shape relation, and documents its arguments; the class is the implementation:
 
 ```python
 from torch import nn
-from hndl import Registry, preserves_shape
-from hndl.torch import network, register_torch
+from hndl import Registry
+from hndl.torch import network
 
 registry = Registry.builtins()
-registry.register(
+
+@registry.operator(
     "silu",
     identity="example.silu",
-    version=1,
-    shape=preserves_shape,
-    max_state_bytes=0,
+    summary="Sigmoid-weighted linear unit.",
+    shape="x[B, ...] -> out[B, ...]",
 )
-register_torch(registry, "silu", module=nn.SiLU, state_version=1)
+class SiLU(nn.SiLU):
+    """Computes ``x * sigmoid(x)`` elementwise."""
 
 model = network(
     """
@@ -330,36 +331,28 @@ model = network(
 )
 ```
 
-Configs now understand `silu()`. Native functions use `registry.ops.silu()` and pass that same registry to `network_from_callable`. `preserves_shape` tells the resolver that input and output dimensions, layout, and dtype are equal, so constraints propagate in both directions. `max_state_bytes=0` declares that this operation has no parameter or buffer storage. The backend constructs an `nn.SiLU` for execution. Registration carries the operation's version; network text uses its plain name.
+Configs now understand `silu()`. Native functions use `registry.ops.silu()` and pass that same registry to `network_from_callable`. The shape string `x[B, ...] -> out[B, ...]` says the output has exactly the input's shape, so constraints propagate in both directions through the layer. Each node gets its own instance of the class, constructed with the resolved arguments.
 
-For operations with several inputs or different output dimensions, declare the relationship between their shapes. The adaptive-normalization example uses:
+Operations with several inputs, different output dimensions, or scalar arguments declare them in the same place. The built-in adaptive normalization is declared as:
 
 ```python
-from hndl import Argument, Dim, ShapeRule
+from hndl import Arg, operator
 
-registry.register(
+@operator(
     "adaptive_norm",
-    identity="example.adaptive_norm",
-    version=1,
-    shape=ShapeRule(
-        inputs={
-            "x": ("B", "C", "H", "W"),
-            "params": ("B", Dim("C", scale=2)),
-        },
-        outputs={"out": ("B", "C", "H", "W")},
-    ),
-    arguments={
-        "eps": Argument(float, default=1e-5, minimum=0, exclusive_minimum=True),
-    },
-    max_state_bytes=0,
+    summary="Instance-normalize features, then apply a per-example learned scale and bias.",
+    shape="x[B, C, H, W], params[B, 2*C] -> out[B, C, H, W]",
+    args={"eps": Arg(float, 1e-5, min=0, exclusive_min=True, help="Added to the variance for stability.")},
+    examples=[...],
 )
+class AdaptiveNorm(nn.Module):
+    def __init__(self, eps): ...
+    def forward(self, x, params): ...
 ```
 
-The shared `C` means both shapes use the same channel count; `Dim("C", scale=2)` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model.
+The shared `C` means both shapes use the same channel count; `2*C` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model. Arguments carry help text, and examples are runnable configs; `python -m hndl.docs` renders both into [docs/operators](docs/operators/index.md). See [docs/ADDING_OPERATORS.md](docs/ADDING_OPERATORS.md) for the complete format, including the `relation=` hook for rules the shape string cannot express.
 
-Attach the implementation with `register_torch`, as in the SiLU example. The backend passes resolved scalar arguments to its constructor and tensors to `forward` in the declared input order. The [complete example](examples/adaptive_normalization.py) includes the module, registration, and a model you can run with `python examples/adaptive_normalization.py` from a checkout installed with `.[torch]`.
-
-Shape rules are declarations made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct.
+Shape declarations are claims made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct.
 
 ## Experiment with less boilerplate
 
@@ -378,6 +371,6 @@ plan = resolve(
 print(plan)
 ```
 
-Built-in config resolution needs no PyTorch import or tensor allocation. `resolve_file(...)` reads a config file; `resolve_callable(...)` captures a trusted Python function before using the same pure resolver. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences and named branches use the same resolve-then-build workflow.
+Resolution allocates no tensors and constructs no modules. `resolve_file(...)` reads a config file; `resolve_callable(...)` captures a trusted Python function before using the same pure resolver. Save the resolved plan with your experiment to record exactly which architecture was constructed. Sequences and named branches use the same resolve-then-build workflow.
 
 [SPEC.md](SPEC.md) defines the v1 language, registration, shape rules, and PyTorch interface. [IMPLEMENTATION.md](IMPLEMENTATION.md) describes the current alpha. HNDL is [MIT licensed](LICENSE).

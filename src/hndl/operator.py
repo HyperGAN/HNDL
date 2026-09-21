@@ -370,6 +370,7 @@ class Operator:
     symbols: frozenset
     shape_text: str
     relation: object = None
+    relation_text: str = ""
     examples: tuple = ()
     module: object = None
     positional_rest: object = None
@@ -470,6 +471,8 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
     inputs, outputs, symbols = parse_shape(shape)
     if relation is not None and not callable(relation):
         _registry_error("relation must be a callable receiving the node view")
+    if shape_text is not None and type(shape_text) is not str:
+        _registry_error("shape_text must be a string describing the relation")
     for hook, label in ((validate, "validate"), (finalize, "finalize"), (expand, "expand"), (reference, "reference")):
         if hook is not None and not callable(hook):
             _registry_error(f"{label} must be callable")
@@ -524,7 +527,8 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
     return Operator(
         alias=alias, identity=identity, version=version, summary=summary.strip(), doc=doc, category=category,
         inputs=inputs, outputs=outputs, args=checked, symbols=symbols, shape_text=shape.strip(),
-        relation=relation, examples=tuple(normalized_examples), module=cls, positional_rest=positional_rest,
+        relation=relation, relation_text=(shape_text or "").strip(), examples=tuple(normalized_examples),
+        module=cls, positional_rest=positional_rest,
         policies=policies, validate=validate, finalize=finalize, expand=expand, reference=reference,
         init_symbols=init_symbols, init_shapes=init_shapes,
     )
