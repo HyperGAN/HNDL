@@ -30,6 +30,16 @@
   `torch.nn.utils.parametrizations.spectral_norm` for GAN discriminators. The
   learned tensor is then registered as `parametrizations.weight.original`, which
   is the name `init` and `trainable` overrides must target.
+- **Local `.pth` checkpoints with custom providers.** `pretrained("weights.pth",
+  provider="vgg16", sha256="<hex>", layer="features.16")` loads a plain
+  `state_dict` into an architecture the host registered with
+  `registry.pretrained_provider(name, build)`. Registration is trusted Python
+  on one `Registry` instance; configuration may only name a provider that
+  already exists. The digest is required and verified at resolution and again
+  before loading, the file is read with `torch.load(..., weights_only=True)`
+  and `strict=True`, and `layer=` returns an intermediate submodule's output
+  through a forward hook that stops the pass there — what perceptual losses
+  and feature matching need.
 
 ## 0.1.2 (2026-09-21)
 

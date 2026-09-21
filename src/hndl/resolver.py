@@ -380,7 +380,9 @@ def resolve_graph(graph, registry=None, limits=None):
         raise HNDLError("E_CONSTRAINT", "Input and output must declare the same batch dimension")
     nodes, specs, dtypes = _ordered_nodes(graph, registry, limits)
     solver = _Solver(graph, nodes, specs, limits, dtypes)
-    resolved = solver.run()
+    # Relations that look up host-registered providers see this registry, never a global.
+    with registry.activated():
+        resolved = solver.run()
     return ResolvedPlan(resolved, input_shape, output_shape, graph.output_ref, graph.dtype, graph.frontend, registry,
                         input_dtype=graph.input_dtype)
 

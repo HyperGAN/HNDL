@@ -21,10 +21,13 @@ Relation: `input contract and output shape come from the checkpoint's configurat
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `source` (positional) | str | required | — | Checkpoint location: a directory with config.json and safetensors weights, a .safetensors file (with config=), or hf://owner/repo[@revision]. |
+| `source` (positional) | str | required | — | Checkpoint location: a directory with config.json and safetensors weights, a .safetensors file (with config=), hf://owner/repo[@revision], or a local .pth state dict (with provider= and sha256=). |
 | `output` | str | `"features"` | — | Which tensor to return: "features" (last hidden state), "pooled", "logits", "embeds" (projected CLIP-style embeddings), or a raw output attribute name. |
 | `component` | str | `""` | — | Tower of a multi-modal checkpoint such as CLIP: "vision" or "text". |
 | `config` | str | `""` | — | Path to config.json when source is a bare .safetensors file. |
+| `provider` | str | `""` | — | Name of an architecture builder the host registered with registry.pretrained_provider(name, build); required for a local .pth state dict. |
+| `sha256` | str | `""` | — | The 64 hex character digest of a local .pth file, verified before it is loaded. |
+| `layer` | str | `""` | — | Dotted named_modules() path of the provider submodule whose output the node returns, such as "features.16"; empty returns the model's own output. |
 | `revision` | str | inferred | — | Resolved commit hash or content digest. Filled in at resolution and checked on restore. |
 
 ## Description
@@ -49,6 +52,22 @@ loaded in float32 and cast to the plan dtype. Requires the optional
 
 The plan records the resolved ``revision`` so a restored plan fails
 (``E_CONSTRAINT``) if the source now points at a different checkpoint.
+
+A local ``.pth`` state dict describes no architecture, so it names one the
+host registered as trusted Python:
+``registry.pretrained_provider("vgg16", build)`` binds a zero-argument
+callable returning the ``nn.Module``, and configuration may only name an
+already registered provider. Such a source is written
+``pretrained("/path/weights.pth", provider="vgg16", sha256="<64 hex>",
+layer="features.16")``. The ``sha256`` is required, is verified against the
+file at resolution and again before loading, and the weights are read with
+``torch.load(..., weights_only=True)``, which unpickles no objects; keys
+must match exactly (``strict=True``). ``layer`` names a submodule by its
+dotted ``named_modules()`` path and returns that submodule's output through
+a forward hook, stopping the pass there; omitted, the node returns the
+model's own output. Provider checkpoints declare no input contract, so the
+graph input shape is whatever the module accepts (floating point); the
+meta-device trace checks it.
 
 ## Examples
 
