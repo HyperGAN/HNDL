@@ -11,6 +11,11 @@
   work --- plans hold frozen mappings and operator declarations hold
   functions --- but it now says so and points at `plan.to_json()` plus
   `torch.save(model.state_dict())` instead of failing inside the pickler.
+- **`broadcast_add` operator.** Elementwise sum of two equal-rank tensors with
+  numpy-style broadcasting of size-1 non-batch axes, for per-sample,
+  per-channel biases such as `[B, C, H, W] + [B, C, 1, 1]`. The backward pass
+  reduces the broadcast axes with `sum`, so it is deterministic on CUDA. `add`
+  keeps its exact-shape contract.
 
 ## 0.1.2 (2026-09-21)
 
