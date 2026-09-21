@@ -48,6 +48,12 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`add`](add.md) | Elementwise sum of two tensors with identical shapes. |
 | [`concat`](concat.md) | Join two or more tensors along one axis. |
 
+## memory
+
+| Operator | Summary |
+| --- | --- |
+| [`moe`](moe.md) | Sparse mixture of experts: route every token to its top-k feed-forward experts. |
+
 ## normalization
 
 | Operator | Summary |
