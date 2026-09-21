@@ -1,7 +1,12 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, PAIR, operator
+
+#: Above this many output windows the ragged path stops unrolling the windows
+#: and calls ``F.adaptive_avg_pool2d`` instead.
+MAX_EXPLICIT_WINDOWS = 64
 
 
 def _relation(s):
@@ -20,19 +25,20 @@ def _windows(extent, count):
     return [(i * extent // count, -((-(i + 1) * extent) // count)) for i in range(count)]
 
 
+def _explicit(x, out_h, out_w):
+    """The windowed mean written out with slicing and stacking."""
+    rows = []
+    for start_h, end_h in _windows(x.shape[2], out_h):
+        columns = []
+        for start_w, end_w in _windows(x.shape[3], out_w):
+            columns.append(x[:, :, start_h:end_h, start_w:end_w].mean(dim=(2, 3)))
+        rows.append(torch.stack(columns, dim=-1))
+    return torch.stack(rows, dim=-2)
+
+
 def _reference(module):
     out_h, out_w = module.output_size
-
-    def forward(x):
-        rows = []
-        for start_h, end_h in _windows(x.shape[2], out_h):
-            columns = []
-            for start_w, end_w in _windows(x.shape[3], out_w):
-                columns.append(x[:, :, start_h:end_h, start_w:end_w].mean(dim=(2, 3)))
-            rows.append(torch.stack(columns, dim=-1))
-        return torch.stack(rows, dim=-2)
-
-    return forward
+    return lambda x: _explicit(x, out_h, out_w)
 
 
 @operator(
@@ -61,7 +67,7 @@ def _reference(module):
     ],
     category="spatial",
 )
-class AdaptiveAvgPool2d(nn.AdaptiveAvgPool2d):
+class AdaptiveAvgPool2d(nn.Module):
     """Averages each ``[B, C, H_in, W_in]`` feature map over a grid of
     ``output_size = (H_out, W_out)`` windows, producing
     ``[B, C, H_out, W_out]``. Window ``i`` along an axis of extent ``n`` with
@@ -76,6 +82,34 @@ class AdaptiveAvgPool2d(nn.AdaptiveAvgPool2d):
     which torch permits). The operation has no parameters and behaves
     identically in train and eval mode.
 
+    ### Determinism and higher-order gradients
+
+    Every path produces the values of `torch.nn.functional.adaptive_avg_pool2d`
+    within floating-point tolerance, but which path runs decides whether the
+    backward pass is deterministic on CUDA:
+
+    | Case | Implementation | Deterministic on CUDA |
+    | --- | --- | --- |
+    | `H_in % H_out == 0` and `W_in % W_out == 0` | reshape to `[B, C, H_out, H_in//H_out, W_out, W_in//W_out]`, then `mean` over the two window axes | yes |
+    | ragged extents, `H_out * W_out <= 64` | the windows written out with slicing and `stack` | yes |
+    | ragged extents, `H_out * W_out > 64` | `F.adaptive_avg_pool2d` | **no** |
+
+    The first two paths are built from `reshape`, `mean`, slicing and `stack`,
+    none of which accumulate with atomics, so they do not raise under
+    `torch.use_deterministic_algorithms(True)`, they repeat bit-identical
+    gradients run to run, and they differentiate to arbitrary order. That
+    makes the common critic pooling — a power-of-two map pooled to 4x4 —
+    usable with a gradient penalty, which takes a second derivative through
+    the pool.
+
+    The third path falls back to torch's own kernel, whose CUDA backward
+    accumulates with atomic adds: it raises ``adaptive_avg_pool2d_backward_cuda
+    does not have a deterministic implementation`` under
+    `torch.use_deterministic_algorithms(True)`, and its gradients are only
+    reproducible run to run on the CPU. It is reached only by a ragged pool to
+    more than 64 windows; pool to a divisor of the input extents, or to a
+    smaller grid, to stay on a deterministic path.
+
     Shape inference runs forward only for the spatial axes: ``H_out`` and
     ``W_out`` come from ``output_size``, but ``H_in`` and ``W_in`` are *not*
     inferable backward, because every input extent maps to the requested
@@ -88,4 +122,18 @@ class AdaptiveAvgPool2d(nn.AdaptiveAvgPool2d):
     """
 
     def __init__(self, output_size):
-        super().__init__(tuple(output_size))
+        super().__init__()
+        self.output_size = tuple(output_size)
+
+    def forward(self, x):
+        out_h, out_w = self.output_size
+        in_h, in_w = x.shape[2], x.shape[3]
+        if in_h % out_h == 0 and in_w % out_w == 0:
+            blocked = x.reshape(x.shape[0], x.shape[1], out_h, in_h // out_h, out_w, in_w // out_w)
+            return blocked.mean(dim=(3, 5))
+        if out_h * out_w <= MAX_EXPLICIT_WINDOWS:
+            return _explicit(x, out_h, out_w)
+        return F.adaptive_avg_pool2d(x, self.output_size)
+
+    def extra_repr(self):
+        return f"output_size={self.output_size}"

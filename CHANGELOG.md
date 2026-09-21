@@ -16,6 +16,15 @@
   per-channel biases such as `[B, C, H, W] + [B, C, 1, 1]`. The backward pass
   reduces the broadcast axes with `sum`, so it is deterministic on CUDA. `add`
   keeps its exact-shape contract.
+- **`adaptive_avg_pool` is deterministic and double-differentiable.** When the
+  input extents divide the output size it pools by reshaping and taking a
+  `mean` over the window axes, and a ragged pool to at most 64 windows writes
+  the windows out with slicing and `stack`. Both paths run under
+  `torch.use_deterministic_algorithms(True)`, give bit-identical CUDA
+  gradients run to run, and support the second derivative a gradient penalty
+  needs. Only a ragged pool to more than 64 windows still falls back to
+  `F.adaptive_avg_pool2d`, whose CUDA backward is nondeterministic. Values,
+  shapes, arguments, and the module `repr` are unchanged.
 
 ## 0.1.2 (2026-09-21)
 
