@@ -47,7 +47,9 @@ are generated from those declarations by `python -m hndl.docs`.
 | Operator | Summary |
 | --- | --- |
 | [`adaptive_norm`](adaptive_norm.md) | Instance-normalize features, then apply a per-example learned scale and bias. |
+| [`batch_norm`](batch_norm.md) | Normalize each channel over the batch and spatial axes, tracking running statistics. |
 | [`group_norm`](group_norm.md) | Normalize channel groups per example, with learned per-channel affine. |
+| [`instance_norm`](instance_norm.md) | Normalize every channel of every example over its own spatial positions. |
 | [`layer_norm`](layer_norm.md) | Normalize the last axis of every position with a learned scale and bias. |
 | [`rms_norm`](rms_norm.md) | Scale the last axis by its root-mean-square, with a learned per-feature gain. |
 
