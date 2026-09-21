@@ -137,7 +137,7 @@ saved concrete equations, dimensions, bounds, and versions without executing
 source or an author function. The ordinary PyTorch state dictionary does not
 contain the architecture; keep both together.
 
-Schema 2 uses sorted JSON object keys, compact separators, UTF-8 without ASCII
+Schema 1 uses sorted JSON object keys, compact separators, UTF-8 without ASCII
 escaping, arrays for tuples, finite numbers, and SHA-256 digests. Node order,
 identities, initialization, and trainability participate in the semantic digest. Source/frontend metadata
 and argument provenance affect the artifact digest but not the semantic
@@ -145,10 +145,11 @@ digest. Plan JSON is limited to 16 MiB. This is an alpha persistence API;
 restoring arbitrary third-party artifacts is not the same isolation boundary
 as loading declarative source.
 
-The current reader requires plan schema 2 and resolution version 1. Schema 1
-plans are rejected with `E_STATE_VERSION`; re-resolve the original definition
-and save a new plan. This alpha change adds explicit construction settings to
-every node, including defaults. It does not change PyTorch state names.
+The current reader requires plan schema 1 and resolution version 1; unsupported
+versions fail with `E_STATE_VERSION`. HNDL is unreleased, and initialization
+and trainability are part of this initial format. Every saved node must include
+both canonical construction fields, including defaults; missing fields fail
+with `E_SCHEMA`.
 
 ## Construction settings
 
