@@ -339,9 +339,13 @@ class _Solver:
                 self.rank(ref, len(known))
             for dim in range(1, len(known)):
                 if dim != axis:
-                    for source in all_refs:
-                        for target in all_refs:
-                            self.axis(target, dim, self.shapes[source][dim])
+                    # All tensors share this extent. Propagate one known value
+                    # once per edge; comparing every pair lets a short config
+                    # make the parent resolver do quadratic work.
+                    extent = next((self.shapes[ref][dim] for ref in all_refs
+                                   if self.shapes[ref][dim] is not None), None)
+                    for ref in all_refs:
+                        self.axis(ref, dim, extent)
             sizes = [self.shapes[ref][axis] for ref in refs]
             missing = [i for i, size in enumerate(sizes) if size is None]
             if not missing:

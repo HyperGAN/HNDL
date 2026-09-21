@@ -75,6 +75,7 @@ def test_nested_arguments_bind_current_at_invocation():
     (lambda x: ops.linear(x, x=x), "E_BINDING"),
     (lambda x: ops.add(x), "E_BINDING"),
     (lambda x: ops.add(), "E_BINDING"),
+    (lambda x: ops.concat(x, x, input_count=2.0), "E_BINDING"),
     (lambda x: (x, x), "E_OUTPUT"),
     (lambda x: 3, "E_OUTPUT"),
     (lambda x: False, "E_OUTPUT"),

@@ -71,6 +71,7 @@ def test_nested_calls_have_python_order_and_update_current():
     ('linear(missing)', "E_NAME"),
     ('linear(True)', "E_ARGUMENT"),
     ('linear(64, out_features=32)', "E_ARGUMENT"),
+    ('concat(x, x, input_count=2.0)', "E_BINDING"),
 ])
 def test_graph_binding_and_argument_errors(source, code):
     with pytest.raises(HNDLError, match=code):

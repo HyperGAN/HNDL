@@ -105,7 +105,8 @@ class Capture:
                     bindings[key] = self._symbol(kwargs.pop(key), source)
             if len(bindings) < 2 or set(bindings) != {f"x{i}" for i in range(len(bindings))}:
                 raise _error("E_BINDING", "Variadic inputs require contiguous x0...xN bindings with at least two tensors", source)
-            if "input_count" in kwargs and kwargs["input_count"] != len(bindings):
+            if "input_count" in kwargs and (type(kwargs["input_count"]) is not int
+                                             or kwargs["input_count"] != len(bindings)):
                 raise _error("E_BINDING", "input_count does not match supplied tensors", source)
             kwargs["input_count"] = len(bindings)
         elif len(ports) == 1:

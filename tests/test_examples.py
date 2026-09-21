@@ -95,3 +95,17 @@ print("pure core passed")
                             text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "pure core passed"
+
+
+def test_many_concat_edges_stay_within_a_bounded_resolution_time():
+    # This source fits the parser budgets. Non-concatenated dimensions must
+    # propagate once per edge rather than comparing every pair of inputs.
+    script = '''
+from hndl import resolve
+plan = resolve("concat(" + ",".join(["x"] * 4000) + ")",
+               input_shape=("B", 1, 1, 1), output_shape=("B", 4000, 1, 1))
+assert plan.nodes[0].output_shapes["out"] == ("B", 4000, 1, 1)
+'''
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                            text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
