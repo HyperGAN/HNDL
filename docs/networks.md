@@ -148,6 +148,45 @@ index  name     operation          input shapes    output shapes
 
 Parameters: 867,072. Block structure follows Radford et al. 2019, "Language Models are Unsupervised Multitask Learners" (GPT-2); the count was checked against the same architecture built in plain torch (256·128 + 64·128 + 4·(4·128 + 4·(128·128+128) + (512·128+512) + (128·512+128)) + 2·128 + 128·256 = 867,072), with the head untied rather than shared with the token embedding.
 
+## Hopfield classifier
+
+Classify a 28×28 image by projecting it to a 128-wide query, retrieving from a 64-pattern modern Hopfield memory, and reading out the classes. The final width is inferred from the output contract.
+
+`examples/networks/hopfield_classifier.hndl`
+
+```python
+# A modern Hopfield layer as the hidden layer of a 28×28 grayscale classifier.
+flatten()
+
+# Project the image to the query width; the memory acts on this last axis.
+linear(128, name="query")
+
+# 64 stored patterns of width 128, the only parameters of the layer.
+# beta=0.25 keeps the softmax soft, so a query retrieves a mixture of the
+# patterns it lies closest to instead of snapping to one; a single update is
+# exactly attention with the stored patterns as both keys and values.
+hopfield(64, beta=0.25, steps=1, name="memory")
+
+relu()
+
+# Width inferred from the output contract: 10 classes.
+linear(name="logits")
+```
+
+Input `['B', 1, 28, 28]` → output `['B', 10]`.
+
+```text
+Network: [B, 1, 28, 28] -> [B, 10]  dtype=float32
+index  name    operation  input shapes      output shapes
+0      n0      flatten    x=[B, 1, 28, 28]  out=[B, 784]
+1      query   linear     x=[B, 784]        out=[B, 128]
+2      memory  hopfield   x=[B, 128]        out=[B, 128]
+3      n3      relu       x=[B, 128]        out=[B, 128]
+4      logits  linear     x=[B, 128]        out=[B, 10]
+```
+
+Parameters: 109,962. Hopfield layer of Ramsauer et al., "Hopfield Networks is All You Need" (2020), whose only parameter is the stored-pattern matrix; 784·128+128 + 64·128 + 128·10+10 = 109,962 parameters.
+
 ## Multilayer perceptron
 
 Flatten a 28×28 image and classify it with two ReLU hidden layers. The final width is inferred from the output contract.
