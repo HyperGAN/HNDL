@@ -1,0 +1,8 @@
+{
+  "title": "DCGAN generator",
+  "description": "Project a 100-dimensional latent vector to a 4×4×1024 seed, then upsample with four doubling transposed convolutions to a 3×64×64 image. The projection width, the seed size and the three output channels are all inferred from the contract.",
+  "input_shape": ["B", 100],
+  "output_shape": ["B", 3, 64, 64],
+  "parameters": 12658435,
+  "reference": "Radford, Metz & Chintala 2015 (DCGAN), figure 1: project and reshape to 4×4×1024, then 8×8×512, 16×16×256, 32×32×128, 64×64×3. The count was checked by building the same stack in plain torch — Linear(100, 16384, bias=False), four ConvTranspose2d(kernel 4, stride 2, padding 1) with bias=False under each of the four BatchNorm2d layers and bias=True on the final RGB stage — which also gives 12,658,435. The PyTorch DCGAN tutorial differs: it starts from a 100×1×1 ConvTranspose2d rather than a linear projection, and its ngf=64 feature maps make the stack 512/256/128/64/3 instead of the paper's 1024/512/256/128/3."
+}

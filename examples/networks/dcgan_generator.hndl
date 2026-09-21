@@ -1,0 +1,26 @@
+# DCGAN generator (Radford et al. 2015, figure 1): a 100-dimensional latent
+# vector becomes a 64×64 RGB image. Four doubling stages divide 64 by 16, so
+# the contract fixes the seed at 4×4 and the projection at 1024·4·4 = 16384.
+# Every convolution that feeds a batch_norm drops its bias, as in the reference.
+
+linear(bias=False, name="project")            # [B, 100] -> [B, 16384]
+reshape(1024, name="seed")                    # -> [B, 1024, 4, 4]
+batch_norm(name="seed_norm")
+relu()
+
+deconv(512, policy="up2", bias=False, name="up8")    # 4×4 -> 8×8
+batch_norm()
+relu()
+
+deconv(256, policy="up2", bias=False, name="up16")   # 8×8 -> 16×16
+batch_norm()
+relu()
+
+deconv(128, policy="up2", bias=False, name="up32")   # 16×16 -> 32×32
+batch_norm()
+relu()
+
+# 32×32 -> 64×64. The 3 output channels come from the contract, and this last
+# stage keeps its bias because no normalization follows it.
+deconv(policy="up2", name="to_rgb")
+tanh()                                               # images in (-1, 1)
