@@ -19,6 +19,7 @@ from pathlib import Path
 import torch
 
 from .errors import HNDLError
+from .types import Immutable
 
 OUTPUTS = ("features", "pooled", "logits", "embeds")
 _HF_PREFIX = "hf://"
@@ -36,7 +37,7 @@ def _require(module_name):
 
 
 @dataclass(frozen=True)
-class Source:
+class Source(Immutable):
     """A resolved checkpoint location."""
 
     kind: str            # "hf", "directory", or "file"
@@ -109,7 +110,7 @@ def resolve_source(source, config_path=""):
 
 
 @dataclass(frozen=True)
-class Contract:
+class Contract(Immutable):
     """What the wrapped model consumes."""
 
     kind: str                 # "ids" or "pixels"
@@ -117,7 +118,7 @@ class Contract:
     image_size: object = None  # (H, W) for pixels when the architecture fixes it
 
 
-class TransformersProvider:
+class TransformersProvider(Immutable):
     name = "transformers"
 
     def __init__(self, source, output, component):
@@ -214,7 +215,7 @@ class TransformersProvider:
         return model(**{"input_ids" if kind == "ids" else "pixel_values": x})
 
 
-class TimmProvider:
+class TimmProvider(Immutable):
     name = "timm"
 
     def __init__(self, source, output, component):

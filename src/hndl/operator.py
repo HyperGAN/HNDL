@@ -18,6 +18,7 @@ import re
 from types import MappingProxyType
 
 from .errors import HNDLError
+from .types import Immutable
 
 REQUIRED = object()
 ELLIPSIS = "..."
@@ -58,7 +59,7 @@ def _integer_in_range(value, name, minimum, maximum):
 
 
 @dataclass(frozen=True)
-class Arg:
+class Arg(Immutable):
     """One scalar operator argument.
 
     ``Arg(float, 1e-5, min=0, exclusive_min=True, help="...")`` describes a
@@ -201,7 +202,7 @@ class Arg:
 
 
 @dataclass(frozen=True)
-class Sym:
+class Sym(Immutable):
     """A positive node-local dimension symbol multiplied by a fixed integer."""
 
     name: str
@@ -209,7 +210,7 @@ class Sym:
 
 
 @dataclass(frozen=True)
-class Port:
+class Port(Immutable):
     name: str
     pattern: object = None   # tuple of "B" | Sym | int | ELLIPSIS, or None when unconstrained
     dtype: str = "compute"
@@ -217,7 +218,7 @@ class Port:
 
 
 @dataclass(frozen=True)
-class Policy:
+class Policy(Immutable):
     """A named construction profile: hard requirements that fill omitted fields."""
 
     identity: str
@@ -232,7 +233,7 @@ class Policy:
 
 
 @dataclass(frozen=True)
-class Example:
+class Example(Immutable):
     """A runnable configuration snippet rendered into the operator's docs.
 
     ``input_dtype`` names an integer graph input such as token ids. ``network``
@@ -368,7 +369,7 @@ def parse_shape(text):
 
 
 @dataclass(frozen=True)
-class Operator:
+class Operator(Immutable):
     """The registered declaration of one operation and its module class."""
 
     alias: str

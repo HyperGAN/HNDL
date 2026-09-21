@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **`copy.deepcopy(model)` works.** A built network copies natively, which is
+  what an exponential-moving-average model needs. The copy owns every
+  parameter and buffer, keeps each `requires_grad` flag and the train/eval
+  mode, and draws no random numbers; the resolved plan, its registry and the
+  build receipt are immutable, so the copy shares them. `copy.copy(model)` is
+  a second handle on the same tensors. Pickling a whole module still cannot
+  work --- plans hold frozen mappings and operator declarations hold
+  functions --- but it now says so and points at `plan.to_json()` plus
+  `torch.save(model.state_dict())` instead of failing inside the pickler.
+
 ## 0.1.2 (2026-09-21)
 
 README links are absolute so they work on the PyPI project page; a test
