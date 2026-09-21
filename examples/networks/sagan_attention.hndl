@@ -3,32 +3,10 @@
 # block sees the whole map where a 3x3 convolution sees a neighbourhood.
 #
 # N = 16*16 = 256 positions, C = 64 channels, and the query/key width is
-# C/8 = 8 as in the paper.
+# C/8 = 8 as in the paper: reduction=8 is the default.
+#
+# The one operator carries the whole block — the three 1x1 projections, the
+# 256x256 attention map, and the learned gate that starts at 0 so the block
+# begins as the identity and the network decides how much attention to admit.
 
-saved = x
-
-# 1x1 projections: f (query) and g (key) are narrow, h (value) keeps C.
-f = conv(x, 8, kernel_size=1, name="f")        # [B, 8, 16, 16]
-g = conv(x, 8, kernel_size=1, name="g")        # [B, 8, 16, 16]
-h = conv(x, 64, kernel_size=1, name="h")       # [B, 64, 16, 16]
-
-# Flatten the spatial axes: [B, C', H, W] -> [B, C', N].
-fn = reshape(f, 8)                             # [B, 8, 256]
-gn = reshape(g, 8)                             # [B, 8, 256]
-hn = reshape(h, 64)                            # [B, 64, 256]
-
-# energy[i, j] = f[:, i] . g[:, j] over the query width.
-ft = transpose(fn, 1, 2)                       # [B, 256, 8]
-energy = matmul(ft, gn)                        # [B, 256, 256]
-beta = softmax(energy, -1)                     # attention over the key positions
-
-# out[:, i] = sum_j beta[i, j] * h[:, j]; beta is transposed so that the sum
-# runs over the key axis, as in the reference implementation.
-bt = transpose(beta, 1, 2)                     # [B, 256, 256]
-o = matmul(hn, bt)                             # [B, 64, 256]
-o = reshape(o, 64, 16, 16)                     # back to the image layout
-
-# The learned gate starts at 0, so the block starts as the identity and the
-# network decides how much attention to admit.
-o = learned_scale(o, name="gamma")
-add(o, saved)
+spatial_attention()

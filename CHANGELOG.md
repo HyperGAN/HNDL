@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **Opt-in performance/optimization tests.** tests/benchmark/, marked
+  benchmark and excluded from CI (pytest -m "not network and not benchmark"),
+  times every network in examples/networks end to end, checks whether
+  torch.compile accepts each built graph and by how much it speeds
+  inference up, and asserts hndl's built graphs run within a bounded
+  multiple of hand-written PyTorch equivalents. Run explicitly with
+  pytest -m benchmark tests/benchmark.
+
+- **spatial_attention operator.** The SAGAN self-attention block (Zhang et
+  al. 2018) as one first-class operator over [B, C, H, W] feature maps:
+  1x1-conv query/key/value projections, a softmax attention map over
+  flattened spatial positions, and a zero-initialized learned_scale gate
+  on the residual, all in one node instead of eight.
+  examples/networks/sagan_attention.hndl now calls spatial_attention()
+  instead of composing it by hand.
+
 ## 0.4.0 (2026-09-21)
 
 A minor release for HyperGAN's fixed-context discriminator: `concat` joins tensors along the batch axis with the multiple tracked as `k*B`, and a new `chunk` operator cuts an axis back into equal sections.

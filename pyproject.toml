@@ -47,8 +47,9 @@ hndl = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-ra"
-markers = ["cuda: requires an available CUDA device", "network: downloads checkpoints from the network"]
+markers = ["cuda: requires an available CUDA device", "network: downloads checkpoints from the network", "benchmark: slow performance/optimization tests, opt-in only (not run in CI by default)"]
 
 [tool.ruff]
 target-version = "py311"

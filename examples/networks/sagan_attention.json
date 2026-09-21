@@ -1,6 +1,6 @@
 {
   "title": "SAGAN self-attention block",
-  "description": "The self-attention block of the Self-Attention GAN over a 64-channel 16×16 feature map: three 1×1 projections, a 256×256 attention map built with matmul and softmax, and a learned gate that starts at zero so the block begins as the identity. The flattening reshapes keep the batch symbolic, and the whole block is written from registered operators — no attention operator is involved.",
+  "description": "The self-attention block of the Self-Attention GAN over a 64-channel 16×16 feature map, written as the single `spatial_attention` operator: three 1×1 projections, a 256×256 attention map, and a learned gate that starts at zero so the block begins as the identity. The default reduction of 8 gives the paper's C/8 query width, and the batch stays symbolic throughout.",
   "input_shape": ["B", 64, 16, 16],
   "output_shape": ["B", 64, 16, 16],
   "parameters": 5201,

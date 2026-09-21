@@ -118,6 +118,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`global_avg_pool`](global_avg_pool.md) | Average each channel over height and width, producing one value per channel. |
 | [`max_pool`](max_pool.md) | Two-dimensional max pooling over [B, C, H, W] images. |
 | [`pixel_shuffle`](pixel_shuffle.md) | Trade channels for resolution: rearrange C*r^2 channels into an r-times larger image. |
+| [`spatial_attention`](spatial_attention.md) | SAGAN self-attention over every position of a [B, C, H, W] feature map. |
 | [`upsample`](upsample.md) | Enlarge height and width by an integer factor with a fixed interpolation kernel. |
 
 ## vision
