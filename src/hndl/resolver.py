@@ -130,16 +130,18 @@ def _ordered_nodes(graph, registry, limits):
         spec = specs[node.id]
         for port, ref in node.inputs.items():
             expected = spec.port_dtype(port, graph.dtype)
-            if dtypes[ref] != expected:
+            if expected != "any" and dtypes[ref] != expected:
                 raise HNDLError("E_DTYPE", f"Port {port} expects {expected} but {ref} carries {dtypes[ref]}", node=node.id)
         for port in node.outputs:
-            dtypes[f"node:{node.id}/{port}"] = spec.port_dtype(port, graph.dtype)
-    return ordered, specs
+            declared = spec.port_dtype(port, graph.dtype)
+            dtypes[f"node:{node.id}/{port}"] = graph.dtype if declared == "any" else declared
+    return ordered, specs, dtypes
 
 
 class _Solver:
-    def __init__(self, graph, nodes, specs, limits):
+    def __init__(self, graph, nodes, specs, limits, dtypes=None):
         self.graph, self.nodes, self.specs, self.limits = graph, nodes, specs, limits
+        self.dtypes = {} if dtypes is None else dtypes
         self.batch = graph.input_shape[0]
         self.shapes = {"input:x": list(graph.input_shape)}
         self.args = {node.id: dict(node.args) for node in nodes}
@@ -376,8 +378,8 @@ def resolve_graph(graph, registry=None, limits=None):
     output_shape = _contract(graph.output_shape, "output_shape", limits)
     if input_shape[0] != output_shape[0]:
         raise HNDLError("E_CONSTRAINT", "Input and output must declare the same batch dimension")
-    nodes, specs = _ordered_nodes(graph, registry, limits)
-    solver = _Solver(graph, nodes, specs, limits)
+    nodes, specs, dtypes = _ordered_nodes(graph, registry, limits)
+    solver = _Solver(graph, nodes, specs, limits, dtypes)
     resolved = solver.run()
     return ResolvedPlan(resolved, input_shape, output_shape, graph.output_ref, graph.dtype, graph.frontend, registry,
                         input_dtype=graph.input_dtype)

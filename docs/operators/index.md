@@ -38,6 +38,12 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`adaptive_norm`](adaptive_norm.md) | Instance-normalize features, then apply a per-example learned scale and bias. |
 | [`group_norm`](group_norm.md) | Normalize channel groups per example, with learned per-channel affine. |
 
+## pretrained
+
+| Operator | Summary |
+| --- | --- |
+| [`pretrained`](pretrained.md) | Load a pretrained network from disk or the Hugging Face Hub as one frozen node. |
+
 ## shape
 
 | Operator | Summary |

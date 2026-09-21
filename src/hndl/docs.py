@@ -91,10 +91,15 @@ def render_operator(spec, registry):
         if example.note:
             lines += [example.note, ""]
         lines += ["```python", example.source.strip("\n"), "```", ""]
-        lines.append(f"Input `{list(example.input_shape)}` → output `{list(example.output_shape)}`.")
+        dtype_note = f" (`input_dtype=\"{example.input_dtype}\"`)" if example.input_dtype else ""
+        lines.append(f"Input `{list(example.input_shape)}`{dtype_note} → output `{list(example.output_shape)}`.")
         lines.append("")
+        if example.network:
+            lines += ["This example downloads a checkpoint; resolved shapes and parameter counts depend on it.", ""]
+            continue
+        kwargs = {"input_dtype": example.input_dtype} if example.input_dtype else {}
         plan = resolve(example.source, input_shape=example.input_shape, output_shape=example.output_shape,
-                       registry=registry)
+                       registry=registry, **kwargs)
         counts = parameter_counts(plan, registry=registry)
         total = sum(count for count in counts.values() if count is not None)
         lines += ["```text", _shape_table(plan), "```", "", f"Parameters: {total:,}", ""]

@@ -38,7 +38,7 @@ _TYPES = {int: "int", float: "float", bool: "bool", str: "str", PAIR: "pair", IN
 _IDENT = re.compile(r"[a-z][a-z0-9_]*\Z")
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
 _PORT_SPEC = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)(\*?)\s*(?:\[([^\]]*)\])?\s*(?::\s*([A-Za-z0-9_]+))?\s*\Z")
-_DTYPES = ("compute",) + COMPUTE_DTYPES + INDEX_DTYPES
+_DTYPES = ("compute", "any") + COMPUTE_DTYPES + INDEX_DTYPES
 
 
 def _registry_error(message):
@@ -233,18 +233,29 @@ class Policy:
 
 @dataclass(frozen=True)
 class Example:
-    """A runnable configuration snippet rendered into the operator's docs."""
+    """A runnable configuration snippet rendered into the operator's docs.
+
+    ``input_dtype`` names an integer graph input such as token ids. ``network``
+    marks examples that download a checkpoint; the harness runs them only when
+    network tests are selected and the docs render them without shape tables.
+    """
 
     source: str
     input_shape: tuple
     output_shape: tuple
     note: str = ""
+    input_dtype: object = None
+    network: bool = False
 
     def __post_init__(self):
         if type(self.source) is not str or not self.source.strip():
             _registry_error("Example source must be a non-empty configuration string")
         object.__setattr__(self, "input_shape", tuple(self.input_shape))
         object.__setattr__(self, "output_shape", tuple(self.output_shape))
+        if self.input_dtype is not None and self.input_dtype not in COMPUTE_DTYPES + INDEX_DTYPES:
+            _registry_error(f"Example input_dtype must be one of {', '.join(COMPUTE_DTYPES + INDEX_DTYPES)}")
+        if type(self.network) is not bool:
+            _registry_error("Example network flag must be a boolean")
 
 
 def _validate_name(name, kind):
@@ -523,7 +534,7 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
     for example in examples:
         if type(example) is Example:
             normalized_examples.append(example)
-        elif isinstance(example, (tuple, list)) and len(example) in (3, 4):
+        elif isinstance(example, (tuple, list)) and 3 <= len(example) <= 6:
             normalized_examples.append(Example(*example))
         else:
             _registry_error("examples must be Example(source, input_shape, output_shape) entries")
@@ -574,6 +585,10 @@ class NodeView:
         self.inputs = tuple(node.inputs)
         self.outputs = tuple(node.outputs)
         self.policy = (node.source or {}).get("policy")
+
+    def dtype(self, port):
+        """The dtype name carried by a port's edge (inputs) or declared for an output."""
+        return self._solver.dtypes.get(self._ref(port))
 
     def _ref(self, port):
         try:
