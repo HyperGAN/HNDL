@@ -23,6 +23,8 @@ in this alpha.
   unary `preserves_shape` helper remains available.
 - An executable AdaIN-style example with inferred feature/style projections,
   split/remainder routing, shared branches, and numerical/gradient checks.
+- Persisted constant parameter initialization and trainability overrides, shared
+  by both frontends and applied when building or rebuilding a plan.
 - Immutable resolved graph data, canonical JSON plan persistence, digests,
   exact operator/state-version checks, and `build(plan)` without recapturing an
   author function. JSON is a persistence format, not an authoring language.
@@ -107,8 +109,8 @@ The [adaptive-normalization example](examples/adaptive_normalization.py)
 shows registration and both a shared mapping branch and split/remainder
 routing. Run it with `python examples/adaptive_normalization.py --device cpu`
 (or an available CUDA device). Its style-affine zero initialization is an
-explicit PyTorch action after construction; save the state dictionary along
-with the plan to preserve initialized or trained values.
+declaration in the config (`init={"weight": 0, "bias": 0}`); save the state
+dictionary along with the plan to preserve trained values.
 
 ## Saving a resolved plan
 
@@ -135,21 +137,54 @@ saved concrete equations, dimensions, bounds, and versions without executing
 source or an author function. The ordinary PyTorch state dictionary does not
 contain the architecture; keep both together.
 
-Schema 1 uses sorted JSON object keys, compact separators, UTF-8 without ASCII
-escaping, arrays for tuples, finite numbers, and SHA-256 digests. Node order
-and identities participate in the semantic digest. Source/frontend metadata
+Schema 2 uses sorted JSON object keys, compact separators, UTF-8 without ASCII
+escaping, arrays for tuples, finite numbers, and SHA-256 digests. Node order,
+identities, initialization, and trainability participate in the semantic digest. Source/frontend metadata
 and argument provenance affect the artifact digest but not the semantic
 digest. Plan JSON is limited to 16 MiB. This is an alpha persistence API;
 restoring arbitrary third-party artifacts is not the same isolation boundary
 as loading declarative source.
+
+The current reader requires plan schema 2 and resolution version 1. Schema 1
+plans are rejected with `E_STATE_VERSION`; re-resolve the original definition
+and save a new plan. This alpha change adds explicit construction settings to
+every node, including defaults. It does not change PyTorch state names.
+
+## Construction settings
+
+`init={"weight": 0, "bias": 0}` selects constant parameter overrides after
+normal module construction. `trainable=False` freezes all parameters in the
+operation, while `trainable={"weight": False}` changes only named parameters.
+Omitting either option preserves the constructor's values or `requires_grad`
+flags. Empty mappings have the same meaning as omission. Explicit `None` is
+not supported. Both options are reserved frontend metadata, alongside `name`
+and `policy`, and are never passed as operator constructor arguments.
+
+Targets are exact, relative parameter paths (including nested paths such as
+`projection.weight`), with at most 256 entries per mapping and 256 characters
+per path. Buffers and nonexistent targets are rejected at build time. Pure
+resolution validates the settings without importing or constructing PyTorch
+modules; it cannot confirm a trusted module's actual parameter names.
+Constants must be finite numbers other than booleans, within float32 range;
+they are rounded to float32 in the plan. Underflow rounds to zero, and the sign
+of zero is preserved. Trainability values must be booleans.
+Aliased parameters cannot receive conflicting declarations.
+
+Initialization overrides run under `no_grad` after parameters are materialized.
+Normal constructor initialization still consumes RNG draws even for overridden
+parameters. `initialization_seed=None` uses the caller's RNG; an explicit seed
+isolates construction and restores the caller's RNG afterward. Constant
+application does not draw random values. Freezing affects parameter gradients,
+not input gradients or train/eval mode. Host changes to parameters or their
+`requires_grad` flags do not rewrite the immutable plan.
 
 ## Remaining v1 work
 
 - Custom shape relations beyond equality and integer scaling, inferable custom
   scalar arguments, argument-dependent shapes and state bounds, and opaque
   asserted contracts. Arbitrary custom shape callbacks are not accepted.
-- General custom construction policies, initializer overrides, and persisted
-  per-node trainability masks.
+- General custom construction policies and initializers beyond constructor
+  defaults plus constant parameter overrides.
 - Full derivation chains and source provenance for every inferred value.
 - Complete persisted author/source metadata, published machine-readable
   schemas and cross-version compatibility fixtures, and strict checkpoint

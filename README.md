@@ -256,6 +256,29 @@ branches = network_from_callable(
 
 The helper explicitly starts each branch from its argument and returns a reference for the join. Native functions can also return a tensor explicitly to select the network output. Variable names do not name layers; optional `name="..."` arguments give layers stable identities for lookup and saved state.
 
+## Set initial values and freeze layers
+
+Keep initialization choices with the network definition:
+
+```python
+model = network(
+    """
+    linear(64, trainable=False)
+    relu()
+    linear(init={"weight": 0, "bias": 0})
+    """,
+    input_shape=("B", 128),
+    output_shape=("B", 10),
+    device="cpu",
+)
+```
+
+The first layer keeps its normal initial values and has frozen parameters. The final layer starts with zero weights and bias and remains trainable. This illustrates the controls; choose initial values to suit your architecture. The [adaptive-normalization example](examples/adaptive_normalization.py) uses a zero-initialized style projection to start with unit scale and zero bias on normalized features.
+
+`init` maps parameter names to constant values. `trainable=False` freezes every parameter in that operation; use `trainable={"weight": False}` to freeze only its weight. Unspecified parameters retain their module defaults. Custom operations can use exact nested parameter names such as `"projection.weight"`. These options work in native Python too, for example `ops.linear(64, trainable=False)`.
+
+Both settings are saved in the resolved plan and applied whenever you build it. They do not change the inferred shapes. Gradients still flow through frozen layers to their inputs, and `model.train()` and `model.eval()` work normally. A state dictionary saves parameter values, so keep the plan alongside it to reconstruct the architecture and trainability settings.
+
 ## Load a config file
 
 Save declarative operation calls and optional assignments in a file such as `generator.hndl`, using the same syntax as `generator_config` above. Load it with constraints from your application:

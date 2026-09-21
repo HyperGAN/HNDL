@@ -58,6 +58,15 @@ jobs:
           assert plan.nodes[-1].output_shapes["out"] == ("B", 10)
           assert "torch" not in sys.modules
           print(plan)
+          settings = resolve(
+              'linear(64, trainable=False); relu(); linear(init={"weight": 0, "bias": 0})',
+              input_shape=("B", 128), output_shape=("B", 10),
+          )
+          restored = ResolvedPlan.from_json(settings.to_json())
+          assert restored.schema_version == 2
+          assert restored.semantic_digest == settings.semantic_digest
+          assert restored.nodes[0].trainability["default"] is False
+          assert restored.nodes[-1].initialization["overrides"] == {"weight": 0.0, "bias": 0.0}
           registry = Registry.builtins()
           registry.register(
               "adaptive_norm", identity="example.adaptive_norm", version=1,
