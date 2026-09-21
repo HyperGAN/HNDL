@@ -142,10 +142,41 @@ or read it from the `E_PRETRAINED` message raised when `sha256=` is missing.
   `"features.2"` or `"layer3.1.conv2"`. The node runs the model with a forward
   hook on that submodule, returns its output, and stops the pass there, which
   is what perceptual losses and feature matching want. An unknown name fails
-  with `E_PRETRAINED` listing the available submodules. Omit `layer` and
-  `readout` and the node returns the model's own return value. `output=`,
+  with `E_PRETRAINED` listing the available submodules. Omit `layer`, `layers`
+  and `readout` and the node returns the model's own return value. `output=`,
   `component=` and `config=` apply to transformers and timm checkpoints, not to
   providers.
+- **`layers=`** names several submodules instead of one and gives the node one
+  output per entry, in the order written, from a single forward pass:
+
+  ```python
+  f1, f2, f3 = pretrained("resnet18.pth", provider="resnet18", sha256="<64 hex>",
+                          layers=("layer1", "layer2", "layer3"))
+  ```
+
+  Each output is the raw output of that submodule at its native shape — no
+  pooling, no concatenation — which is what perceptual losses, feature matching
+  and FPN-style heads want from a frozen trunk. One pass produces all of them:
+  a hook on each requested submodule captures its output, and the pass stops
+  after the last of them in execution order, so the tail of the network never
+  runs. Each captured tensor is cloned, because an `nn.ReLU(inplace=True)` (as
+  in torchvision's ResNets) or a residual `+=` later in the pass would otherwise
+  overwrite the values the hook saw, or break backward through them with a
+  version-counter error. The clone is differentiable: every output carries
+  gradients to the network's input and supports second derivatives, and the
+  checkpoint's own parameters stay frozen unless `trainable=True`.
+
+  The call returns a tuple, so it clears the current tensor exactly as `split`
+  does and the next operation must name its input. That holds for a one-entry
+  `layers=("layer1",)` too, which returns a one-tuple; an empty `layers=()`
+  means the argument was not given. A duplicate entry, an empty entry, an
+  unknown submodule, a submodule that runs more than once before the pass stops,
+  and a conflict with `layer=` or `readout=` each fail with `E_PRETRAINED`.
+  `layers=` is a new canonical argument of `pretrained`, and plan digests cover
+  every canonical argument, so a plan saved before this release that holds a
+  `pretrained` node no longer matches its own digest: restoring it fails with
+  `E_INTEGRITY` and it has to be re-resolved once from its source. Plans
+  without a `pretrained` node are untouched.
 - **`readout=`** names host code instead of a submodule, for checkpoints whose
   useful tensor comes from a method rather than `forward` — DINOv2's
   `forward_features(x)["x_norm_patchtokens"]`, for example. The host binds named

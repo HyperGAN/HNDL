@@ -35,7 +35,8 @@ INDEX_DTYPES = ("int64", "int32", "bool")
 RESERVED = frozenset({"name", "policy", "init", "trainable"})
 PAIR = "pair"
 INTS = "ints"
-_TYPES = {int: "int", float: "float", bool: "bool", str: "str", PAIR: "pair", INTS: "ints"}
+STRS = "strs"
+_TYPES = {int: "int", float: "float", bool: "bool", str: "str", PAIR: "pair", INTS: "ints", STRS: "strs"}
 _IDENT = re.compile(r"[a-z][a-z0-9_]*\Z")
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
 _PORT_SPEC = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)(\*?)\s*(?:\[([^\]]*)\])?\s*(?::\s*([A-Za-z0-9_]+))?\s*\Z")
@@ -67,7 +68,8 @@ class Arg(Immutable):
     ``inferable=True`` for a dimension the resolver may solve when omitted, and
     ``dim="D"`` to tie it to a shape symbol so it flows in both directions.
     Types are ``int``, ``float``, ``bool``, ``str``, ``"pair"`` (an int or two
-    ints, normalized to a pair) or ``"ints"`` (a tuple of ints).
+    ints, normalized to a pair), ``"ints"`` (a tuple of ints) or ``"strs"``
+    (a tuple of strings).
     """
 
     type: object
@@ -85,7 +87,7 @@ class Arg(Immutable):
 
     def __post_init__(self):
         if self.type not in _TYPES:
-            _registry_error("Arg type must be int, float, bool, str, 'pair', or 'ints'")
+            _registry_error("Arg type must be int, float, bool, str, 'pair', 'ints', or 'strs'")
         if type(self.help) is not str or not self.help.strip():
             _registry_error("Every Arg needs a non-empty help string")
         if type(self.inferable) is not bool or type(self.positional) is not bool:
@@ -159,7 +161,28 @@ class Arg(Immutable):
         self._bounds(value, name)
         return value
 
+    def _text(self, value, name):
+        if type(value) is not str:
+            raise HNDLError("E_ARGUMENT", f"{name} must have type str")
+        if len(value) > MAX_STRING_BYTES:
+            raise HNDLError("E_RESOURCE", f"{name} exceeds {MAX_STRING_BYTES} UTF-8 bytes")
+        try:
+            length = len(value.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise HNDLError("E_ARGUMENT", f"{name} must be valid UTF-8 text") from None
+        if length > MAX_STRING_BYTES:
+            raise HNDLError("E_RESOURCE", f"{name} exceeds {MAX_STRING_BYTES} UTF-8 bytes")
+        if self.choices is not None and value not in self.choices:
+            raise HNDLError("E_ARGUMENT", f"{name} must be one of {', '.join(self.choices)}")
+        return value
+
     def validate(self, value, name):
+        if self.type is STRS:
+            if type(value) is str or not isinstance(value, (list, tuple)):
+                raise HNDLError("E_ARGUMENT", f"{name} must be a sequence of strings")
+            if len(value) > MAX_PORTS:
+                raise HNDLError("E_RESOURCE", f"{name} has too many entries")
+            return tuple(self._text(item, name) for item in value)
         if self.type is PAIR:
             if type(value) is int:
                 return (self._element(value, name),) * 2
@@ -186,16 +209,7 @@ class Arg(Immutable):
         if self.type is int and abs(value) > MAX_INTEGER_ARGUMENT:
             raise HNDLError("E_RESOURCE", f"{name} exceeds the supported integer argument bound")
         if self.type is str:
-            if len(value) > MAX_STRING_BYTES:
-                raise HNDLError("E_RESOURCE", f"{name} exceeds {MAX_STRING_BYTES} UTF-8 bytes")
-            try:
-                length = len(value.encode("utf-8"))
-            except UnicodeEncodeError:
-                raise HNDLError("E_ARGUMENT", f"{name} must be valid UTF-8 text") from None
-            if length > MAX_STRING_BYTES:
-                raise HNDLError("E_RESOURCE", f"{name} exceeds {MAX_STRING_BYTES} UTF-8 bytes")
-            if self.choices is not None and value not in self.choices:
-                raise HNDLError("E_ARGUMENT", f"{name} must be one of {', '.join(self.choices)}")
+            self._text(value, name)
         if self.type in (int, float):
             self._bounds(value, name)
         return value
@@ -346,8 +360,8 @@ def parse_shape(text):
                 _registry_error(f"Invalid port specification {piece.strip()!r}")
             name, star, pattern, dtype = match.groups()
             _validate_name(name, "Port")
-            if star and not is_input:
-                _registry_error("Only input ports can be variadic")
+            if star and not is_input and pattern is not None:
+                _registry_error("A variadic output port carries no shape pattern; constrain it with relation=")
             if dtype is not None and dtype not in _DTYPES:
                 _registry_error(f"Unsupported port dtype {dtype!r}")
             ports.append(Port(name, None if pattern is None else _parse_pattern(pattern, name),
@@ -361,6 +375,8 @@ def parse_shape(text):
     inputs, outputs = sides
     if sum(port.variadic for port in inputs) > 1 or any(port.variadic for port in inputs) and len(inputs) != 1:
         _registry_error("A variadic input must be the sole declared input port")
+    if any(port.variadic for port in outputs) and len(outputs) != 1:
+        _registry_error("A variadic output must be the sole declared output port")
     symbols = {dim.name for port in (*inputs, *outputs) if port.pattern
                for dim in port.pattern if isinstance(dim, Sym)}
     if len(symbols) > MAX_SYMBOLS:
@@ -388,6 +404,7 @@ class Operator(Immutable):
     examples: tuple = ()
     module: object = None
     positional_rest: object = None
+    outputs_from: object = None
     policies: Mapping = field(default_factory=dict)
     validate: object = None
     finalize: object = None
@@ -415,15 +432,42 @@ class Operator(Immutable):
     def variadic(self):
         return self.inputs[0].name if self.inputs and self.inputs[0].variadic else None
 
+    @property
+    def variadic_output(self):
+        return self.outputs[0].name if self.outputs and self.outputs[0].variadic else None
+
     def input_ports_for(self, args):
         if self.variadic is None:
             return self.input_ports
         return tuple(f"{self.variadic}{i}" for i in range(args["input_count"]))
 
+    def output_ports_for(self, args):
+        """The output ports of one node: ``out0, out1, ...`` for a variadic output.
+
+        The count is the length of the sequence argument named by
+        ``outputs_from``; an empty sequence leaves the single declared port, so
+        an operator that only sometimes fans out keeps its ordinary ``out``.
+        """
+        prefix = self.variadic_output
+        if prefix is None:
+            return self.output_ports
+        count = len(args.get(self.outputs_from) or ())
+        return self.output_ports if count == 0 else tuple(f"{prefix}{i}" for i in range(count))
+
+    def returns_tuple(self, args):
+        """Whether a call produces a tuple of tensors, which clears current."""
+        ports = self.output_ports_for(args)
+        return len(ports) > 1 or ports != self.output_ports
+
+    def _variadic_member(self, prefix, port):
+        return prefix is not None and port.startswith(prefix) and port[len(prefix):].isdigit()
+
     def port_dtype(self, port, compute):
         """The concrete dtype name of a port given the plan's compute dtype."""
-        if self.variadic is not None and port.startswith(self.variadic) and port[len(self.variadic):].isdigit():
+        if self._variadic_member(self.variadic, port):
             declared = self.inputs[0].dtype
+        elif self._variadic_member(self.variadic_output, port):
+            declared = self.outputs[0].dtype
         else:
             declared = next((p.dtype for p in (*self.inputs, *self.outputs) if p.name == port), "compute")
         return compute if declared == "compute" else declared
@@ -471,7 +515,7 @@ def _check_init_signature(cls, args, symbols):
 
 def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=None, examples=(),
                   category="other", relation=None, shape_text=None, positional_rest=None, policies=None,
-                  validate=None, finalize=None, reference=None):
+                  validate=None, finalize=None, reference=None, outputs_from=None):
     if not isinstance(alias, str) or not alias.isidentifier() or alias in ("x", "out") or alias.startswith("_"):
         _registry_error("Operator alias must be an identifier other than x/out without a leading underscore")
     if keyword.iskeyword(alias):
@@ -516,6 +560,14 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
     variadic = inputs[0].variadic if inputs else False
     if variadic and ("input_count" not in checked or checked["input_count"].type is not int):
         _registry_error("A variadic operator must declare an int argument named input_count")
+    variadic_output = outputs[0].variadic if outputs else False
+    if variadic_output and outputs_from is None:
+        _registry_error("A variadic output must name the sequence argument fixing its port count with outputs_from")
+    if outputs_from is not None:
+        if not variadic_output:
+            _registry_error("outputs_from applies to an operator that declares a variadic output port")
+        if outputs_from not in checked or checked[outputs_from].type not in (INTS, STRS):
+            _registry_error("outputs_from must name an 'ints' or 'strs' argument")
     policies = {} if policies is None else policies
     if not isinstance(policies, Mapping):
         _registry_error("policies must be a mapping of alias to Policy")
@@ -542,7 +594,7 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
         alias=alias, identity=identity, version=version, summary=summary.strip(), doc=doc, category=category,
         inputs=inputs, outputs=outputs, args=checked, symbols=symbols, shape_text=shape.strip(),
         relation=relation, relation_text=(shape_text or "").strip(), examples=tuple(normalized_examples),
-        module=cls, positional_rest=positional_rest,
+        module=cls, positional_rest=positional_rest, outputs_from=outputs_from,
         policies=policies, validate=validate, finalize=finalize, reference=reference,
         init_symbols=init_symbols, init_shapes=init_shapes,
     )
@@ -617,4 +669,5 @@ class NodeView:
 
 
 __all__ = ["Arg", "Example", "NodeView", "Operator", "Policy", "Port", "Sym", "operator", "parse_shape",
-           "make_operator", "REQUIRED", "PAIR", "INTS", "ELLIPSIS", "SUPPORTED_RANKS", "COMPUTE_DTYPES", "INDEX_DTYPES"]
+           "make_operator", "REQUIRED", "PAIR", "INTS", "STRS", "ELLIPSIS", "SUPPORTED_RANKS", "COMPUTE_DTYPES",
+           "INDEX_DTYPES"]

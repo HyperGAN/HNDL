@@ -457,7 +457,7 @@ def test_required_scalar_types_bounds_and_default_expansion():
     "x[B, C] -> out[B, C] -> y[B]", "x[B, ..., ...] -> out[B]", "x[..., B] -> out[B, C]",
     "x[B, B] -> out[B, B]", "x[B, 2147483648] -> out[B, C]", "x[B] -> out[B]",
     ", ".join(f"p{i}[B, C]" for i in range(33)) + " -> out[B, C]",
-    "x*, y -> out", "x -> out*", "x[B, C]:float128 -> out[B, C]",
+    "x*, y -> out", "x -> out*, y", "x -> y, out*", "x -> out*[B, C]", "x[B, C]:float128 -> out[B, C]",
 ])
 def test_invalid_or_excessive_shape_patterns_fail(shape):
     with pytest.raises(HNDLError, match="E_REGISTRY"):
@@ -654,3 +654,143 @@ def test_state_bound_applies_before_allocation():
                     limits={"max_state_bytes": 32})
     assert model.build_receipt["state_bytes"] == 32
     assert plan.nodes[0].op == "example.buffered@1"
+
+
+def fan_registry():
+    """A registry holding an operator whose output port count is one of its arguments."""
+    registry = Registry.builtins()
+
+    def relation(s):
+        for port in s.outputs:
+            s.equal(port, "data")
+
+    @registry.operator("fan", identity="tests.fan", summary="Copy a tensor once per named tag.",
+                       shape="data[B, F] -> out*", outputs_from="tags", relation=relation,
+                       shape_text="one output per tag, each shaped like data",
+                       args={"tags": Arg("strs", (), positional=False,
+                                         help="One output per tag, in the order written.")})
+    class Fan(nn.Module):
+        def __init__(self, tags):
+            super().__init__()
+            self.tags = tags
+
+        def forward(self, data):
+            if not self.tags:
+                return data
+            return tuple(data * (index + 1) for index in range(len(self.tags)))
+
+    return registry
+
+
+def test_variadic_outputs_expand_to_ordinal_ports_in_both_frontends():
+    registry = fan_registry()
+    source = 'a, b, c = fan(tags=("x", "y", "z"))\nconcat(a, b, c, axis=1)'
+
+    def author(x):
+        a, b, c = registry.ops.fan(tags=("x", "y", "z"))
+        registry.ops.concat(a, b, c, axis=1)
+
+    plan, _ = resolve_pair(source, author, registry, input_shape=("B", 4), output_shape=("B", 12))
+    assert plan.nodes[0].outputs == ("out0", "out1", "out2")
+    assert plan.nodes[0].args["tags"] == ("x", "y", "z")
+    assert dict(plan.nodes[0].output_shapes) == {"out0": ("B", 4), "out1": ("B", 4), "out2": ("B", 4)}
+    assert dict(plan.nodes[1].inputs) == {"x0": "node:n0/out0", "x1": "node:n0/out1", "x2": "node:n0/out2"}
+    assert registry.get("fan").port_dtype("out2", "bfloat16") == "bfloat16"
+
+    model = network(source, input_shape=("B", 4), output_shape=("B", 12), registry=registry, device="cpu")
+    data = torch.arange(8.0).reshape(2, 4)
+    torch.testing.assert_close(model(data), torch.cat((data, 2 * data, 3 * data), dim=1))
+
+
+def test_a_one_entry_sequence_still_returns_a_tuple_and_clears_current():
+    registry = fan_registry()
+    source = 'only, = fan(tags=("x",))\nrelu(only)'
+
+    def author(x):
+        only, = registry.ops.fan(tags=("x",))
+        registry.ops.relu(only)
+
+    plan, _ = resolve_pair(source, author, registry, input_shape=("B", 4), output_shape=("B", 4))
+    assert plan.nodes[0].outputs == ("out0",)
+    assert plan.nodes[1].inputs["x"] == "node:n0/out0"
+    with pytest.raises(HNDLError, match="E_CURRENT"):
+        resolve('fan(tags=("x",))\nrelu()', input_shape=("B", 4), output_shape=("B", 4), registry=registry)
+
+
+def test_an_empty_sequence_keeps_the_single_declared_output_port():
+    registry = fan_registry()
+
+    def author(x):
+        registry.ops.fan()
+        registry.ops.relu()
+
+    plan, _ = resolve_pair("fan()\nrelu()", author, registry, input_shape=("B", 4), output_shape=("B", 4))
+    assert plan.nodes[0].outputs == ("out",)
+    assert plan.nodes[1].inputs["x"] == "node:n0/out"
+    explicit = resolve("fan(tags=())\nrelu()", input_shape=("B", 4), output_shape=("B", 4), registry=registry)
+    assert explicit.semantic_digest == plan.semantic_digest
+
+
+def test_variadic_output_unpacking_must_match_the_requested_count():
+    registry = fan_registry()
+    for source in ('a, b = fan(tags=("x", "y", "z"))\nconcat(a, b, axis=1)',
+                   'a, b, c, d = fan(tags=("x", "y", "z"))\nconcat(a, b, axis=1)'):
+        with pytest.raises(HNDLError, match="E_OUTPUT_ARITY"):
+            resolve(source, input_shape=("B", 4), output_shape=("B", 8), registry=registry)
+
+    def author(x):
+        a, b = registry.ops.fan(tags=("x", "y", "z"))
+        registry.ops.concat(a, b, axis=1)
+
+    with pytest.raises(ValueError):
+        capture_callable(author, input_shape=("B", 4), output_shape=("B", 8), registry=registry)
+
+
+def test_a_variadic_output_plan_round_trips_and_its_ports_are_rechecked():
+    registry = fan_registry()
+    plan = resolve('a, b = fan(tags=("x", "y"))\nconcat(a, b, axis=1)', input_shape=("B", 4),
+                   output_shape=("B", 8), registry=registry)
+    encoded = plan.to_json()
+    assert '"tags":["x","y"]' in encoded and '"outputs":["out0","out1"]' in encoded
+    restored = ResolvedPlan.from_json(encoded, registry=registry)
+    assert restored.semantic_digest == plan.semantic_digest
+    assert restored.nodes[0].outputs == ("out0", "out1")
+
+    tampered = json.loads(encoded)
+    tampered["nodes"][0]["args"]["tags"] = ["x", "y", "z"]
+    with pytest.raises(HNDLError, match="E_INTEGRITY"):
+        ResolvedPlan.from_json(json.dumps(tampered), registry=registry)
+    graph = Graph((Node("n0", "tests.fan@1", {"tags": ("x", "y")}, {"data": "input:x"}, ("out", "extra")),),
+                  ("B", 4), ("B", 4), "node:n0/out")
+    with pytest.raises(HNDLError, match="E_BINDING.*output ports must be"):
+        resolve_graph(graph, registry=registry)
+
+
+@pytest.mark.parametrize("declaration", [
+    {"shape": "data[B, F] -> out*"},
+    {"shape": "data[B, F] -> out*", "outputs_from": "label"},
+    {"shape": "data[B, F] -> out*", "outputs_from": "absent"},
+    {"shape": "data[B, F] -> out[B, F]", "outputs_from": "tags"},
+])
+def test_variadic_output_declarations_are_checked_at_registration(declaration):
+    registry = Registry.builtins()
+
+    class Fanned(nn.Module):
+        def __init__(self, tags, label):
+            super().__init__()
+
+        def forward(self, data):
+            return data
+
+    args = {"tags": Arg("strs", (), positional=False, help="Tags."),
+            "label": Arg(str, "", positional=False, help="Label.")}
+    with pytest.raises(HNDLError, match="E_REGISTRY"):
+        registry.operator("fan", identity="tests.fan", summary="Fan out.", args=args, **declaration)(Fanned)
+
+
+def test_a_string_sequence_argument_validates_its_entries():
+    entry = fan_registry().get("fan")
+    assert normalize_arguments(entry, (), {"tags": ["x", "y"]}) == {"tags": ("x", "y")}
+    for tags in ("xy", 3, ("x", 4), (b"x",), ["x"] * 33):
+        with pytest.raises(HNDLError, match="E_ARGUMENT|E_RESOURCE"):
+            normalize_arguments(entry, (), {"tags": tags})

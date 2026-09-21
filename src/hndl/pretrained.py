@@ -398,6 +398,54 @@ def capture_layer(model, name, x, location):
     return value
 
 
+def capture_layers(model, names, x, location):
+    """Run ``model(x)`` once and return every named submodule's output, in order.
+
+    One pass, one hook per requested submodule, and the pass unwinds as soon as
+    the last requested submodule has produced its output, so the unused tail of
+    the network never runs. Every captured tensor is cloned: an
+    ``nn.ReLU(inplace=True)`` --- torchvision's ResNets use them --- or a
+    residual ``+=`` further along the pass writes through the same storage, so
+    an uncloned capture would hand back the overwritten values, and fail with a
+    version-counter error wherever autograd had saved that tensor. The clone is
+    differentiable, so gradients and second derivatives still reach the input.
+    A submodule that runs twice before the pass stops fails rather than
+    silently returning one of its calls.
+    """
+    targets = {name: submodule(model, name, location) for name in names}
+    captured = {}
+    handles = []
+
+    def hook_for(name):
+        def hook(module, inputs, output):
+            if name in captured:
+                _fail(f"{location}: submodule {name!r} runs more than once in the captured part of the forward "
+                      "pass, so layers= cannot say which of its outputs it means; name a submodule that runs "
+                      "once, such as the block that contains it")
+            if not isinstance(output, torch.Tensor):
+                _fail(f"{location}: submodule {name!r} returns {type(output).__name__}, not a tensor")
+            captured[name] = output.clone()
+            if len(captured) == len(targets):
+                raise _Captured(None)
+        return hook
+
+    try:
+        for name, target in targets.items():
+            handles.append(target.register_forward_hook(hook_for(name)))
+        try:
+            model(x)
+        except _Captured:
+            pass
+    finally:
+        for handle in handles:
+            handle.remove()
+    missing = [name for name in names if name not in captured]
+    if missing:
+        _fail(f"{location}: submodule(s) {', '.join(repr(name) for name in missing)} did not run during the "
+              "forward pass")
+    return tuple(captured[name] for name in names)
+
+
 def call_readout(model, readout, name, x, location):
     """Run a host-registered readout and require exactly one tensor back."""
     value = readout(model, x)
@@ -413,15 +461,26 @@ class LocalProvider:
 
     name = "local"
 
-    def __init__(self, source, output, component, layer, readout=""):
-        self.source, self.layer, self.readout = source, layer, readout
+    def __init__(self, source, output, component, layer, readout="", layers=()):
+        self.source, self.layer, self.readout, self.layers = source, layer, readout, tuple(layers)
         if component:
             _fail("component= applies to multi-tower transformers checkpoints, not provider checkpoints")
-        if layer and readout:
-            _fail(f"layer={layer!r} and readout={readout!r} both say what the node returns; pass one of them")
+        selected = [(name, value) for name, value in
+                    (("layer", layer), ("readout", readout), ("layers", self.layers)) if value]
+        if len(selected) > 1:
+            rendered = " and ".join(f"{name}={value!r}" for name, value in selected)
+            _fail(f"{rendered} {'both' if len(selected) == 2 else 'all'} say what the node returns; "
+                  "pass one of them")
         if output != "features":
-            _fail(f'provider checkpoints take an intermediate tensor with layer="<dotted submodule path>" '
-                  f'or readout="<registered readout>"; output={output!r} applies to transformers and timm checkpoints')
+            _fail(f'provider checkpoints take an intermediate tensor with layer="<dotted submodule path>", '
+                  f'layers=("<path>", "<path>") or readout="<registered readout>"; output={output!r} applies '
+                  "to transformers and timm checkpoints")
+        if any(not name for name in self.layers):
+            _fail("layers= entries are dotted named_modules() paths; an empty entry names nothing")
+        duplicates = sorted({name for name in self.layers if self.layers.count(name) > 1})
+        if duplicates:
+            _fail(f"layers= names {', '.join(repr(name) for name in duplicates)} more than once; each entry is "
+                  "one output of the node, in order")
         self.build = provider_build(source.config["provider"])
         self.read = provider_readout(source.config["provider"], readout) if readout else None
 
@@ -444,8 +503,9 @@ class LocalProvider:
                 model.load_state_dict(state, strict=True)
             except RuntimeError as exc:
                 _fail(f"{path} does not fit provider {self.source.config['provider']!r}: {exc}")
-        if self.layer:
-            submodule(model, self.layer, self.source.location)
+        for name in (self.layer, *self.layers):
+            if name:
+                submodule(model, name, self.source.location)
         return model
 
     def select(self, result):
@@ -454,16 +514,19 @@ class LocalProvider:
     def call(self, model, x, kind):
         if self.readout:
             return call_readout(model, self.read, self.readout, x, self.source.location)
+        if self.layers:
+            return capture_layers(model, self.layers, x, self.source.location)
         if not self.layer:
             return model(x)
         return capture_layer(model, self.layer, x, self.source.location)
 
 
-def provider_for(source, output, component, layer="", readout=""):
+def provider_for(source, output, component, layer="", readout="", layers=()):
     if source.provider == "local":
-        return LocalProvider(source, output, component, layer, readout)
-    if layer:
-        _fail("layer= names a submodule of a provider checkpoint; transformers and timm checkpoints select output=")
+        return LocalProvider(source, output, component, layer, readout, layers)
+    if layer or layers:
+        _fail("layer= and layers= name submodules of a provider checkpoint; transformers and timm checkpoints "
+              "select output=")
     if readout:
         _fail("readout= names a readout the host registered with a provider checkpoint's builder; "
               "transformers and timm checkpoints select output=")
@@ -475,18 +538,29 @@ def provider_for(source, output, component, layer="", readout=""):
 def output_shape(source_key, config_path, output, component, input_shape, provider="", checksum="", layer="",
                  readout=""):
     """Trace the wrapped model on the meta device to learn its output shape."""
+    return _traced(source_key, config_path, output, component, input_shape, provider, checksum, layer,
+                   readout, ())[0]
+
+
+def output_shapes(source_key, config_path, output, component, input_shape, provider="", checksum="", layers=()):
+    """One meta-device trace of the whole model, one shape per entry of ``layers``."""
+    return _traced(source_key, config_path, output, component, input_shape, provider, checksum, "", "",
+                   tuple(layers))
+
+
+def _traced(source_key, config_path, output, component, input_shape, provider, checksum, layer, readout, layers):
     # The builder and readout are part of the cache key: two registries may bind the same names.
     build = provider_build(provider) if provider else None
     read = provider_readout(provider, readout) if provider and readout else None
-    return _traced_output_shape(source_key, config_path, output, component, input_shape, provider, checksum, layer,
-                                readout, build, read)
+    return _traced_output_shapes(source_key, config_path, output, component, input_shape, provider, checksum, layer,
+                                 readout, layers, build, read)
 
 
 @lru_cache(maxsize=256)
-def _traced_output_shape(source_key, config_path, output, component, input_shape, provider_name, checksum, layer,
-                         readout, build, read):
+def _traced_output_shapes(source_key, config_path, output, component, input_shape, provider_name, checksum, layer,
+                          readout, layers, build, read):
     source = resolve_source(source_key, config_path, provider_name, checksum)
-    provider = provider_for(source, output, component, layer, readout)
+    provider = provider_for(source, output, component, layer, readout, layers)
     kind = provider.contract().kind
     with torch.device("meta"):
         model = provider.instantiate(weights=False)
@@ -498,16 +572,18 @@ def _traced_output_shape(source_key, config_path, output, component, input_shape
         except HNDLError:
             raise
         except Exception as exc:
-            through = f" through readout {readout!r}" if readout else ""
+            through = (f" through readout {readout!r}" if readout
+                       else f" through layers {list(layers)}" if layers else "")
             _fail(f"{source.location}: the checkpoint's model cannot consume input shape {list(input_shape)}{through}: "
                   f"{type(exc).__name__}: {exc}")
-    if not isinstance(result, torch.Tensor):
+    results = result if layers else (result,)
+    if any(not isinstance(value, torch.Tensor) for value in results):
         _fail(f"{source.location}: output {output!r} is not a tensor")
-    return ("B", *tuple(int(d) for d in result.shape[1:]))
+    return tuple(("B", *tuple(int(dimension) for dimension in value.shape[1:])) for value in results)
 
 
-output_shape.cache_clear = _traced_output_shape.cache_clear
-output_shape.cache_info = _traced_output_shape.cache_info
+output_shape.cache_clear = output_shapes.cache_clear = _traced_output_shapes.cache_clear
+output_shape.cache_info = output_shapes.cache_info = _traced_output_shapes.cache_info
 
 
 def is_offline():

@@ -2,14 +2,16 @@
 
 import copy
 import hashlib
+import json
 
 import pytest
 import torch
 from torch import nn
 
-from hndl import HNDLError, Registry, ResolvedPlan, resolve
+from hndl import HNDLError, Registry, ResolvedPlan, ops, resolve, resolve_callable
 from hndl import pretrained as sources
 from hndl.torch import build, network, parameter_counts
+from hndl.types import ResolvedNode
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -73,6 +75,101 @@ LAYERS_1_3 = lambda model, x: torch.cat(  # noqa: E731
     model.get_intermediate_layers(x, n=(1, 3), reshape=True, norm=True), dim=1)
 CLS_TOKEN = lambda model, x: model.forward_features(x)["x_norm_clstoken"]  # noqa: E731
 EVERY_LAYER = lambda model, x: model.get_intermediate_layers(x, n=(1, 3))  # noqa: E731
+
+
+class Tripwire(nn.Module):
+    """An identity that records whether the tail of the network ran."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, x):
+        self.calls += 1
+        return x
+
+
+class TinyTrunk(nn.Module):
+    """Three stages whose in-place ReLUs overwrite their convolution outputs."""
+
+    def __init__(self):
+        super().__init__()
+        self.layer1 = nn.Sequential(nn.Conv2d(3, 4, 3, padding=1), nn.ReLU(inplace=True))
+        self.layer2 = nn.Sequential(nn.Conv2d(4, 6, 3, stride=2, padding=1), nn.ReLU(inplace=True))
+        self.layer3 = nn.Sequential(nn.Conv2d(6, 8, 3, stride=2, padding=1), nn.ReLU(inplace=True))
+        self.tail = Tripwire()
+        self.head = nn.Linear(8, 2)
+
+    def forward(self, x):
+        features = self.tail(self.layer3(self.layer2(self.layer1(x))))
+        return self.head(features.mean(dim=(2, 3)))
+
+
+class TwiceCalled(nn.Module):
+    """A model that runs one submodule twice in a single forward pass."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared = nn.Conv2d(3, 3, 3, padding=1)
+        self.late = nn.Conv2d(3, 4, 3, padding=1)
+
+    def forward(self, x):
+        return self.late(self.shared(self.shared(x)))
+
+
+TRUNK_LAYERS = ("layer1.0", "layer2.0", "layer3.0")
+TRUNK_OUTPUTS = {"f1": ("B", 4, 8, 8), "f2": ("B", 6, 4, 4), "f3": ("B", 8, 2, 2)}
+TRUNK_INPUT = ("B", 3, 8, 8)
+
+
+def trunk_call(path, digest, layers=TRUNK_LAYERS, provider="trunk", **arguments):
+    rendered = "".join(f', {name}="{value}"' for name, value in arguments.items())
+    entries = "".join(f'"{name}", ' for name in layers)
+    return (f'pretrained("{path}", provider="{provider}", sha256="{digest}"{rendered}, '
+            f"layers=({entries}))")
+
+
+def trunk_source(path, digest, **arguments):
+    return f"f1, f2, f3 = {trunk_call(path, digest, **arguments)}"
+
+
+def reference_captures(model, pixels, names=TRUNK_LAYERS):
+    """What a hand-written hook sees for each name, cloned before the ReLUs run."""
+    values = {}
+
+    def record(name):
+        return lambda module, inputs, output: values.__setitem__(name, output.clone())
+
+    handles = [model.get_submodule(name).register_forward_hook(record(name)) for name in names]
+    with torch.no_grad():
+        model(pixels)
+    for handle in handles:
+        handle.remove()
+    return tuple(values[name] for name in names)
+
+
+@pytest.fixture
+def trunk_checkpoint(tmp_path):
+    torch.manual_seed(0)
+    path = tmp_path / "trunk.pth"
+    torch.save(TinyTrunk().state_dict(), path)
+    sources.resolve_source.cache_clear()
+    sources.output_shape.cache_clear()
+    return path
+
+
+@pytest.fixture
+def trunk_registry():
+    registry = Registry.builtins()
+    registry.pretrained_provider("trunk", TinyTrunk, readouts={"logits": lambda model, x: model(x)})
+    return registry
+
+
+@pytest.fixture
+def trunk_reference(trunk_checkpoint):
+    model = TinyTrunk()
+    model.load_state_dict(torch.load(trunk_checkpoint, map_location="cpu", weights_only=True))
+    return model.to(DEVICE).eval()
 
 
 def digest_of(path):
@@ -366,3 +463,162 @@ def test_a_readout_plan_round_trips_and_a_config_without_one_is_unchanged(vit_ch
     assert explicit.semantic_digest == plain.semantic_digest
     assert plain.semantic_digest != plan.semantic_digest
     assert ResolvedPlan.from_json(plain.to_json(), registry=vit_registry).nodes[0].args["readout"] == ""
+
+
+def test_layers_capture_every_requested_stage_in_one_pass(trunk_checkpoint, trunk_registry, trunk_reference):
+    digest = digest_of(trunk_checkpoint)
+    plan = resolve(trunk_source(trunk_checkpoint, digest), input_shape=TRUNK_INPUT,
+                   output_shape=TRUNK_OUTPUTS, registry=trunk_registry)
+    node = plan.nodes[0]
+    assert node.outputs == ("out0", "out1", "out2")
+    assert node.args["layers"] == TRUNK_LAYERS and node.args["layer"] == "" and node.args["readout"] == ""
+    # Each output keeps its own native shape: no pooling, no concatenation.
+    assert dict(node.output_shapes) == {"out0": ("B", 4, 8, 8), "out1": ("B", 6, 4, 4), "out2": ("B", 8, 2, 2)}
+
+    model = build(plan, device=DEVICE, registry=trunk_registry)
+    assert "layers=('layer1.0', 'layer2.0', 'layer3.0')" in repr(model["n0"])
+    assert not any(parameter.requires_grad for parameter in model.parameters())
+    pixels = torch.randn(2, 3, 8, 8, device=DEVICE)
+    with torch.no_grad():
+        outputs = model(x=pixels)
+    for port, expected in zip(("f1", "f2", "f3"), reference_captures(trunk_reference, pixels)):
+        torch.testing.assert_close(outputs[port], expected)
+    # The pass stops after the last requested layer, so the tail never runs.
+    assert model["n0"].model.tail.calls == 0
+
+
+def test_layer_outputs_carry_input_gradients_and_second_derivatives(trunk_checkpoint, trunk_registry):
+    model = network(trunk_source(trunk_checkpoint, digest_of(trunk_checkpoint)), input_shape=TRUNK_INPUT,
+                    output_shape=TRUNK_OUTPUTS, registry=trunk_registry, device=DEVICE)
+    pixels = torch.randn(2, 3, 8, 8, device=DEVICE, requires_grad=True)
+    outputs = model(pixels)
+    # Captured before the in-place ReLU that follows each convolution, so the
+    # negative activations the hook saw are still there.
+    assert all((value < 0).any() for value in outputs.values())
+    for value in outputs.values():
+        gradient, = torch.autograd.grad(value.square().mean(), pixels, create_graph=True)
+        assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+        second, = torch.autograd.grad(gradient.square().sum(), pixels, retain_graph=True)
+        assert torch.isfinite(second).all() and second.abs().sum() > 0
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+
+def test_layers_unpack_in_both_frontends_and_the_count_must_match(trunk_checkpoint, trunk_registry):
+    digest = digest_of(trunk_checkpoint)
+    shapes = {"input_shape": TRUNK_INPUT, "output_shape": TRUNK_OUTPUTS, "registry": trunk_registry}
+    plan = resolve(trunk_source(trunk_checkpoint, digest), **shapes)
+
+    def author(x):
+        f1, f2, f3 = ops.pretrained(str(trunk_checkpoint), provider="trunk", sha256=digest, layers=TRUNK_LAYERS)
+        return {"f1": f1, "f2": f2, "f3": f3}
+
+    native = resolve_callable(author, **shapes)
+    assert native.semantic_digest == plan.semantic_digest
+    assert native.nodes[0].outputs == ("out0", "out1", "out2")
+
+    with pytest.raises(HNDLError, match="E_OUTPUT_ARITY"):
+        resolve(f"f1, f2 = {trunk_call(trunk_checkpoint, digest)}", **shapes)
+
+    def mismatched(x):
+        f1, f2 = ops.pretrained(str(trunk_checkpoint), provider="trunk", sha256=digest, layers=TRUNK_LAYERS)
+        return {"f1": f1, "f2": f2, "f3": f2}
+
+    with pytest.raises(ValueError):
+        resolve_callable(mismatched, **shapes)
+
+
+def test_one_entry_layers_returns_a_tuple_and_clears_current(trunk_checkpoint, trunk_registry, trunk_reference):
+    digest = digest_of(trunk_checkpoint)
+    call = trunk_call(trunk_checkpoint, digest, layers=("layer1.0",))
+    shapes = {"input_shape": TRUNK_INPUT, "output_shape": ("B", 2, 8, 8), "registry": trunk_registry}
+    plan = resolve(f"only, = {call}\nconv(only, 2, kernel_size=1)", **shapes)
+    assert plan.nodes[0].outputs == ("out0",)
+    assert plan.nodes[1].inputs["x"] == "node:n0/out0"
+    with pytest.raises(HNDLError, match="E_CURRENT"):
+        resolve(f"{call}\nconv(2, kernel_size=1)", **shapes)
+
+
+def test_layers_conflicts_duplicates_and_unknown_names_fail(trunk_checkpoint, trunk_registry):
+    digest = digest_of(trunk_checkpoint)
+
+    def failing(source, output_shape=TRUNK_OUTPUTS):
+        return resolve(source, input_shape=TRUNK_INPUT, output_shape=output_shape, registry=trunk_registry)
+
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*both say what the node returns"):
+        failing(trunk_source(trunk_checkpoint, digest, layer="layer1.0"))
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*both say what the node returns"):
+        failing(trunk_source(trunk_checkpoint, digest, readout="logits"))
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*all say what the node returns"):
+        failing(trunk_source(trunk_checkpoint, digest, layer="layer1.0", readout="logits"))
+    with pytest.raises(HNDLError, match='E_PRETRAINED.*layers=\\("<path>", "<path>"\\)'):
+        failing(trunk_source(trunk_checkpoint, digest, output="pooled"))
+
+    duplicated = trunk_call(trunk_checkpoint, digest, layers=("layer1.0", "layer1.0"))
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*'layer1.0' more than once"):
+        failing(f"a, b = {duplicated}\nout = a", ("B", 4, 8, 8))
+    unknown = trunk_call(trunk_checkpoint, digest, layers=("layer1.0", "layer9"))
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*no submodule 'layer9'.*layer1"):
+        failing(f"a, b = {unknown}\nout = a", ("B", 4, 8, 8))
+    empty = trunk_call(trunk_checkpoint, digest, layers=("layer1.0", ""))
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*empty entry names nothing"):
+        failing(f"a, b = {empty}\nout = a", ("B", 4, 8, 8))
+
+    # transformers and timm checkpoints have no submodule selection; no library is needed to say so.
+    timm_source = sources.Source("directory", "/checkpoints/resnet18", "r0", {"architecture": "resnet18"},
+                                 "/checkpoints/resnet18/config.json", "timm")
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*layers=.*select output="):
+        sources.provider_for(timm_source, "features", "", "", "", ("layer1",))
+
+
+def test_a_submodule_that_runs_twice_in_one_pass_fails_clearly(tmp_path, trunk_registry):
+    torch.manual_seed(0)
+    path = tmp_path / "twice.pth"
+    torch.save(TwiceCalled().state_dict(), path)
+    sources.resolve_source.cache_clear()
+    sources.output_shape.cache_clear()
+    trunk_registry.pretrained_provider("twice", TwiceCalled)
+    call = trunk_call(path, digest_of(path), layers=("shared", "late"), provider="twice")
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*'shared' runs more than once"):
+        resolve(f"a, b = {call}\nout = b", input_shape=TRUNK_INPUT, output_shape=("B", 4, 8, 8),
+                registry=trunk_registry)
+
+
+def test_a_layers_plan_round_trips_and_a_config_without_one_is_unchanged(trunk_checkpoint, trunk_registry):
+    digest = digest_of(trunk_checkpoint)
+    plan = resolve(trunk_source(trunk_checkpoint, digest), input_shape=TRUNK_INPUT,
+                   output_shape=TRUNK_OUTPUTS, registry=trunk_registry)
+    encoded = plan.to_json()
+    assert '"layers":["layer1.0","layer2.0","layer3.0"]' in encoded
+    assert '"outputs":["out0","out1","out2"]' in encoded
+    restored = ResolvedPlan.from_json(encoded, registry=trunk_registry)
+    assert restored.semantic_digest == plan.semantic_digest
+    assert restored.nodes[0].args["layers"] == TRUNK_LAYERS
+    assert dict(restored.nodes[0].output_shapes) == dict(plan.nodes[0].output_shapes)
+    build(restored, device=DEVICE, registry=trunk_registry)
+
+    # A config written before layers= existed keeps its single out port, and
+    # writing the new argument out explicitly reads the same.
+    shapes = {"input_shape": TRUNK_INPUT, "output_shape": ("B", 4, 8, 8), "registry": trunk_registry}
+    single = f'pretrained("{trunk_checkpoint}", provider="trunk", sha256="{digest}", layer="layer1.0")'
+    plain = resolve(single, **shapes)
+    explicit = resolve(single[:-1] + ", layers=())", **shapes)
+    assert plain.nodes[0].outputs == ("out",) and plain.nodes[0].args["layers"] == ()
+    assert explicit.semantic_digest == plain.semantic_digest
+    assert plain.semantic_digest != plan.semantic_digest
+
+
+def test_a_plan_saved_before_layers_existed_has_to_be_re_resolved(trunk_checkpoint, trunk_registry):
+    """Plan digests cover every canonical argument, so a `pretrained` node saved
+    without `layers=` no longer matches its own digest and fails to restore."""
+    digest = digest_of(trunk_checkpoint)
+    plan = resolve(f'pretrained("{trunk_checkpoint}", provider="trunk", sha256="{digest}", layer="layer1.0")',
+                   input_shape=TRUNK_INPUT, output_shape=("B", 4, 8, 8), registry=trunk_registry)
+    data = json.loads(plan.to_json())
+    for node in data["nodes"]:
+        del node["args"]["layers"]
+    older = ResolvedPlan(nodes=tuple(ResolvedNode(**node) for node in data["nodes"]),
+                         input_shape=data["input_shape"], output_shape=data["output_shape"],
+                         output_ref=data["output_ref"], dtype=data["dtype"], frontend=data["frontend"],
+                         input_dtype=data["input_dtype"]).to_json()
+    with pytest.raises(HNDLError, match="E_INTEGRITY"):
+        ResolvedPlan.from_json(older, registry=trunk_registry)
