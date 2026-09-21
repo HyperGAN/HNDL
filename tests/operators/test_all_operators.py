@@ -10,7 +10,7 @@ from hndl import Registry, ResolvedPlan, resolve, resolve_callable
 from hndl.config import capture_config
 from hndl.torch import DTYPES, build, parameter_counts
 
-from .conftest import all_operators, operator_examples
+from .conftest import all_operators, contract, example_input, operator_examples
 
 
 def replay(graph, registry):
@@ -59,7 +59,7 @@ def test_declaration_is_complete(spec):
 @pytest.mark.parametrize("spec,example", operator_examples())
 def test_example_resolves_identically_in_both_frontends_and_round_trips(spec, example):
     registry = Registry.builtins()
-    kwargs = dict(input_shape=example.input_shape, output_shape=example.output_shape, registry=registry)
+    kwargs = contract(example, registry=registry)
     plan = resolve(example.source, **kwargs)
     assert any(node.op == spec.key for node in plan.nodes), f"example does not use {spec.alias}"
     graph = capture_config(example.source, **kwargs)
@@ -75,7 +75,7 @@ def test_example_resolves_identically_in_both_frontends_and_round_trips(spec, ex
 
 @pytest.mark.parametrize("spec,example", operator_examples())
 def test_example_builds_runs_and_is_deterministic(spec, example, device):
-    plan = resolve(example.source, input_shape=example.input_shape, output_shape=example.output_shape)
+    plan = resolve(example.source, **contract(example))
     model = build(plan, device=device, initialization_seed=3)
     before = torch.get_rng_state().clone()
     text = repr(model)
@@ -86,12 +86,14 @@ def test_example_builds_runs_and_is_deterministic(spec, example, device):
     assert counts == real
     assert model.build_receipt["state_bytes"] == sum(
         t.numel() * t.element_size() for t in (*model.parameters(), *model.buffers()))
-    x = torch.randn(2, *example.input_shape[1:], device=device, dtype=DTYPES[plan.dtype], requires_grad=True)
+    x = example_input(example, 2, device, DTYPES[plan.dtype])
     output = model(x=x)["output"]
     assert tuple(output.shape) == (2, *example.output_shape[1:])
     assert output.isfinite().all()
-    output.square().mean().backward()
-    assert x.grad is not None and x.grad.isfinite().all()
+    if any(p.requires_grad for p in model.parameters()) or x.requires_grad:
+        output.float().square().mean().backward()
+    if x.requires_grad:
+        assert x.grad is not None and x.grad.isfinite().all()
     again = build(plan, device=device, initialization_seed=3)
     torch.testing.assert_close(again(x=x.detach())["output"], output.detach())
 
@@ -100,23 +102,24 @@ def test_example_builds_runs_and_is_deterministic(spec, example, device):
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 @pytest.mark.parametrize("spec,example", operator_examples())
 def test_example_runs_in_reduced_precision_on_cuda(spec, example, dtype):
-    plan = resolve(example.source, input_shape=example.input_shape, output_shape=example.output_shape, dtype=dtype)
+    plan = resolve(example.source, **contract(example, dtype=dtype))
     model = build(plan, device="cuda:0", initialization_seed=3)
     torch_dtype = DTYPES[dtype]
     assert all(p.dtype == torch_dtype for p in model.parameters())
-    x = torch.randn(2, *example.input_shape[1:], device="cuda:0", dtype=torch_dtype, requires_grad=True)
+    x = example_input(example, 2, "cuda:0", torch_dtype)
     output = model(x=x)["output"]
     assert output.dtype == torch_dtype and tuple(output.shape) == (2, *example.output_shape[1:])
     assert output.isfinite().all()
-    output.float().square().mean().backward()
-    assert x.grad.isfinite().all()
+    if x.requires_grad:
+        output.float().square().mean().backward()
+        assert x.grad.isfinite().all()
 
 
 @pytest.mark.parametrize("spec,example", operator_examples())
 def test_reference_implementation_matches(spec, example, device):
     if spec.reference is None:
         pytest.skip(f"{spec.alias} declares no reference implementation")
-    plan = resolve(example.source, input_shape=example.input_shape, output_shape=example.output_shape)
+    plan = resolve(example.source, **contract(example))
     model = build(plan, device=device, initialization_seed=5)
     dtype = DTYPES[plan.dtype]
     for node in plan.nodes:

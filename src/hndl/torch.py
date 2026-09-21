@@ -72,10 +72,10 @@ class GraphModule(nn.Module):
         produced = {"input:x": plan.input_dtype}
         for node in plan.nodes:
             spec = plan.registry.by_identity(node.op)
-            self._port_dtypes[node.id] = {port: DTYPES[spec.port_dtype(port, plan.dtype)]
-                                          for port in (*node.inputs, *node.outputs)}
+            declared = {port: spec.port_dtype(port, plan.dtype) for port in (*node.inputs, *node.outputs)}
+            self._port_dtypes[node.id] = {port: None if name == "any" else DTYPES[name] for port, name in declared.items()}
             for port in node.outputs:
-                produced[f"node:{node.id}/{port}"] = spec.port_dtype(port, plan.dtype)
+                produced[f"node:{node.id}/{port}"] = plan.dtype if declared[port] == "any" else declared[port]
         self._output_dtype = DTYPES[produced[plan.output_ref]]
         self._state_names = tuple(name for name, _ in self.named_parameters()) + tuple(name for name, _ in self.named_buffers())
         self.build_receipt = MappingProxyType(receipt)
@@ -103,7 +103,7 @@ class GraphModule(nn.Module):
         expected = tuple(batch if isinstance(d, str) else d for d in shape)
         if tuple(value.shape) != expected or value.ndim == 0 or value.shape[0] <= 0:
             raise HNDLError("E_RUNTIME", f"{location}: expected shape {expected}, got {tuple(value.shape)}")
-        if value.dtype != dtype:
+        if dtype is not None and value.dtype != dtype:
             raise HNDLError("E_RUNTIME", f"{location}: expected dtype {dtype}, got {value.dtype}")
         if value.device != self._runtime_device:
             raise HNDLError("E_RUNTIME", f"{location}: expected device {self._runtime_device}, got {value.device}")
@@ -257,13 +257,24 @@ def construct(spec, node, device, dtype):
         layer = spec.module(**kwargs)
     if not isinstance(layer, nn.Module):
         raise HNDLError("E_REGISTRY", f"{node.id}: operator {spec.alias} did not construct an nn.Module")
-    return layer.to(dtype=dtype)
+    if torch.device(device).type == "meta":
+        # The allocation-free probe only measures; never move a module onto meta.
+        return layer
+    return layer.to(device=device, dtype=dtype)
 
 
-def _state_bytes(module):
-    """Unique registered parameter/buffer storage, including nonpersistent buffers."""
+def _state_bytes(module, compute_dtype=None):
+    """Unique registered parameter/buffer storage, including nonpersistent buffers.
+
+    With ``compute_dtype`` the count assumes floating tensors will be cast to
+    it, which is how the allocation-free probe predicts the real footprint.
+    """
     storages = {}
     for value in (*module.parameters(), *module.buffers()):
+        if compute_dtype is not None:
+            size = torch.finfo(compute_dtype).bits // 8 if value.is_floating_point() else value.element_size()
+            storages[id(value)] = value.numel() * size
+            continue
         if value.device.type == "meta":
             storages[id(value)] = value.numel() * value.element_size()
             continue
@@ -392,7 +403,7 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
         except Exception:
             unbounded.append(node.id)
             continue
-        total += _state_bytes(probe)
+        total += _state_bytes(probe, dtype)
         if total > bounds["max_state_bytes"]:
             raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes before allocation", node=node.id)
 
