@@ -108,7 +108,7 @@ class ResolvedPlan:
     dtype: str = "float32"
     frontend: str = "python_config@1"
     registry: object = field(default=None, repr=False, compare=False)
-    schema_version: int = 2
+    schema_version: int = 1
     resolution_version: int = 1
 
     def __post_init__(self):
@@ -162,9 +162,9 @@ class ResolvedPlan:
                         "output_ref", "dtype", "frontend", "semantic_digest", "artifact_digest"}
             if set(data) != expected:
                 raise ValueError("unexpected or missing plan fields")
-            if (type(data["schema_version"]) is not int or data["schema_version"] != 2
+            if (type(data["schema_version"]) is not int or data["schema_version"] != 1
                     or type(data["resolution_version"]) is not int or data["resolution_version"] != 1):
-                raise HNDLError("E_STATE_VERSION", "Expected plan schema 2 and resolution version 1; older alpha plans must be re-resolved from their author source with explicit construction settings")
+                raise HNDLError("E_STATE_VERSION", "Expected plan schema 1 and resolution version 1")
             artifact = data.pop("artifact_digest")
             if artifact != digest(data):
                 raise HNDLError("E_INTEGRITY", "Saved plan artifact digest does not match its contents")
@@ -178,7 +178,7 @@ class ResolvedPlan:
             required_node_fields = {"id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
                                     "state_bytes", "state_version", "initialization", "trainability", "source", "provenance"}
             if any(type(item) is not dict or set(item) != required_node_fields for item in serialized_nodes):
-                raise HNDLError("E_SCHEMA", "Saved schema 2 nodes require all canonical fields, including initialization and trainability")
+                raise HNDLError("E_SCHEMA", "Saved schema 1 nodes require all canonical fields, including initialization and trainability")
             nodes = tuple(ResolvedNode(**item) for item in serialized_nodes)
             plan = cls(nodes=nodes, registry=registry, **data)
             if semantic != plan.semantic_digest:

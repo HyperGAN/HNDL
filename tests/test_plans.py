@@ -109,7 +109,7 @@ def test_persisted_omission_cannot_be_silently_reinferred():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("schema_version", 3), ("resolution_version", 2),
+    ("schema_version", 2), ("resolution_version", 2),
     ("schema_version", True), ("resolution_version", True),
 ])
 def test_unknown_and_boolean_versions_rejected(field, value):

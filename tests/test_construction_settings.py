@@ -37,7 +37,7 @@ def test_defaults_and_empty_metadata_are_canonical_and_equivalent():
     assert default.semantic_digest == explicit_empty.semantic_digest
     assert default.nodes[0].initialization == {"kind": "torch_default@1", "overrides": {}}
     assert default.nodes[0].trainability == {"default": None, "overrides": {}}
-    assert default.schema_version == 2 and default.resolution_version == 1
+    assert default.schema_version == 1 and default.resolution_version == 1
     assert default.to_json() == ResolvedPlan.from_json(default.to_json()).to_json()
 
 
@@ -151,13 +151,13 @@ def test_direct_plan_validation_rechecks_settings_after_deliberate_dataclass_byp
         validate_concrete_plan(plan)
 
 
-def test_schema_one_rejected_with_explicit_reresolve_instruction():
+def test_unsupported_schema_rejected_on_restore_and_direct_validation():
     data = json.loads(plan_with_settings().to_json())
-    data["schema_version"] = 1
-    with pytest.raises(HNDLError, match="E_STATE_VERSION.*re-resolved"):
+    data["schema_version"] = 2
+    with pytest.raises(HNDLError, match="E_STATE_VERSION.*Expected plan schema 1"):
         ResolvedPlan.from_json(rehash(data))
-    with pytest.raises(HNDLError, match="E_STATE_VERSION.*re-resolve"):
-        validate_concrete_plan(replace(plan_with_settings(), schema_version=1))
+    with pytest.raises(HNDLError, match="E_STATE_VERSION.*Expected plan schema 1"):
+        validate_concrete_plan(replace(plan_with_settings(), schema_version=2))
 
 
 @pytest.mark.parametrize("metadata", ["init", "trainable"])

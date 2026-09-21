@@ -645,7 +645,7 @@ Build and restoration apply the persisted settings before returning the module. 
 
 Persist the captured author graph and full resolved plan, plus declarative source or trusted callable provenance as applicable. Do not pickle a callable or closure as the architecture. Restoration must never execute the author callable or configuration to reconstruct saved state. Reconstruct from the saved plan, not by applying a newer resolver to old omitted dimension fields. Before state loading, validate the semantic digest, required implementation/state versions, and state names/shapes/dtypes.
 
-The current alpha writes and reads resolved-plan schema **2**, with resolution semantics version **1**. Schema 1 is rejected with `E_STATE_VERSION`; users must re-resolve their original definition and save a new plan. This explicit format change adds canonical construction settings to every node. The conceptual author graph in §4 is separate from this persistence format.
+The current unreleased implementation writes and reads resolved-plan schema **1**, with resolution semantics version **1**. Initialization and trainability are part of this initial format: every saved node requires both canonical construction fields, including defaults. Unsupported versions fail with `E_STATE_VERSION`; missing canonical fields fail with `E_SCHEMA`. The conceptual author graph in §4 is separate from this persistence format.
 
 These identities serve different purposes:
 

@@ -477,9 +477,9 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
         raise HNDLError("E_SCHEMA", "Expected an immutable ResolvedPlan")
     registry = registry or plan.registry or Registry.builtins()
     bounds = _limits(limits)
-    if (type(plan.schema_version) is not int or plan.schema_version != 2
+    if (type(plan.schema_version) is not int or plan.schema_version != 1
             or type(plan.resolution_version) is not int or plan.resolution_version != 1):
-        raise HNDLError("E_STATE_VERSION", "Expected plan schema 2 and resolution version 1; re-resolve older alpha author sources with explicit construction settings")
+        raise HNDLError("E_STATE_VERSION", "Expected plan schema 1 and resolution version 1")
     for node in plan.nodes:
         spec = registry.by_identity(node.op)
         if type(node.state_version) is not int or node.state_version != spec.state_version:

@@ -63,7 +63,7 @@ jobs:
               input_shape=("B", 128), output_shape=("B", 10),
           )
           restored = ResolvedPlan.from_json(settings.to_json())
-          assert restored.schema_version == 2
+          assert restored.schema_version == 1
           assert restored.semantic_digest == settings.semantic_digest
           assert restored.nodes[0].trainability["default"] is False
           assert restored.nodes[-1].initialization["overrides"] == {"weight": 0.0, "bias": 0.0}
