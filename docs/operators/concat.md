@@ -22,12 +22,18 @@ Relation: `out[axis] == sum(x_i[axis]); all other axes equal`
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
 | `input_count` | int | required | >= 2 | Number of tensors joined; set from the call. |
-| `axis` | int | `1` | >= 1 | Axis to concatenate; the batch axis 0 is excluded. |
+| `axis` | int | `1` | >= 0 | Axis to concatenate; axis 0 joins along batch and adds the inputs' batches. |
 
 ## Description
 
 ``torch.cat(inputs, dim=axis)``. Every input is explicit; one missing
 extent along ``axis`` can be inferred from the output contract.
+
+``axis=0`` joins along batch: the inputs must agree on every other axis and
+the result carries their batches added together, written ``2*B`` for two
+equal batches. That is how one shared --- often frozen --- network runs over
+two branches in a single forward pass; ``chunk(..., dim=0)`` takes the
+result apart again.
 
 ## Examples
 
@@ -72,3 +78,31 @@ index  name  operation  input shapes          output shapes
 ```
 
 Parameters: 90
+
+### Example 3
+
+One shared linear runs over both branches at batch 2*B; chunk takes the pair apart.
+
+```python
+a = linear(4)
+b = linear(x, 4)
+pair = concat(a, b, axis=0)
+shared = linear(pair, 6)
+p, q = chunk(shared, 2, dim=0)
+concat(p, q)
+```
+
+Input `['B', 8]` → output `['B', 12]`.
+
+```text
+Network: [B, 8] -> [B, 12]  dtype=float32
+index  name  operation  input shapes          output shapes
+0      n0    linear     x=[B, 8]              out=[B, 4]
+1      n1    linear     x=[B, 8]              out=[B, 4]
+2      n2    concat     x0=[B, 4], x1=[B, 4]  out=[2*B, 4]
+3      n3    linear     x=[2*B, 4]            out=[2*B, 6]
+4      n4    chunk      x=[2*B, 6]            out0=[B, 6], out1=[B, 6]
+5      n5    concat     x0=[B, 6], x1=[B, 6]  out=[B, 12]
+```
+
+Parameters: 102

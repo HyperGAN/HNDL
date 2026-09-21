@@ -503,6 +503,43 @@ def test_layer_outputs_carry_input_gradients_and_second_derivatives(trunk_checkp
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
+def test_a_batch_joined_input_reports_batch_joined_outputs(trunk_checkpoint, trunk_registry):
+    """One frozen trunk over two branches: the batch entry passes straight
+    through the meta-device trace, with ``layers=`` and without it."""
+    digest = digest_of(trunk_checkpoint)
+    paired = {"input_shape": {"x": TRUNK_INPUT, "y": TRUNK_INPUT},
+              "output_shape": ("B", 8, 8, 8), "registry": trunk_registry}
+    entries = ", ".join(f'"{name}"' for name in TRUNK_LAYERS)
+    stack = (f'pretrained(pair, "{trunk_checkpoint}", provider="trunk", sha256="{digest}", '
+             f"layers=({entries}))")
+    source = (f"pair = concat(x, y, axis=0)\n"
+              f"f1, f2, f3 = {stack}\n"
+              "a, b = chunk(f1, 2, dim=0)\n"
+              "out = concat(a, b, axis=1)")
+    plan = resolve(source, **paired)
+    node = plan.nodes[1]
+    assert dict(node.input_shapes) == {"x": ("2*B", 3, 8, 8)}
+    assert dict(node.output_shapes) == {"out0": ("2*B", 4, 8, 8), "out1": ("2*B", 6, 4, 4),
+                                        "out2": ("2*B", 8, 2, 2)}
+    assert plan.nodes[2].output_shapes == {"out0": ("B", 4, 8, 8), "out1": ("B", 4, 8, 8)}
+
+    single = resolve(f"pair = concat(x, y, axis=0)\n"
+                     f'only = pretrained(pair, "{trunk_checkpoint}", provider="trunk", sha256="{digest}", '
+                     'layer="layer1.0")\n'
+                     "a, b = chunk(only, 2, dim=0)\n"
+                     "out = concat(a, b, axis=1)", **paired)
+    assert single.nodes[1].output_shapes == {"out": ("2*B", 4, 8, 8)}
+
+    model = build(plan, device=DEVICE, registry=trunk_registry)
+    pixels = [torch.randn(3, 3, 8, 8, device=DEVICE) for _ in range(2)]
+    with torch.no_grad():
+        joined = model(x=pixels[0], y=pixels[1])["output"]
+    assert tuple(joined.shape) == (3, 8, 8, 8)
+    separate = [model["n1"](value)[0] for value in pixels]
+    with torch.no_grad():
+        torch.testing.assert_close(joined, torch.cat(separate, dim=1))
+
+
 def test_layers_unpack_in_both_frontends_and_the_count_must_match(trunk_checkpoint, trunk_registry):
     digest = digest_of(trunk_checkpoint)
     shapes = {"input_shape": TRUNK_INPUT, "output_shape": TRUNK_OUTPUTS, "registry": trunk_registry}

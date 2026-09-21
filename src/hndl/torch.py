@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from .errors import HNDLError
-from .types import contract_header
+from .types import batch_multiple, contract_header
 
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
@@ -162,11 +162,25 @@ class GraphModule(nn.Module):
         """
         return self._runtime_dtype if dtype is not None and dtype == self._build_dtype else dtype
 
+    @staticmethod
+    def _extent(dimension, batch, location):
+        """The concrete size a contract entry requires, scaling the batch axis.
+
+        A port a batch-axis join or split produced carries ``"k*B"``, which
+        means ``k`` times this call's batch, not the batch itself.
+        """
+        if not isinstance(dimension, str):
+            return dimension
+        multiple = batch_multiple(dimension)
+        if multiple is None:
+            raise HNDLError("E_RUNTIME", f"{location}: contract entry {dimension!r} is not a batch dimension")
+        return None if batch is None else multiple * batch
+
     def _check(self, value, shape, batch, location, dtype):
         dtype = self._effective_dtype(dtype)
         if not isinstance(value, torch.Tensor):
             raise HNDLError("E_RUNTIME", f"{location} must be a tensor")
-        expected = tuple(batch if isinstance(d, str) else d for d in shape)
+        expected = tuple(self._extent(d, batch, location) for d in shape)
         if tuple(value.shape) != expected or value.ndim == 0 or value.shape[0] <= 0:
             raise HNDLError("E_RUNTIME", f"{location}: expected shape {expected}, got {tuple(value.shape)}")
         if dtype is not None and value.dtype != dtype:

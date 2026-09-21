@@ -405,6 +405,7 @@ class Operator(Immutable):
     module: object = None
     positional_rest: object = None
     outputs_from: object = None
+    batch: str = "shared"
     policies: Mapping = field(default_factory=dict)
     validate: object = None
     finalize: object = None
@@ -444,14 +445,16 @@ class Operator(Immutable):
     def output_ports_for(self, args):
         """The output ports of one node: ``out0, out1, ...`` for a variadic output.
 
-        The count is the length of the sequence argument named by
-        ``outputs_from``; an empty sequence leaves the single declared port, so
-        an operator that only sometimes fans out keeps its ordinary ``out``.
+        The count comes from the argument named by ``outputs_from``: the length
+        of a sequence argument, or the value of an ``int`` one. A count of zero
+        leaves the single declared port, so an operator that only sometimes
+        fans out keeps its ordinary ``out``.
         """
         prefix = self.variadic_output
         if prefix is None:
             return self.output_ports
-        count = len(args.get(self.outputs_from) or ())
+        value = args.get(self.outputs_from)
+        count = value if type(value) is int else len(value or ())
         return self.output_ports if count == 0 else tuple(f"{prefix}{i}" for i in range(count))
 
     def returns_tuple(self, args):
@@ -515,7 +518,7 @@ def _check_init_signature(cls, args, symbols):
 
 def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=None, examples=(),
                   category="other", relation=None, shape_text=None, positional_rest=None, policies=None,
-                  validate=None, finalize=None, reference=None, outputs_from=None):
+                  validate=None, finalize=None, reference=None, outputs_from=None, batch="shared"):
     if not isinstance(alias, str) or not alias.isidentifier() or alias in ("x", "out") or alias.startswith("_"):
         _registry_error("Operator alias must be an identifier other than x/out without a leading underscore")
     if keyword.iskeyword(alias):
@@ -529,6 +532,8 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
         _registry_error(f"Operator {alias!r} needs a one-line summary")
     if type(category) is not str or not _IDENT.fullmatch(category.replace("-", "_")):
         _registry_error("Operator category must be a short lowercase identifier")
+    if batch not in ("shared", "relation"):
+        _registry_error('batch must be "shared" (the default) or "relation"')
     inputs, outputs, symbols = parse_shape(shape)
     if relation is not None and not callable(relation):
         _registry_error("relation must be a callable receiving the node view")
@@ -566,8 +571,12 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
     if outputs_from is not None:
         if not variadic_output:
             _registry_error("outputs_from applies to an operator that declares a variadic output port")
-        if outputs_from not in checked or checked[outputs_from].type not in (INTS, STRS):
-            _registry_error("outputs_from must name an 'ints' or 'strs' argument")
+        if outputs_from not in checked or checked[outputs_from].type not in (int, INTS, STRS):
+            _registry_error("outputs_from must name an 'int', 'ints', or 'strs' argument")
+        if checked[outputs_from].type is int and (checked[outputs_from].min is None or checked[outputs_from].min < 0
+                                                  or checked[outputs_from].max is None
+                                                  or checked[outputs_from].max > MAX_PORTS):
+            _registry_error(f"An int outputs_from argument must be bounded to 0..{MAX_PORTS} ports")
     policies = {} if policies is None else policies
     if not isinstance(policies, Mapping):
         _registry_error("policies must be a mapping of alias to Policy")
@@ -594,7 +603,7 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
         alias=alias, identity=identity, version=version, summary=summary.strip(), doc=doc, category=category,
         inputs=inputs, outputs=outputs, args=checked, symbols=symbols, shape_text=shape.strip(),
         relation=relation, relation_text=(shape_text or "").strip(), examples=tuple(normalized_examples),
-        module=cls, positional_rest=positional_rest, outputs_from=outputs_from,
+        module=cls, positional_rest=positional_rest, outputs_from=outputs_from, batch=batch,
         policies=policies, validate=validate, finalize=finalize, reference=reference,
         init_symbols=init_symbols, init_shapes=init_shapes,
     )
@@ -651,6 +660,16 @@ class NodeView:
 
     def axis(self, port, axis, value, code="E_CONSTRAINT"):
         self._solver.axis(self._ref(port), axis, value, code)
+
+    def batch(self, port):
+        """The batch entry a port carries: ``"B"``, a multiple such as
+        ``"2*B"``, a fixed integer batch, or ``None`` when it is not known."""
+        shape = self.shape(port)
+        return None if shape is None else shape[0]
+
+    def share_batch(self, *ports):
+        """Give every named port the one batch entry they share."""
+        self._solver.share_batch([self._ref(port) for port in ports])
 
     def equal(self, left, right):
         self._solver.equal(self._ref(left), self._ref(right))

@@ -8,7 +8,8 @@ import re
 from .errors import HNDLError
 from .operator import COMPUTE_DTYPES, ELLIPSIS, INDEX_DTYPES, NodeView, SUPPORTED_RANKS, Sym
 from .registry import Registry, normalize_arguments
-from .types import EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, ResolvedNode, ResolvedPlan
+from .types import (BATCH, EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, ResolvedNode, ResolvedPlan,
+                    batch_multiple)
 
 
 DEFAULT_LIMITS = {
@@ -30,15 +31,22 @@ def _limits(overrides):
     return result
 
 
-def _contract(shape, label, limits):
+def _contract(shape, label, limits, *, multiples=False):
+    """Validate one shape tuple. ``multiples`` admits a ``"k*B"`` batch entry.
+
+    External contracts stay one plan batch (``"B"``, or a fixed positive
+    integer); only the internal port contracts a batch-axis join or split
+    produces may carry a multiple of it.
+    """
     if not isinstance(shape, (tuple, list)) or len(shape) not in SUPPORTED_RANKS:
         ranks = ", ".join(map(str, SUPPORTED_RANKS))
         raise HNDLError("E_SCHEMA", f"{label} must include batch and have a supported rank ({ranks})")
     for axis, value in enumerate(shape):
-        if axis == 0 and value == "B":
+        if axis == 0 and (value == BATCH or (multiples and batch_multiple(value) is not None)):
             continue
         if type(value) is not int or value <= 0:
-            raise HNDLError("E_SCHEMA", f"{label}[{axis}] must be positive, with only batch allowed to be 'B'")
+            allowed = "'B' or 'k*B'" if axis == 0 and multiples else "'B'"
+            raise HNDLError("E_SCHEMA", f"{label}[{axis}] must be positive, with only batch allowed to be {allowed}")
         if value > limits["max_dimension"]:
             raise HNDLError("E_RESOURCE", f"{label}[{axis}] exceeds max_dimension")
     if prod(shape[1:]) > limits["max_elements"]:
@@ -155,6 +163,9 @@ class _Solver:
         self.graph, self.nodes, self.specs, self.limits = graph, nodes, specs, limits
         self.dtypes = {} if dtypes is None else dtypes
         self.batch = graph.input_shape[0]
+        # The batch entry every port of the node being solved shares, unless the
+        # operator declares that it moves tensors across the batch axis itself.
+        self.node_batch = None
         self.shapes = {f"input:{name}": list(entry["shape"]) for name, entry in graph.inputs.items()}
         self.args = {node.id: dict(node.args) for node in nodes}
         self.changed = False
@@ -176,7 +187,7 @@ class _Solver:
             if value is None:
                 continue
             if axis == 0:
-                if value != self.batch:
+                if not self.valid_batch(value):
                     self.error(code, f"Batch contract {value!r} conflicts with {self.batch!r} at {ref}")
                 continue
             if type(value) is not int or value <= 0:
@@ -200,10 +211,49 @@ class _Solver:
                 old[index] = value
                 self.changed = True
             elif old[index] != value:
+                if index == 0:
+                    self.error(code, f"Batch {old[index]!r} at {ref} conflicts with required {value!r}")
                 self.error(code, f"Dimension {index} at {ref}: {old[index]} conflicts with required {value}")
 
+    def valid_batch(self, value):
+        """Whether a batch entry is admissible for this plan.
+
+        A plan whose contracts fix a concrete batch keeps integer batches; a
+        symbolic plan carries ``"B"`` or a multiple of it, which only a
+        batch-axis join or split introduces.
+        """
+        if type(self.batch) is int:
+            return type(value) is int and 0 < value
+        return batch_multiple(value) is not None
+
+    def share_batch(self, refs):
+        """Batch passes through unchanged, so one node's ports agree on it.
+
+        The entry may be ``"B"`` or a multiple such as ``"2*B"``; an operator
+        that moves tensors across the batch axis declares ``batch="relation"``
+        and is excluded here, setting axis 0 on each port itself.
+        """
+        known = None
+        for ref in refs:
+            shape = self.shapes.get(ref)
+            if shape is None or shape[0] is None:
+                continue
+            if known is not None and shape[0] != known:
+                self.error("E_CONSTRAINT", f"Batch {shape[0]!r} at {ref} conflicts with {known!r} on the same node")
+            known = shape[0]
+        self.node_batch = known
+        if known is None:
+            return
+        for ref in refs:
+            shape = self.shapes.get(ref)
+            if shape is not None and shape[0] is None:
+                shape[0] = known
+                self.changed = True
+
     def rank(self, ref, rank):
-        self.set_shape(ref, [self.batch] + [None] * (rank - 1))
+        shape = self.shapes.get(ref)
+        batch = self.node_batch if shape is None else shape[0]
+        self.set_shape(ref, [batch] + [None] * (rank - 1))
         return self.shapes[ref]
 
     def axis(self, ref, axis, value, code="E_CONSTRAINT"):
@@ -211,7 +261,7 @@ class _Solver:
         if shape is None or value is None:
             return
         updated = [None] * len(shape)
-        updated[0] = self.batch
+        updated[0] = shape[0]
         updated[axis] = value
         self.set_shape(ref, updated, code)
 
@@ -264,13 +314,24 @@ class _Solver:
         if lower == upper:
             self.axis(ref, axis, lower)
 
+    def port_refs(self, node):
+        return list(node.inputs.values()) + [f"node:{node.id}/{port}" for port in node.outputs]
+
     def apply(self, node):
         self.node = node
         spec = self.specs[node.id]
         view = NodeView(self, node, spec)
+        refs = None if spec.batch == "relation" else self.port_refs(node)
+        self.node_batch = None
+        if refs is not None:
+            self.share_batch(refs)
         self.patterns(spec, view)
         if spec.relation is not None:
             spec.relation(view)
+        # A relation may have created ports after the first pass; give the
+        # shared batch to those too rather than waiting for another sweep.
+        if refs is not None:
+            self.share_batch(refs)
 
     def patterns(self, spec, view):
         """Refine shared positive symbols from the declared shape patterns.
@@ -428,7 +489,7 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
         if set(node.input_shapes) != set(node.inputs) or set(node.output_shapes) != set(node.outputs):
             raise HNDLError("E_SCHEMA", "Saved port contracts are incomplete", node=node.id)
         for shape in (*node.input_shapes.values(), *node.output_shapes.values()):
-            _contract(shape, f"{node.id} port", bounds)
+            _contract(shape, f"{node.id} port", bounds, multiples=True)
     graph = Graph(tuple(Node(node.id, node.op, node.args, node.inputs, node.outputs, node.source,
                              initialization=node.initialization, trainability=node.trainability) for node in plan.nodes),
                   plan.input_shape, plan.output_shape, plan.output_ref, plan.dtype, plan.frontend,
