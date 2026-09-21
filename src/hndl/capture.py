@@ -7,6 +7,7 @@ import re
 
 from .errors import HNDLError
 from .registry import Registry, normalize_arguments
+from .settings import normalize_settings
 from .types import Graph, Node
 
 
@@ -87,6 +88,13 @@ class Capture:
         kwargs = dict(keyword)
         name = kwargs.pop("name", _DEFAULT)
         policy = kwargs.pop("policy", _DEFAULT)
+        construction = {key: kwargs.pop(key) for key in ("init", "trainable") if key in kwargs}
+        try:
+            initialization, trainability = normalize_settings(**construction)
+        except HNDLError as exc:
+            if source is not None and exc.line is None:
+                raise _error(exc.code, exc.message, source) from None
+            raise
         if policy is not _DEFAULT and type(policy) is not str:
             raise _error("E_ARGUMENT", "policy must be a registered policy name", source)
         policy = None if policy is _DEFAULT else policy
@@ -159,7 +167,8 @@ class Capture:
             metadata["policy"] = "spatial.up2_transpose@1" if policy == "up2" else policy
         node = Node(id=name, op=op.key, args=normalized,
                     inputs={port: symbol.ref for port, symbol in bindings.items()},
-                    outputs=tuple(op.output_ports), source=metadata)
+                    outputs=tuple(op.output_ports), source=metadata,
+                    initialization=initialization, trainability=trainability)
         self.nodes.append(node)
         self._ids.add(name)
         outputs = tuple(Symbol(self, f"node:{name}/{port}") for port in op.output_ports)

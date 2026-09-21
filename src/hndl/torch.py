@@ -308,6 +308,75 @@ def _state_bytes(module):
     return sum(storages.values())
 
 
+def _prepare_parameter_settings(layer, node):
+    """Validate exact targets and aliases without changing any parameter."""
+    parameters = dict(layer.named_parameters(remove_duplicate=False))
+    buffers = dict(layer.named_buffers(remove_duplicate=False))
+    initialization = node.initialization["overrides"]
+    trainability = node.trainability["overrides"]
+    default_trainability = node.trainability["default"]
+
+    for code, assignments in (("E_INITIALIZATION", initialization), ("E_TRAINABILITY", trainability)):
+        for name in sorted(assignments):
+            if name not in parameters:
+                detail = "is a buffer, not a parameter" if name in buffers else "is not a registered parameter"
+                raise HNDLError(code, f"Parameter target {name!r} {detail}", node=node.id)
+
+    by_id, names, storage_groups, buffer_storages = {}, {}, {}, set()
+    for name, parameter in parameters.items():
+        identity = id(parameter)
+        by_id[identity] = parameter
+        names.setdefault(identity, []).append(name)
+        storage = parameter.untyped_storage()
+        if storage.nbytes():
+            key = (parameter.device, storage.data_ptr())
+            storage_groups.setdefault(key, set()).add(identity)
+    for buffer in buffers.values():
+        storage = buffer.untyped_storage()
+        if storage.nbytes():
+            buffer_storages.add((buffer.device, storage.data_ptr()))
+
+    constants, flags = {}, {}
+    for assignments, destination, code in (
+        (initialization, constants, "E_INITIALIZATION"),
+        (trainability, flags, "E_TRAINABILITY"),
+    ):
+        for name in sorted(assignments):
+            identity = id(parameters[name])
+            value = assignments[name]
+            # float.hex distinguishes +0.0 and -0.0, which fill_ preserves.
+            previous = destination.get(identity)
+            if identity in destination and (
+                previous.hex() != value.hex() if code == "E_INITIALIZATION" else previous != value
+            ):
+                raise HNDLError(code, f"Conflicting settings for aliases of parameter {names[identity]!r}", node=node.id)
+            destination[identity] = value
+
+    effective_flags = {identity: flags.get(identity, parameter.requires_grad if default_trainability is None
+                                           else default_trainability)
+                       for identity, parameter in by_id.items()}
+    for key, identities in storage_groups.items():
+        if identities & constants.keys():
+            if len(identities) > 1:
+                raise HNDLError("E_INITIALIZATION", "Constant override targets distinct parameters sharing storage; use one Parameter with named aliases instead", node=node.id)
+            if key in buffer_storages:
+                raise HNDLError("E_INITIALIZATION", "Constant override targets parameter storage also registered as a buffer", node=node.id)
+        touched = default_trainability is not None or bool(identities & flags.keys())
+        if touched and len({effective_flags[identity] for identity in identities}) > 1:
+            raise HNDLError("E_TRAINABILITY", "Parameters sharing storage have conflicting effective trainability settings", node=node.id)
+
+    result = []
+    for identity, parameter in by_id.items():
+        constant = constants.get(identity)
+        flag = effective_flags[identity] if default_trainability is not None or identity in flags else None
+        if constant is not None and parameter.dtype != torch.float32:
+            raise HNDLError("E_INITIALIZATION", f"Parameter {names[identity][0]!r} has unsupported constant-initialization dtype {parameter.dtype}; expected float32", node=node.id)
+        if flag is True and not (parameter.is_floating_point() or parameter.is_complex()):
+            raise HNDLError("E_TRAINABILITY", f"Parameter {names[identity][0]!r} with dtype {parameter.dtype} cannot require gradients", node=node.id)
+        result.append((parameter, constant, flag))
+    return result
+
+
 def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None):
     if plan.dtype != "float32":
         raise HNDLError("E_SCHEMA", f"Unsupported plan dtype {plan.dtype!r}")
@@ -380,6 +449,15 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
                     raise HNDLError("E_REGISTRY", f"No supported PyTorch implementation for {node.op}")
             check_ownership(layer, node.id, record=True)
             modules[f"n_{node.id}"] = layer
+        # Resolve every target before applying settings to any graph node.
+        settings = [_prepare_parameter_settings(modules[f"n_{node.id}"], node) for node in plan.nodes]
+        with torch.no_grad():
+            for assignments in settings:
+                for parameter, constant, trainable in assignments:
+                    if constant is not None:
+                        parameter.fill_(constant)
+                    if trainable is not None:
+                        parameter.requires_grad_(trainable)
     receipt = {"torch_version": str(torch.__version__), "device": str(device),
                "initialization_seed": initialization_seed,
                "seed_mode": "caller" if initialization_seed is None else "isolated"}
