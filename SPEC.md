@@ -324,7 +324,7 @@ The declarative frontend has version `python_config@1`, recorded with source pro
 - Calls name a registered operator alias directly, such as `linear(...)`. Attribute calls such as `ops.linear(...)` are reserved for trusted native Python and fail in configuration. Calls cannot be redirected through local aliases.
 - Tensor ports take symbolic tensors, positionally in declared port order or through their declared keyword names. A single-input operator may omit that port and use current, with remaining positional literals bound to author arguments by its schema. Multi-input operators require every tensor port explicitly; there is no partial default. Duplicate bindings and missing required ports fail.
 - Argument literals are bounded integers, finite floats, booleans, strings, and schema-permitted `None`, plus recursively bounded literal lists, tuples, and dictionaries with unique string keys. Positive/negative numeric literal signs are allowed; arithmetic and computed expressions are not. Containers cannot conceal calls or arbitrary objects. Strings are accepted only where the schema permits them; booleans are not valid integer dimensions. Inferable dimensions are omitted, not written as `None`.
-- `name="hidden"` is reserved node metadata and `policy="up2"` selects a registered policy alias. Neither reaches an operator constructor as an ordinary argument. Operator schemas must avoid collisions between metadata, tensor ports, and author arguments.
+- `name="hidden"` is reserved node metadata and `policy="up2"` selects a registered policy alias. `init` and `trainable` are reserved construction metadata (§10). None reaches an operator constructor as an ordinary argument. Operator schemas must avoid collisions between metadata, tensor ports, and author arguments.
 - There are no imports, function/class definitions, conditionals, loops, comprehensions, lambdas, arbitrary expressions, arbitrary function calls, attribute/subscript access, decorators, formatted strings, or star/keyword expansion. Expression statements other than registered operator calls, including bare names, literals, and docstrings, fail.
 
 Python comments, whitespace, parentheses, and multiline calls follow the pinned grammar and preserve source locations for diagnostics. They do not change graph identity. Local names use ordinary non-keyword Python identifiers; special double-underscore names are rejected. Rebinding locals, including `x` and `out`, is allowed: evaluate the right-hand side against prior bindings, then bind the target. References to earlier tensors remain valid through other locals; rebinding does not mutate a tensor or rename/rebuild a node. Undefined and forward local references fail. Registered operator aliases cannot be rebound. The registry must reject aliases reserved for external `x` or output `out` in this frontend. If `out` is bound, its final value must hold one symbolic tensor, even if an earlier binding held a tuple. Ordinary local assignment or rebinding, including `x`, does not itself select current.
@@ -528,7 +528,7 @@ registry.register(
 )
 ```
 
-Input/output mapping order defines port order. Explicit `input_ports` and `output_ports`, if supplied, must match that order exactly. A sole input can use the implicit current tensor regardless of its port name. Multiple inputs must all be explicit. Multiple outputs return an ordered symbolic tuple and clear current. Scalar argument names must not collide with input or output port names; frontend metadata names `name` and `policy` are reserved.
+Input/output mapping order defines port order. Explicit `input_ports` and `output_ports`, if supplied, must match that order exactly. A sole input can use the implicit current tensor regardless of its port name. Multiple inputs must all be explicit. Multiple outputs return an ordered symbolic tuple and clear current. Scalar argument names must not collide with input or output port names; frontend metadata names `name`, `policy`, `init`, and `trainable` are reserved.
 
 `arguments` is an ordered mapping of scalar names to `Argument` declarations. Scalar positional arguments follow tensor inputs in that mapping's order; keyword arguments use their declared names. Supported types are `int`, `float`, `bool`, and `str`. Integers and booleans are distinct; float arguments accept finite integer or float literals and normalize them to floats. An argument without a default is required. Numeric `minimum` and `maximum` are inclusive unless their corresponding `exclusive_minimum` or `exclusive_maximum` flag is true. Defaults pass the same validation as explicit values and become concrete plan arguments. Custom scalars are not inferred in this implementation.
 
@@ -575,7 +575,7 @@ normalized = (x - mean) / sqrt(variance + eps)
 out = (1 + delta_gamma)[B,C,1,1] * normalized + beta[B,C,1,1]
 ```
 
-`eps` must be positive, defaults to `1e-5` for this fixture version, and is explicit in the plan. Variance is population variance. Both feature and style paths are differentiable. The operation has no running statistics and identical train/eval behavior. The fixture explicitly zero-initializes its style affine, giving unit scale and zero bias on normalized features; arbitrary linear layers do not inherit that initializer. The executable example currently performs this initialization through the built module's ordinary PyTorch parameters; a persisted initializer declaration remains future work. Save and reload its state dictionary to preserve the initialized or trained values.
+`eps` must be positive, defaults to `1e-5` for this fixture version, and is explicit in the plan. Variance is population variance. Both feature and style paths are differentiable. The operation has no running statistics and identical train/eval behavior. The fixture explicitly zero-initializes its style affine, giving unit scale and zero bias on normalized features; arbitrary linear layers do not inherit that initializer. The executable example declares `init={"weight": 0, "bias": 0}` on its style affine, so rebuilding its saved plan reapplies the initialization. Save and reload its state dictionary to preserve trained values.
 
 This is an AdaIN-style extension demonstration, not a faithful StyleGAN implementation. Learned constants, noise blocks, and modulated convolutions are separate future operators. Future stochastic operators should receive caller-owned noise through tensor ports.
 
@@ -614,9 +614,38 @@ An explicit initialization seed scopes module construction only. It neither isol
 
 Per-node trainability masks are applied during construction and saved in the plan. Freezing parameters does not select evaluation mode. The host controls train/eval behavior and must preserve these masks. Stateful custom modules declare persistent buffers and manage derived caches correctly after state loading/device moves.
 
+### Initialization and trainability declarations
+
+Both frontends accept optional reserved metadata on any operation:
+
+```python
+linear(64, trainable=False)
+relu()
+linear(init={"weight": 0, "bias": 0}, trainable={"bias": False})
+```
+
+`init` is a mapping from exact relative parameter names to constant numbers. Omission or an empty mapping retains ordinary constructor initialization, identified in the plan as `torch_default@1`. For a custom operation this means its registered constructor's initialization. Overrides apply after the module is materialized on the selected device, under `torch.no_grad`, within the construction RNG scope. Constructors still execute their normal initialization and consume their normal RNG draws. Overrides draw no randomness and do not affect forward-time execution.
+
+`trainable` accepts a boolean applying to every recursive parameter or a mapping from exact relative parameter names to booleans. Omission or an empty mapping preserves the constructor's `requires_grad` flags; this also preserves deliberately frozen custom parameters. Unspecified parameters in a mapping retain those flags. An explicit boolean applies even to parameters the constructor froze. A boolean on a parameterless operation is valid and has no effect. Explicit `None` for either author keyword is invalid.
+
+Each mapping has at most 256 entries. Paths have at most 256 ASCII characters, with dot-separated nonempty identifier or numeric segments, supporting names such as `projection.weight` and `layers.0.weight`. They are lookup keys into registered parameters, never Python attribute expressions to evaluate. Wildcards, indexing expressions, and buffer targets are unsupported. Values for `init` must have exact type `int` or `float`, be finite, and round to finite IEEE binary32 values; booleans are rejected. The plan stores the rounded float, including underflow to zero, preserving the sign of zero. Trainability values have exact type `bool`.
+
+Pure capture/resolution validates these bounded declarations but cannot confirm a custom module's parameter inventory. The backend verifies every target after construction and before applying any overrides; missing parameters (including disabled `bias` or `affine`), buffer targets, and conflicting aliases fail. Multiple names of the same parameter must not receive conflicting explicit values or flags. Constant initialization requires a materialized float32 parameter and rejects storage shared with any distinct parameter or registered buffer. When trainability settings touch shared storage, all distinct parameters using that storage must have the same effective flag; untouched constructor defaults remain valid. A request to enable gradients on an integer parameter fails. Module/state ownership checks remain in force across nodes.
+
+The immutable node records persist canonical construction fields separately from operator arguments:
+
+- `initialization = {"kind": "torch_default@1", "overrides": {...}}`.
+- `trainability = {"default": null | boolean, "overrides": {...}}`, where null preserves constructor flags. A boolean default and named overrides are not combined by the author API.
+
+These fields participate in semantic and artifact digests and survive concrete-plan validation. Omitted options and empty mappings have identical semantic identity. Settings that affect constructor behavior are deliberately retained even when a particular module has no parameters. Changing values or `requires_grad` flags on a built module does not mutate its plan.
+
+Build and restoration apply the persisted settings before returning the module. Freezing does not detach the layer's output: input gradients still propagate. The resulting module starts in training mode; calling `train()` or `eval()` does not alter trainability. A PyTorch state dictionary contains parameter values and persistent buffers, not these construction declarations or the trainability mask; rebuild the matching plan before loading state. Rebuilding resets values to the declared initializer until a state dictionary is loaded.
+
 ## 11. Persistence and compatibility
 
 Persist the captured author graph and full resolved plan, plus declarative source or trusted callable provenance as applicable. Do not pickle a callable or closure as the architecture. Restoration must never execute the author callable or configuration to reconstruct saved state. Reconstruct from the saved plan, not by applying a newer resolver to old omitted dimension fields. Before state loading, validate the semantic digest, required implementation/state versions, and state names/shapes/dtypes.
+
+The current alpha writes and reads resolved-plan schema **2**, with resolution semantics version **1**. Schema 1 is rejected with `E_STATE_VERSION`; users must re-resolve their original definition and save a new plan. This explicit format change adds canonical construction settings to every node. The conceptual author graph in §4 is separate from this persistence format.
 
 These identities serve different purposes:
 
@@ -644,6 +673,8 @@ Failures must expose a stable code, source/node/field location, affected constra
 | `E_AMBIGUOUS` | A convolution inverse leaves several valid input sizes |
 | `E_UNRESOLVED` | A custom block lacks the relation needed for backward inference |
 | `E_POLICY_CONFLICT` | Literal stride `1` conflicts with the selected doubling policy |
+| `E_INITIALIZATION` | An initialization constant is invalid or its parameter target is missing or ambiguous |
+| `E_TRAINABILITY` | A trainability flag is not a boolean or conflicts across parameter aliases |
 | `E_BINDING` | A reference names an undeclared node or tensor port |
 | `E_NAME` | Undefined/forward local reference or attempted rebinding of a registered operator alias |
 | `E_OUTPUT_ARITY` | Tuple unpacking has the wrong number of targets |
@@ -704,7 +735,7 @@ The baseline deliberately leaves these details visible:
 - Publish the pinned Python parser grammar/runtime compatibility matrix, AST allowlist fixtures, parser-worker budgets, remaining operator call schemas, and explicit backend registry restoration API. Generated IDs and local rebinding semantics follow §7; graph helpers remain internal to the two public authoring frontends.
 - Define the supported representation for sharing non-batch dimension variables during resolution. Only batch remains symbolic in a successful plan; no general expression language is implied.
 - Finalize canonical JSON encoding, semantic/artifact digest payloads, and golden test vectors.
-- Fix initialization override and trainability syntax, build-receipt representation, runtime-check controls, and supported PyTorch versions/devices with numerical tolerances.
+- Extend initialization beyond constant overrides; complete build-receipt representation, runtime-check controls, and supported PyTorch versions/devices with numerical tolerances.
 - Set configurable resolution/build limits, termination enforcement for custom rules, and the remaining diagnostic codes.
 
 These are implementation interface decisions. They do not permit relaxing literal constraints, hiding architecture choices, or treating unresolved shapes as a successful plan.
