@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-09-21)
+
+A minor release adding a first-class `spatial_attention` operator and an
+opt-in performance/optimization test suite.
 
 - **Opt-in performance/optimization tests.** tests/benchmark/, marked
   benchmark and excluded from CI (pytest -m "not network and not benchmark"),
