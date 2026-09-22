@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-09-21)
+
+A minor release adding TransGAN-style relative-position-bias attention and
+selectable random initializer schemes, plus a forward-pass performance pass.
 
 - **`init=` selects random initializer schemes, not just constants.** An entry
   in the per-parameter `init` mapping may now be one of eight keyword-only
