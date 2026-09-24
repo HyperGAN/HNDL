@@ -27,6 +27,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | --- | --- |
 | [`add`](add.md) | Elementwise sum of two tensors with identical shapes. |
 | [`broadcast_add`](broadcast_add.md) | Elementwise sum of two tensors of equal rank, broadcasting size-1 axes. |
+| [`broadcast_mul`](broadcast_mul.md) | Elementwise product of equal-rank tensors, broadcasting size-1 axes. |
 | [`clamp`](clamp.md) | Saturate every element into the closed interval [min, max]. |
 | [`constant`](constant.md) | Emit a tensor of a fixed shape filled with one constant value. |
 | [`learned_scale`](learned_scale.md) | Multiply a tensor by one learned scalar. |
@@ -87,6 +88,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`cross_attention`](cross_attention.md) | Multi-head attention with queries from one sequence and keys and values from another. |
 | [`embedding`](embedding.md) | Look up a learned vector for every integer token id. |
 | [`feed_forward`](feed_forward.md) | Transformer feed-forward block: widen, activate, project back. |
+| [`fourier_features`](fourier_features.md) | Encode coordinates with a fixed random Fourier frequency table. |
 | [`gather_token`](gather_token.md) | Select the token of a sequence at the position holding the largest id. |
 | [`moe`](moe.md) | Sparse mixture of experts: route every token to its top-k feed-forward experts. |
 | [`pool_tokens`](pool_tokens.md) | Reduce a [B, T, D] sequence to one [B, D] vector per example. |
@@ -115,7 +117,9 @@ are generated from those declarations by `python -m hndl.docs`.
 | --- | --- |
 | [`adaptive_avg_pool`](adaptive_avg_pool.md) | Average-pool [B, C, H, W] images to a fixed output height and width. |
 | [`avg_pool`](avg_pool.md) | Two-dimensional average pooling over [B, C, H, W] images. |
+| [`coordinate_grid`](coordinate_grid.md) | Emit a normalized 2D coordinate grid in (x, y) order. |
 | [`global_avg_pool`](global_avg_pool.md) | Average each channel over height and width, producing one value per channel. |
+| [`grid_sample`](grid_sample.md) | Sample an image using a per-example normalized coordinate grid. |
 | [`max_pool`](max_pool.md) | Two-dimensional max pooling over [B, C, H, W] images. |
 | [`pixel_shuffle`](pixel_shuffle.md) | Trade channels for resolution: rearrange C*r^2 channels into an r-times larger image. |
 | [`spatial_attention`](spatial_attention.md) | SAGAN self-attention over every position of a [B, C, H, W] feature map. |

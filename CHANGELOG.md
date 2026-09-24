@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `broadcast_mul`, `coordinate_grid`, `fourier_features`, and `grid_sample`
+  for style-conditioned coordinate renderers composed in HNDL. Fourier tables
+  and coordinate grids are persistent buffers; sampling follows PyTorch semantics.
+
 - Add opt-in `equalized=True` to `linear`, `attention`, and `feed_forward`:
   raw N(0,1) weights, zero biases, and runtime `1/sqrt(fan_in)` weight scaling
   with unit gain and learning-rate multiplier. Existing defaults, shapes and

@@ -63,3 +63,47 @@ def elementwise_join(*ports, out="out"):
             s.equal(port, out)
 
     return relation
+
+
+def broadcast(s, operation):
+    """Numpy-style broadcasting restricted to equal rank and a shared batch axis.
+
+    Every fact is added only when it follows uniquely from what is known, so
+    the relation stays monotone across solver sweeps.
+    """
+    ports = ("a", "b", "out")
+    rank = next((len(shape) for shape in (s.shape(port) for port in ports) if shape is not None), None)
+    if rank is None:
+        return
+    # A rank disagreement surfaces here as an E_CONSTRAINT rank conflict.
+    for port in ports:
+        s.rank(port, rank)
+    shapes = {port: s.shape(port) for port in ports}
+    for axis in range(1, rank):
+        a, b, out = (shapes[port][axis] for port in ports)
+        if a is not None and b is not None:
+            if a != b and a != 1 and b != 1:
+                s.error("E_CONSTRAINT",
+                        f"{operation} axis {axis}: extents {a} (a) and {b} (b) do not broadcast; "
+                        "the extents must be equal or one of them must be 1")
+            s.axis("out", axis, max(a, b))
+            continue
+        if out is None:
+            continue
+        if out == 1:
+            # Both operands must be 1 for the result to be 1.
+            s.axis("a", axis, 1)
+            s.axis("b", axis, 1)
+            continue
+        for known, other in (("a", "b"), ("b", "a")):
+            extent = shapes[known][axis]
+            if extent is None:
+                continue
+            if extent != 1 and extent != out:
+                s.error("E_CONSTRAINT",
+                        f"{operation} axis {axis}: extent {extent} ({known}) cannot broadcast to "
+                        f"the output extent {out}; it must equal {out} or be 1")
+            if extent == 1:
+                # The other operand alone has to supply the output extent.
+                s.axis(other, axis, out)
+            # extent == out leaves the other operand ambiguous (out or 1); say nothing.
