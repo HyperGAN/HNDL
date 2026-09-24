@@ -23,6 +23,7 @@ x[B, T, D] -> out[B, T, D]
 | `causal` | bool | `False` | — | Mask out future positions so each token attends only to itself and its past. |
 | `dropout` | float | `0.0` | >= 0; < 1 | Dropout probability on the attention weights, applied in training mode only. |
 | `bias` | bool | `True` | — | Add a learned bias to each of the four projections. |
+| `equalized` | bool | `False` | — | Use runtime fan-in scaling and N(0,1) raw weights for all four linear projections. |
 | `qkv_bias` | bool | `True` | — | Narrow bias for the query, key and value projections; they carry a bias only when both bias and qkv_bias are true. |
 | `out_bias` | bool | `True` | — | Narrow bias for the output projection; it carries a bias only when both bias and out_bias are true. |
 | `rope` | bool | `False` | — | Apply rotary position embeddings to the queries and keys before attending. |
@@ -48,6 +49,12 @@ each an ``nn.Linear(D, D)``, so their parameters are ``q_proj.weight``,
 ``q_proj.bias`` and so on. The attention itself is computed by
 ``torch.nn.functional.scaled_dot_product_attention``, which picks a fused
 kernel when one is available.
+
+With ``equalized=True`` all four projections initialize raw weights N(0,1)
+and any biases at zero, applying ``weight / sqrt(D)`` at every forward.
+Gain and learning-rate multiplier are one. Relative-position tables and
+the attention-logit head scaling are unchanged. ``init=`` and checkpoints
+target raw projection weights, not their runtime-scaled values.
 
 **Biases.** ``bias`` is the one flag for all four projections. ``qkv_bias``
 and ``out_bias`` narrow it per projection: ``q_proj``, ``k_proj`` and
@@ -145,6 +152,24 @@ Parameters: 4,224
 
 ### Example 2
 
+Equalized Q/K/V/output projections; softmax and head scaling stay unchanged.
+
+```python
+attention(4, equalized=True)
+```
+
+Input `['B', 8, 32]` → output `['B', 8, 32]`.
+
+```text
+Network: [B, 8, 32] -> [B, 8, 32]  dtype=float32
+index  name  operation  input shapes  output shapes
+0      n0    attention  x=[B, 8, 32]  out=[B, 8, 32]
+```
+
+Parameters: 4,224
+
+### Example 3
+
 Causal masking makes the layer autoregressive.
 
 ```python
@@ -161,7 +186,7 @@ index  name  operation  input shapes  output shapes
 
 Parameters: 1,088
 
-### Example 3
+### Example 4
 
 The model width 16 is set by the projection; rotary embeddings need an even head dimension.
 
@@ -183,7 +208,7 @@ index  name  operation  input shapes   output shapes
 
 Parameters: 1,368
 
-### Example 4
+### Example 5
 
 The 16 tokens are read as a 4x4 grid and each head learns a bias per (dy, dx) offset.
 
@@ -201,7 +226,7 @@ index  name  operation  input shapes   output shapes
 
 Parameters: 1,186
 
-### Example 5
+### Example 6
 
 TransGAN's generator block: no bias on q/k/v, a bias on the output projection, and a relative-position bias over the 8x8 token grid.
 

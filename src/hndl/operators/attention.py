@@ -6,6 +6,7 @@ from torch.nn import functional as F
 
 from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
+from ._equalized import EqualLinear
 
 ROPE_BASE = 10000.0
 
@@ -130,6 +131,8 @@ def _reference(module):
         "dropout": Arg(float, 0.0, min=0, max=1, exclusive_max=True, positional=False,
                        help="Dropout probability on the attention weights, applied in training mode only."),
         "bias": Arg(bool, True, positional=False, help="Add a learned bias to each of the four projections."),
+        "equalized": Arg(bool, False, positional=False,
+                         help="Use runtime fan-in scaling and N(0,1) raw weights for all four linear projections."),
         "qkv_bias": Arg(bool, True, positional=False,
                         help="Narrow bias for the query, key and value projections; they carry a bias only "
                              "when both bias and qkv_bias are true."),
@@ -149,6 +152,8 @@ def _reference(module):
     examples=[
         Example("attention(4)", ("B", 8, 32), ("B", 8, 32),
                 "Bidirectional self-attention with 4 heads of width 8."),
+        Example("attention(4, equalized=True)", ("B", 8, 32), ("B", 8, 32),
+                "Equalized Q/K/V/output projections; softmax and head scaling stay unchanged."),
         Example("attention(2, causal=True)", ("B", 6, 16), ("B", 6, 16),
                 "Causal masking makes the layer autoregressive."),
         Example("linear(16)\nattention(4, rope=True)\nlinear()", ("B", 10, 8), ("B", 10, 8),
@@ -180,6 +185,12 @@ class Attention(nn.Module):
     ``q_proj.bias`` and so on. The attention itself is computed by
     ``torch.nn.functional.scaled_dot_product_attention``, which picks a fused
     kernel when one is available.
+
+    With ``equalized=True`` all four projections initialize raw weights N(0,1)
+    and any biases at zero, applying ``weight / sqrt(D)`` at every forward.
+    Gain and learning-rate multiplier are one. Relative-position tables and
+    the attention-logit head scaling are unchanged. ``init=`` and checkpoints
+    target raw projection weights, not their runtime-scaled values.
 
     **Biases.** ``bias`` is the one flag for all four projections. ``qkv_bias``
     and ``out_bias`` narrow it per projection: ``q_proj``, ``k_proj`` and
@@ -257,7 +268,8 @@ class Attention(nn.Module):
     """
 
     def __init__(self, heads, causal, dropout, bias, rope, *, D,
-                 qkv_bias=True, out_bias=True, relative_position_bias=False, spatial_shape=(0, 0)):
+                 qkv_bias=True, out_bias=True, relative_position_bias=False, spatial_shape=(0, 0),
+                 equalized=False):
         super().__init__()
         if D % heads:
             raise HNDLError("E_CONSTRAINT", f"heads={heads} must divide the model width D={D}")
@@ -271,10 +283,11 @@ class Attention(nn.Module):
         self.relative_position_bias = bool(relative_position_bias)
         height, width = (spatial_shape, spatial_shape) if type(spatial_shape) is int else tuple(spatial_shape)
         self.spatial_shape = (int(height), int(width))
-        self.q_proj = nn.Linear(D, D, bias=bias and qkv_bias)
-        self.k_proj = nn.Linear(D, D, bias=bias and qkv_bias)
-        self.v_proj = nn.Linear(D, D, bias=bias and qkv_bias)
-        self.o_proj = nn.Linear(D, D, bias=bias and out_bias)
+        linear = EqualLinear if equalized else nn.Linear
+        self.q_proj = linear(D, D, bias=bias and qkv_bias)
+        self.k_proj = linear(D, D, bias=bias and qkv_bias)
+        self.v_proj = linear(D, D, bias=bias and qkv_bias)
+        self.o_proj = linear(D, D, bias=bias and out_bias)
         if self.relative_position_bias:
             height, width = self.spatial_shape
             if height < 1 or width < 1:

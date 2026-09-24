@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in `equalized=True` to `linear`, `attention`, and `feed_forward`:
+  raw N(0,1) weights, zero biases, and runtime `1/sqrt(fan_in)` weight scaling
+  with unit gain and learning-rate multiplier. Existing defaults, shapes and
+  parameter names stay unchanged. Initializer overrides target raw weights;
+  equalized linear rejects combination with spectral normalization.
+
 ## 0.6.0 (2026-09-21)
 
 A minor release adding TransGAN-style relative-position-bias attention and

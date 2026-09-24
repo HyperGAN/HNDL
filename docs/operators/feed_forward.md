@@ -23,6 +23,7 @@ x[B, ..., D] -> out[B, ..., D]
 | `activation` | str | `"gelu"` | one of `gelu`, `gelu_tanh`, `relu`, `silu`, `quick_gelu` | Nonlinearity applied to the inner activations. |
 | `dropout` | float | `0.0` | >= 0; < 1 | Dropout probability applied after the activation; 0 disables it. |
 | `bias` | bool | `True` | — | Add a learned bias to both projections. |
+| `equalized` | bool | `False` | — | Use runtime fan-in scaling and N(0,1) raw weights for both linear projections. |
 
 ## Description
 
@@ -44,6 +45,12 @@ Submodules are `up` (`Linear(D, hidden)`), `dropout` and `down`
 (`Linear(hidden, D)`), so the parameters are `up.weight`, `up.bias`,
 `down.weight` and `down.bias`. With biases the block holds
 `2 * D * hidden + hidden + D` parameters, and `2 * D * hidden` without.
+
+``equalized=True`` initializes both raw projection weights N(0,1), zeros
+their biases, and scales each weight by the inverse square root of its own
+fan-in (D for up, hidden for down) on every forward. Gain and learning-rate
+multiplier are one. Activations and dropout are unchanged. ``init=`` and
+checkpoints contain raw weights; parameter names and shapes stay the same.
 
 `activation` selects one of:
 
@@ -81,6 +88,24 @@ Parameters: 4,192
 
 ### Example 2
 
+Equalized projections preserve the selected activation and dropout.
+
+```python
+feed_forward(64, equalized=True)
+```
+
+Input `['B', 32]` → output `['B', 32]`.
+
+```text
+Network: [B, 32] -> [B, 32]  dtype=float32
+index  name  operation     input shapes  output shapes
+0      n0    feed_forward  x=[B, 32]     out=[B, 32]
+```
+
+Parameters: 4,192
+
+### Example 3
+
 The inner width is explicit; the surrounding widths are inferred.
 
 ```python
@@ -101,7 +126,7 @@ index  name  operation     input shapes  output shapes
 
 Parameters: 7,146
 
-### Example 3
+### Example 4
 
 On a [B, T, D] sequence the block acts on the last axis, independently per position.
 
@@ -119,7 +144,7 @@ index  name  operation     input shapes  output shapes
 
 Parameters: 3,160
 
-### Example 4
+### Example 5
 
 Without biases the block holds exactly 2 * D * hidden parameters.
 
