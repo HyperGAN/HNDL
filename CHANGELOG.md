@@ -27,6 +27,27 @@
   `ResolvedPlan.from_json` drops its 16 MiB input cap and duplicate `max_nodes`
   check; revalidation still applies `max_nodes`.
 
+- **Contracts are checked once per input signature, not on every call.** The
+  first forward whose inputs have a given shape, dtype and device (in a given
+  training mode and autocast state) still checks every node's ports and that
+  no module created or removed registered state; later calls with the same
+  signature compare only the inputs and run the layers back to back. Moving
+  or casting the model, or registering a parameter, buffer or submodule on
+  any of its modules, makes the next call check everything again. The fixed
+  per-call cost of a five-node MLP drops from ~30-40 us to ~6-9 us: at batch
+  32 it runs ~1.2x hand-written PyTorch instead of ~1.8x.
+  Errors say more: `E_RUNTIME` names the node, its operation and source line,
+  and prints the contract in HNDL notation beside the tensor that arrived
+  (`expected [B=32, 64]:float32 on cpu` / `got [32, 63]:float32 on cpu`);
+  dtypes are spelled `float32`, not `torch.float32`. An exception raised
+  inside a layer is now an `E_RUNTIME` naming the node, with its inputs and
+  any registered-state change that explains it, and the original exception as
+  `__cause__` (out-of-memory errors still propagate unchanged). Registered
+  state edits PyTorch runs no hook for --- `del` of a registered name,
+  `module.param = None`, direct writes to `_parameters`/`_buffers`/`_modules`
+  --- are reported at the next full check or when a layer then fails, not on
+  the very next call.
+
 - Add `broadcast_mul`, `coordinate_grid`, `fourier_features`, and `grid_sample`
   for style-conditioned coordinate renderers composed in HNDL. Fourier tables
   and coordinate grids are persistent buffers; sampling follows PyTorch semantics.
