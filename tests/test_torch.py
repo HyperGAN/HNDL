@@ -1,9 +1,11 @@
 """Numerical and integration checks for the PyTorch backend."""
 
 import copy
+import gc
 import pickle
 import subprocess
 import sys
+import weakref
 from dataclasses import replace
 
 import pytest
@@ -399,6 +401,15 @@ def test_deepcopy_keeps_lookup_moves_and_the_state_consistency_check():
     model["norm"].ghost = nn.Parameter(torch.zeros(1))
     with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
         model(x)
+    # So are edits no hook reports: each graph compares its own modules' stores.
+    fresh = _stateful(device="cpu").eval()
+    twin = copy.deepcopy(fresh)
+    fresh(x)
+    twin(x)
+    del twin["hidden"]._parameters["bias"]
+    with pytest.raises(HNDLError, match="parameter 'nodes.n_hidden.bias' was removed"):
+        twin(x)
+    assert fresh(x).shape == (2, 2)
 
 
 def test_state_registered_during_forward_is_rejected():
@@ -805,10 +816,28 @@ def _replaces_the_head_weight(model):
     (lambda model: setattr(model["norm"], "running_mean", None), HNDLError,
      "registered state of batch_norm 'norm' no longer matches the build: "
      "buffer 'nodes.n_norm.running_mean' was set to None"),
-    # A deletion runs no hook: the node's own error surfaces, explained by a note.
-    (lambda model: delattr(model["head"], "weight"), AttributeError,
-     "HNDL: raised inside node 'head' (linear, line 1, column 60)\n"
-     "  registered state no longer matches the build: parameter 'nodes.n_head.weight' was removed"),
+    # PyTorch runs no registration hook for these; the recorded stores catch them.
+    (lambda model: delattr(model["head"], "weight"), HNDLError,
+     "E_RUNTIME (node head; line 1, column 60): registered state of linear 'head' no longer matches "
+     "the build: parameter 'nodes.n_head.weight' was removed"),
+    (lambda model: setattr(model["hidden"], "bias", None), HNDLError,
+     "registered state of linear 'hidden' no longer matches the build: "
+     "parameter 'nodes.n_hidden.bias' was set to None"),
+    (lambda model: model["hidden"]._parameters.__setitem__("bias", None), HNDLError,
+     "parameter 'nodes.n_hidden.bias' was set to None"),
+    (lambda model: model["hidden"]._parameters.__setitem__("scale", nn.Parameter(torch.ones(1))), HNDLError,
+     "parameter 'nodes.n_hidden.scale' was added"),
+    (lambda model: model["norm"]._buffers.__delitem__("running_var"), HNDLError,
+     "registered state of batch_norm 'norm' no longer matches the build: "
+     "buffer 'nodes.n_norm.running_var' was removed"),
+    (lambda model: model["norm"]._buffers.__setitem__("extra", torch.zeros(1)), HNDLError,
+     "buffer 'nodes.n_norm.extra' was added"),
+    (lambda model: model["hidden"]._modules.__setitem__("extra", nn.Linear(2, 2)), HNDLError,
+     "registered state of linear 'hidden' no longer matches the build: "
+     "submodule 'nodes.n_hidden.extra' was added (Linear)"),
+    (lambda model: model.nodes._modules.__setitem__("n_head", nn.Linear(5, 2)), HNDLError,
+     "registered state of the network no longer matches the build: "
+     "submodule 'nodes.n_head' was replaced (Linear -> Linear)"),
     (_replaces_the_head_weight, RuntimeError, "mat1 and mat2 shapes cannot be multiplied (3x5 and 7x2)"),
 ])
 def test_a_submodule_or_parameter_mutated_after_the_first_call_is_reported(mutate, raised, message):
@@ -823,21 +852,135 @@ def test_a_submodule_or_parameter_mutated_after_the_first_call_is_reported(mutat
         assert message in "\n".join([str(caught.value), *_hndl_notes(caught.value)])
 
 
-def test_a_parameter_set_to_none_is_reported_at_the_next_revalidation():
-    """PyTorch runs no registration hook for ``module.param = None``.
+def test_a_parameter_set_to_none_is_reported_on_the_next_call_and_can_be_repaired():
+    """``module.param = None`` runs no registration hook, yet the next call reports it.
 
-    So the unchecked path keeps running --- here ``linear`` without its bias ---
-    until something revalidates the graph: a new input signature, a move or
-    cast, or any registration the hooks do see.
+    Before the recorded stores, the unchecked path kept running ``linear``
+    without its bias until something revalidated the graph.
     """
+    model = _mlp(device="cpu")
+    checks = _count_checks(model)
+    x = torch.randn(3, 4)
+    expected = model(x)
+    bias = model["hidden"].bias
+    model["hidden"].bias = None
+    for call in (lambda: model(x), lambda: model(torch.randn(5, 4)), lambda: model.to("cpu")(x)):
+        with pytest.raises(HNDLError) as caught:
+            call()
+        assert str(caught.value).splitlines()[0] == (
+            "E_RUNTIME (node hidden; line 1, column 1): registered state of linear 'hidden' no longer "
+            "matches the build: parameter 'nodes.n_hidden.bias' was set to None")
+    model["hidden"]._parameters["bias"] = bias  # repaired, again without a hook
+    torch.testing.assert_close(model(x), expected)
+    checks.clear()
+    torch.testing.assert_close(model(x), expected)
+    assert checks == []  # back on the unchecked path
+
+
+def test_a_hookless_edit_during_a_fast_call_is_reported_on_the_next_call():
+    registry = Registry.builtins()
+
+    @registry.operator("drops_late", identity="tests.drops_late", summary="Drop a parameter on call three.",
+                       shape="data[B, F] -> value[B, F]")
+    class DropsLate(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.scale = nn.Parameter(torch.ones(1))
+
+        def forward(self, data):
+            self.calls += 1
+            if self.calls == 3:
+                del self._parameters["scale"]
+                return data
+            return data * self.scale
+
+    model = network("drops_late()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
+    x = torch.randn(2, 4)
+    for _ in range(3):
+        model(x)
+    with pytest.raises(HNDLError, match="^E_RUNTIME .*registered state of drops_late 'n0' no longer matches "
+                                        "the build: parameter 'nodes.n_n0.scale' was removed"):
+        model(x)
+
+
+def test_a_tensor_swapped_in_under_its_name_stays_on_the_unchecked_path():
+    """``torch.func.functional_call`` swaps fresh tensors in on every call, without a hook.
+
+    A swap registers no new name, so it is not a registered-state change: each
+    call runs the unchecked program, as it does after an in-place update.
+    """
+    model = _mlp(device="cpu")
+    doubled = copy.deepcopy(model)
+    with torch.no_grad():
+        for parameter in doubled.parameters():
+            parameter.mul_(2)
+    checks = _count_checks(model)
+    x = torch.randn(3, 4)
+    expected = model(x)
+    doubled(x)
+    checks.clear()
+    for _ in range(3):
+        swapped = {name: 2 * parameter.detach() for name, parameter in model.named_parameters()}
+        torch.testing.assert_close(torch.func.functional_call(model, swapped, (x,)), doubled(x))
+        torch.testing.assert_close(model(x), expected)
+    head = model["head"]
+    head._parameters["weight"] = nn.Parameter(torch.zeros(2, 5))
+    head._parameters["bias"] = nn.Parameter(torch.ones(2))
+    torch.testing.assert_close(model(x), torch.ones(3, 2))
+    assert checks == []
+
+
+def _hypernetwork_weights(model):
+    """Weights computed from other tensors, so each carries an autograd graph."""
+    return {name: parameter * 2 for name, parameter in model.named_parameters()}
+
+
+@pytest.mark.parametrize("transform", ["plain", "grad", "vmap"])
+def test_deepcopy_after_functional_call(transform):
+    """Nothing a functional call swapped in is kept, so it never reaches ``copy.deepcopy``.
+
+    Non-leaf, grad-tracking and vmap-batched tensors all refuse deepcopy.
+    """
+    model = _stateful(device="cpu").eval()
+    x = torch.randn(3, 4)
+    expected = model(x)
+    if transform == "plain":
+        torch.func.functional_call(model, _hypernetwork_weights(model), (x,))
+    elif transform == "grad":
+        params = {name: parameter.detach() for name, parameter in model.named_parameters()}
+        torch.func.grad(lambda p: torch.func.functional_call(model, p, (x,)).sum())(params)
+    else:
+        stacked = {name: torch.stack([parameter.detach()] * 4) for name, parameter in model.named_parameters()}
+        assert torch.func.vmap(lambda p: torch.func.functional_call(model, p, (x,)))(stacked).shape == (4, 3, 2)
+    clone = copy.deepcopy(model)
+    torch.testing.assert_close(clone(x), expected)
+    torch.testing.assert_close(model(x), expected)
+
+
+def test_functional_call_keeps_no_generated_weights_alive():
     model = _mlp(device="cpu")
     x = torch.randn(3, 4)
     model(x)
-    model["hidden"].bias = None
-    assert model(x).shape == (3, 2)
-    for revalidate in (lambda: model(torch.randn(5, 4)), lambda: model.to("cpu")(x)):
-        with pytest.raises(HNDLError, match="^E_RUNTIME .*parameter 'nodes.n_hidden.bias' was set to None"):
-            revalidate()
+    source = torch.randn(64, 64, requires_grad=True)
+    intermediate = source * 1.0
+    alive = weakref.ref(intermediate)
+    scale = (intermediate * intermediate).sum() * 0 + 1  # saves ``intermediate`` for backward
+    torch.func.functional_call(model, {name: parameter.detach() * scale
+                                       for name, parameter in model.named_parameters()}, (x,))
+    del source, intermediate, scale
+    gc.collect()
+    assert alive() is None
+
+
+def test_a_cast_releases_the_tensors_it_replaced():
+    model = _stateful(device="cpu").eval()
+    model(torch.randn(3, 4))
+    running_mean = weakref.ref(model["norm"].running_mean)
+    model.double()
+    gc.collect()
+    assert running_mean() is None
+    assert model(torch.randn(3, 4, dtype=torch.float64)).dtype == torch.float64
 
 
 def test_state_registered_during_a_later_forward_is_rejected_after_that_call():

@@ -45,6 +45,28 @@
   calling them through `ops`, reusing `hndl.relations` in a strided
   operator's relation, testing them with `hndl.testing`, and adding
   arguments with `Arg(since=...)`.
+- **Registered-state edits PyTorch runs no hook for are caught on the next
+  call.** `del module.weight`, `linear.bias = None` and direct writes to a
+  module's `_parameters`, `_buffers` or `_modules` used to go unnoticed on the
+  unchecked path until a new input signature, a move or cast, or a failing
+  layer forced a full check, so a layer could silently run without its bias.
+  Each call now compares, in C, which names those mappings hold, which of them
+  are `None`, and which submodules, with a record taken when the state last
+  matched the build: about 0.7 us per call for a five-node MLP and 1.3 us for
+  a transformer block. An entry removed, set to `None` or added, or a
+  submodule replaced, fails the next call with the same `E_RUNTIME` report as
+  a registration, naming the node and what changed. A tensor swapped in under
+  a registered name is not a change, so `torch.func.functional_call` stays on
+  the unchecked path, and the record holds no tensors, so nothing a functional
+  call passed in is kept alive or reaches `copy.deepcopy`. Not detected: a
+  whole mapping replaced, a mapping reordered, one name removed and another
+  added in the same `_parameters` or `_buffers` between two calls, and a
+  submodule replaced by one that compares equal to it.
+- The forward-latency parity benchmark (`-m benchmark`) allows hndl 1.5x
+  hand-written PyTorch for the MLP and transformer block, down from 2.0x, and
+  compares the fastest of ten interleaved rounds per side instead of one
+  sequential mean each. The convolution case keeps 2.0x: its ratio swings
+  with machine load and cannot see per-call overhead.
 
 ## 0.7.0 (2026-09-26)
 

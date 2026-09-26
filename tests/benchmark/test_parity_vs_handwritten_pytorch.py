@@ -15,22 +15,54 @@ The comparison is not free of overhead on purpose: ``GraphModule._execute``
 validates every node's shape, dtype and device on the first call for each
 input signature (see ``_run_checked`` in ``src/hndl/torch.py``), which a
 hand-written module never does, and on every later call compares that
-signature before running the modules from a slot-indexed program. The timing
-loop repeats one signature, so it measures the second, cheap path.
-:data:`TOLERANCE` is the generous multiple of hand-written time that overhead is
-allowed to cost. These assertions are meant to fail loudly rather than skip if
-that overhead ever grows unreasonable.
+signature, and a record of every module's ``_parameters``/``_buffers``/
+``_modules`` (which names, which are ``None``, which submodules), before
+running the modules from a slot-indexed program. The timing loop repeats one
+signature, so it measures the second, cheap path. :data:`TOLERANCE` is the
+multiple of hand-written time that overhead is allowed to cost. These
+assertions are meant to fail loudly rather than skip if that overhead ever
+grows unreasonable.
 
 That overhead is a roughly **constant** cost per forward call — about 2 us per
-call plus well under 1 us per node on this machine, so ~6-9 us for the
+call plus well under 1 us per node on this machine, so ~7-10 us for the
 five-node MLP, independent of batch size — which means the ratio a case
 reports depends on how much arithmetic the batch gives it to amortize against.
 The MLP is timed at batch 256, where the fixed cost was once large; at batch
-32 the same network now measures about 1.15-1.2x. (Before validation moved to
+32 the same network now measures about 1.15-1.25x. (Before validation moved to
 once per signature, every call checked every port and replayed the
 registered-state walk: ~5 us per node after the resolved-shape and
 baked-program caches, ~13 us before them, and batch 32 measured ~1.7x and
-~2.5x respectively.)
+~2.5x respectively.) The registered-state record costs about 0.7 us per call
+for the MLP and 1.3 us for the transformer block.
+
+Each side is timed in :data:`ROUNDS` interleaved rounds and represented by its
+fastest round (see :func:`_compare`). Measured ratios, 12 runs of
+``python -m pytest -m benchmark tests/benchmark -k parity`` on a 24-core CPU
+machine shared with other work (load average 3-7), torch 2.14, Python 3.14,
+2026-09-26:
+
+===========================  =============
+case                         ratio range
+===========================  =============
+mlp (batch 256)              1.02x - 1.10x
+conv_stack (batch 16)        0.60x - 1.58x
+transformer_block (batch 8)  1.06x - 1.22x
+===========================  =============
+
+The MLP and the transformer block are where per-call overhead shows, and
+:data:`TOLERANCE` holds them to 1.5x. That is not much headroom on a busy
+machine. With 20 extra busy-looping processes on the same machine (load
+average 6-17), five runs measured the MLP at 0.95x-1.06x and the transformer
+block at 1.16x-1.38x, and a trial with one intra-op thread put the transformer
+block at 1.49x. When each side was timed once, one after the other, as before
+the rounds were interleaved, the MLP reached 1.51x at load 3-25. A failure on
+a loaded machine is worth re-running before it is believed.
+
+The convolution case is almost all arithmetic: hndl's ~10 us per call is about
+1% of it or less, so it cannot show overhead at any tolerance. Its ratio swings
+from one process to the next on a shared machine (above, and up to 2.12x with
+sequential timing), even single-threaded, and it keeps the looser
+:data:`ARITHMETIC_TOLERANCE` as a check against gross regressions only.
 
 Run with ``-s`` to see each case's two timings and their ratio.
 """
@@ -45,27 +77,50 @@ from ._timing import format_measurement, measure
 
 pytestmark = pytest.mark.benchmark
 
-#: hndl's mean forward time may be at most this multiple of hand-written PyTorch's.
-TOLERANCE = 2.0
+#: hndl's best median forward time may be at most this multiple of hand-written
+#: PyTorch's (see the module docstring for measured ratios).
+TOLERANCE = 1.5
+
+#: The same bound for a case whose time is almost all arithmetic, which cannot
+#: show per-call overhead and whose ratio is dominated by machine noise.
+ARITHMETIC_TOLERANCE = 2.0
 
 DEVICE = "cpu"
 
 
-def _compare(name, hndl_module, handwritten, inputs, min_run_time):
-    """Time both modules on ``inputs``, print the pair, and assert the ratio."""
+#: How many interleaved rounds each side is timed in; see :func:`_compare`.
+ROUNDS = 10
+
+
+def _compare(name, hndl_module, handwritten, inputs, min_run_time, tolerance=TOLERANCE):
+    """Time both modules on ``inputs``, print the pair, and assert the ratio.
+
+    The two sides are timed in :data:`ROUNDS` interleaved rounds, alternating
+    which goes first, each round spending ``min_run_time / ROUNDS`` per side,
+    and each side is represented by its fastest round's median. Load from
+    other work only ever slows a round down, so the fastest rounds are the
+    ones it touched least, and interleaving keeps a burst of load from landing
+    on one side's whole measurement.
+    """
     hndl_module.eval()
     handwritten.eval()
     assert hndl_module is not handwritten
+    sides = {"hndl": hndl_module, "handwritten": handwritten}
+    rounds = {side: [] for side in sides}
     with torch.no_grad():
-        hndl_measurement = measure(lambda: hndl_module(*inputs), min_run_time=min_run_time)
-        handwritten_measurement = measure(lambda: handwritten(*inputs), min_run_time=min_run_time)
-    ratio = hndl_measurement.mean / handwritten_measurement.mean
+        for number in range(ROUNDS):
+            for side in (sides if number % 2 == 0 else reversed(sides)):
+                module = sides[side]
+                rounds[side].append(measure(lambda module=module: module(*inputs),
+                                            min_run_time=min_run_time / ROUNDS))
+    hndl_measurement, handwritten_measurement = (min(rounds[side], key=lambda m: m.median) for side in sides)
+    ratio = hndl_measurement.median / handwritten_measurement.median
     print()
     print(format_measurement(f"{name} hndl", hndl_measurement))
     print(format_measurement(f"{name} handwritten", handwritten_measurement))
-    print(f"{name} ratio: {ratio:.2f}x (tolerance {TOLERANCE:.2f}x)")
-    assert hndl_measurement.mean <= TOLERANCE * handwritten_measurement.mean, (
-        f"{name}: hndl is {ratio:.2f}x hand-written PyTorch, over the {TOLERANCE:.2f}x tolerance "
+    print(f"{name} ratio: {ratio:.2f}x (tolerance {tolerance:.2f}x)")
+    assert ratio <= tolerance, (
+        f"{name}: hndl is {ratio:.2f}x hand-written PyTorch, over the {tolerance:.2f}x tolerance "
         f"({format_measurement('hndl', hndl_measurement)}; "
         f"{format_measurement('handwritten', handwritten_measurement)})"
     )
@@ -138,7 +193,7 @@ def test_conv_stack_matches_handwritten_module(benchmark_min_time):
                                output_shape=("B", 10), device=DEVICE)
     handwritten = HandwrittenConvStack().to(DEVICE)
     x = torch.randn(16, 3, 32, 32, device=DEVICE)
-    _compare("conv_stack", built, handwritten, (x,), benchmark_min_time)
+    _compare("conv_stack", built, handwritten, (x,), benchmark_min_time, tolerance=ARITHMETIC_TOLERANCE)
 
 
 TRANSFORMER_SOURCE = "transformer_block(4)"
