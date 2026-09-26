@@ -254,7 +254,7 @@ def test_relative_position_bias_matches_the_explicit_oracle(device, causal, rope
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("grid", [(8, 8), (16, 16), (32, 32)])
 def test_global_grids_match_the_shipped_reference(device, grid):
-    """The sizes HyperGAN asks for, global or used as one window of a partition."""
+    """Common image-token grids, global or used as one window of a partition."""
     positions = grid[0] * grid[1]
     module = make_module(device, torch.float32, heads=2, width=8, relative_position_bias=True,
                          spatial_shape=grid, table=True, seed=grid[0])

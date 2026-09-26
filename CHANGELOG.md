@@ -179,7 +179,7 @@ opt-in performance/optimization test suite.
 
 ## 0.4.0 (2026-09-21)
 
-A minor release for HyperGAN's fixed-context discriminator: `concat` joins tensors along the batch axis with the multiple tracked as `k*B`, and a new `chunk` operator cuts an axis back into equal sections.
+A minor release for batch-axis joins: `concat` joins tensors along the batch axis with the multiple tracked as `k*B`, and a new `chunk` operator cuts an axis back into equal sections.
 
 - **`concat` joins along the batch axis, tracked as `k*B`.** `axis=0` was
   rejected; it now stacks examples, so
@@ -223,7 +223,7 @@ A minor release for HyperGAN's fixed-context discriminator: `concat` joins tenso
 
 ## 0.3.0 (2026-09-21)
 
-A minor release for HyperGAN's multiscale discriminators: one pretrained forward pass returns several intermediate layers, operators may declare variadic output ports, and `.hndl` files count as Python on GitHub.
+A minor release for multiscale feature extraction: one pretrained forward pass returns several intermediate layers, operators may declare variadic output ports, and `.hndl` files count as Python on GitHub.
 
 - **Several layers from one pretrained forward pass.** A provider checkpoint
   can now return more than one intermediate tensor:
@@ -258,7 +258,7 @@ A minor release for HyperGAN's multiscale discriminators: one pretrained forward
 
 ## 0.2.1 (2026-09-21)
 
-A patch release for HyperGAN's migration: cast networks check inputs in the
+A patch release: cast networks check inputs in the
 dtype they were cast to, and provider checkpoints read tensors through
 host-registered readouts.
 
@@ -290,7 +290,7 @@ host-registered readouts.
 
 ## 0.2.0 (2026-09-21)
 
-A feature release driven by HyperGAN's migration to HNDL: networks copy
+A feature release: networks copy
 with `copy.deepcopy`, graphs take named inputs and publish named outputs,
 GAN critics get spectral normalization and deterministic pooling, and
 local `.pth` checkpoints load through registered providers.
