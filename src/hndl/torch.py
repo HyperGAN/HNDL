@@ -32,6 +32,9 @@ _UNSET = object()
 #: The resolved-shape cache before any call: batch, dtype, then three programs.
 _UNCOMPILED = (_UNSET, None, (), (), ())
 
+#: Recorded stores that never equal the live ones: the next call re-checks state.
+_NO_STORES = ((), None)
+
 #: How many distinct validated input signatures a graph remembers before it
 #: forgets them all and starts again; bounds the cache under varying batch sizes.
 _MAX_SIGNATURES = 64
@@ -55,10 +58,10 @@ _autocast_enabled = getattr(torch._C, "_is_any_autocast_enabled", None) or (
 #
 # PyTorch runs no hook for three edits: ``del`` of a registered name, assigning
 # ``None`` over a registered *parameter*, and writing ``_parameters``,
-# ``_buffers`` or ``_modules`` directly. The first call for every input
-# signature, every ``.to()``/cast, and the failure path of any node that then
-# raises still compare the whole registered state against the build, so those
-# edits are reported there rather than on the next call.
+# ``_buffers`` or ``_modules`` directly. Each graph therefore also keeps a
+# copy of each of those dictionaries as it stood when its state last matched
+# the build, and every call compares the live dictionaries with the copies in
+# one tuple comparison (see ``GraphModule._record_stores``).
 #
 # Keyed by ``id`` rather than held in a WeakSet so that a module defining
 # ``__eq__`` without ``__hash__`` can still be watched; an entry disappears
@@ -193,10 +196,12 @@ class GraphModule(nn.Module):
     signature and then run the modules back to back.
 
     What was validated is forgotten when it may no longer hold: moving or
-    casting the module (``.to()``, ``.cuda()``, ``.double()``, ...) and
-    registering a parameter, buffer or submodule on any module in the graph
-    both re-check the registered state before the next call and revalidate
-    every port on it. An exception raised inside a node's module propagates
+    casting the module (``.to()``, ``.cuda()``, ``.double()``, ...),
+    registering a parameter, buffer or submodule on any module in the graph,
+    and changing an entry of any such module's ``_parameters``, ``_buffers`` or
+    ``_modules`` in any other way (``del``, ``module.weight = None``, a direct
+    write) all re-check the registered state before the next call and
+    revalidate every port on it. An exception raised inside a node's module propagates
     as itself --- same type, message and traceback --- with one note naming the
     node, its operation and source line, the tensors it received, and any
     change to registered state that explains it. ``E_RUNTIME`` is kept for
@@ -245,11 +250,12 @@ class GraphModule(nn.Module):
         self._compiled = _UNCOMPILED
         self._fast = self._build_fast_program()
         # Input signatures whose calls passed every check, and the watch
-        # generation at which the registered state last matched the build
-        # (``None`` forces a full re-check before the next call).
+        # generation and store contents at which the registered state last
+        # matched the build (``None`` forces a full re-check before the next call).
         self._validated = {}
         _watch(self._state_program)
         self._state_seen = _watch_generation
+        self._stores = self._record_stores()
         self.build_receipt = MappingProxyType(receipt)
 
     def __setattr__(self, name, value):
@@ -285,6 +291,7 @@ class GraphModule(nn.Module):
         object.__setattr__(result, "_compiled", _UNCOMPILED)
         object.__setattr__(result, "_fast", result._build_fast_program())
         object.__setattr__(result, "_validated", {})
+        object.__setattr__(result, "_stores", result._record_stores())
         _watch(result._state_program)
         return result
 
@@ -313,8 +320,11 @@ class GraphModule(nn.Module):
         # Every validated signature named the old device and dtype. A move is
         # also a natural point to re-check registered state in full, which
         # catches the edits no registration hook reports (see _state_seen).
+        # Dropping the recorded stores also releases the tensors ``_apply``
+        # just replaced, rather than holding them until the next call.
         self._validated = {}
         self._state_seen = None
+        self._stores = _NO_STORES
         return self
 
     def _effective_dtype(self, dtype):
@@ -475,6 +485,35 @@ class GraphModule(nn.Module):
                               and not seen_buffers.add(id(value))]) != buffers):
                 return False
         return True
+
+    def _record_stores(self):
+        """Every module's ``_parameters``, ``_buffers`` and ``_modules``, and a copy of each.
+
+        Taken whenever the registered state has just been found to match the
+        build. ``stores == copies`` is then one comparison, run in C at about
+        10-17 ns per dictionary, that catches the edits no registration hook
+        reports: a key added, removed or set to ``None``, or a value replaced
+        by another object, in any of those dictionaries. Identity-only checks
+        written in Python (``map(operator.is_, ...)`` over the values) cost ten
+        times as much.
+
+        Values are compared by identity first, so an unchanged store never
+        touches its tensors. A replaced tensor is compared elementwise with
+        the one it replaced, once, before the state is recorded again: for
+        tensors of more than one element that raises (``_execute`` counts it
+        as a change); two single-element tensors holding the same value
+        compare equal, the one replacement this misses. It changes no
+        registered name, so no state check's answer, and only skips
+        re-checking the ports.
+        """
+        stores = tuple(store for row in self._state_program
+                       for store in (row[0]._parameters, row[0]._buffers, row[0]._modules))
+        return stores, tuple(dict(store) for store in stores)
+
+    def _state_checked(self, generation):
+        """Record that the registered state matched the build at ``generation``."""
+        self._state_seen = generation
+        self._stores = self._record_stores()
 
     def _state_changes(self):
         """What differs from the build-time walk, as ``(node_id, text)`` pairs."""
@@ -726,20 +765,21 @@ class GraphModule(nn.Module):
             key += (value.shape, value.dtype, value.device)
         return tuple(key)
 
-    def _validate(self, inputs, signature, generation):
+    def _validate(self, inputs, signature, generation, stores_unchanged=True):
         """The first call for a signature: check everything, then remember it."""
-        if generation != self._state_seen:
-            # A parameter, buffer or submodule was registered on a module of
-            # this graph since the last check: confirm the state still matches
-            # the build, and forget every validated signature, because a
-            # parameter replaced under the same name can change any shape.
+        if generation != self._state_seen or not stores_unchanged:
+            # A parameter, buffer or submodule was registered, removed or
+            # replaced on a module of this graph since the last check: confirm
+            # the state still matches the build, and forget every validated
+            # signature, because a parameter replaced under the same name can
+            # change any shape.
             self._verify_state("build")
             self._validated = {}
-            self._state_seen = generation
+            self._state_checked(generation)
         outputs = self._run_checked(inputs, compiling=False)
         generation = _watch_generation
         self._verify_state("forward")
-        self._state_seen = generation
+        self._state_checked(generation)
         validated = self._validated
         if len(validated) >= _MAX_SIGNATURES:
             validated.clear()
@@ -755,8 +795,13 @@ class GraphModule(nn.Module):
             return outputs
         generation = _watch_generation
         signature = self._signature(inputs)
-        if generation != self._state_seen or signature not in self._validated:
-            return self._validate(inputs, signature, generation)
+        stores, recorded = self._stores
+        try:
+            stores_unchanged = stores == recorded
+        except Exception:  # noqa: BLE001 - a replaced tensor compared elementwise
+            stores_unchanged = False
+        if not stores_unchanged or generation != self._state_seen or signature not in self._validated:
+            return self._validate(inputs, signature, generation, stores_unchanged)
         padding, program, output_slots = self._fast
         values = [*map(inputs.__getitem__, self._input_names), *padding]
         try:
@@ -781,7 +826,7 @@ class GraphModule(nn.Module):
             # of its own modules. Check it now, as the first call would have.
             generation = _watch_generation
             self._verify_state("forward")
-            self._state_seen = generation
+            self._state_checked(generation)
         return outputs
 
     def _bind(self, args, kwargs):
