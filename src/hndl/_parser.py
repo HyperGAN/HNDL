@@ -4,11 +4,13 @@ Source is parsed with :func:`ast.parse` and is never compiled or executed. The
 whole tree is checked against an allowlist before anything is looked up in a
 registry: statements are expression calls and assignments, calls name a
 registered operator alias directly, and arguments are literals, tensor names
-or nested calls. There are no imports, attribute access, subscripts, operators
-or comprehensions.
+or nested calls. The one compound statement is a bounded loop,
+``for _ in range(N):`` with a positive integer literal ``N``, whose body is any
+of these statements. There are no imports, attribute access, subscripts,
+operators, conditionals or comprehensions, and no loop variable.
 
-Each accepted statement becomes a small record (``{"kind": "expr" | "assign",
-...}``) that :mod:`hndl.config` interprets. A new statement type is one handler
+Each accepted statement becomes a small record (``{"kind": "expr" | "assign" |
+"for", ...}``) that :mod:`hndl.config` interprets. A new statement type is one handler
 in ``Validator.STATEMENTS`` here and one in ``config._Interpreter.STATEMENTS``.
 """
 
@@ -39,14 +41,21 @@ MAX_SOURCE_BYTES = 65_536
 # thread on 3.11-3.14 (tests/test_config.py keeps a set of them).
 MAX_DEPTH = 50
 MAX_OPERATORS = 32
+# Loops nest one indentation level each; the tokenizer caps indentation at 100
+# levels, well past anything a network needs.
+MAX_LOOP_DEPTH = 8
 # The recursive validator's own backstop, in AST levels.
 MAX_AST_DEPTH = 3 * MAX_DEPTH
 
 _OPENERS, _CLOSERS = "([{", ")]}"
 _SEPARATORS = frozenset({",", ";", "=", ":"})
-# Keywords the grammar accepts. A statement keyword added to the grammar
-# (``for`` and ``in`` for loops) belongs here too.
-_ACCEPTED_KEYWORDS = frozenset({"True", "False", "None"})
+# Keywords the grammar accepts. ``for`` and ``in`` open a loop, which nests by
+# indentation rather than by AST expression depth; ``_screen`` bounds it.
+_ACCEPTED_KEYWORDS = frozenset({"True", "False", "None", "for", "in"})
+# The loop placeholder and iterator: never values, never operator aliases.
+LOOP_TARGET, LOOP_ITERATOR = "_", "range"
+_LOOP_FORM = "`for _ in range(N):`"
+_ESCAPE_HATCH = "use network_from_callable (native Python) for index-dependent logic"
 _OPERANDS = (tokenize.NAME, tokenize.NUMBER, tokenize.STRING)
 _LAYOUT = (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT)
 
@@ -89,7 +98,7 @@ def _counts(token, previous, following):
 
 
 def _screen(source, offsets):
-    """Bound bracket depth and operator/keyword count before ``ast.parse``.
+    """Bound bracket depth, loop depth and operator/keyword count before ``ast.parse``.
 
     A tokenizer error ends the screen early: ``ast.parse`` stops at the same
     token and reports it, so the unscreened rest is never parsed.
@@ -99,7 +108,7 @@ def _screen(source, offsets):
         offset = offsets[line - 1] if line <= len(offsets) else 0
         raise HNDLError(code, message, line=line, column=column + 1 + offset)
 
-    depth = operators = 0
+    depth = operators = indent = 0
     previous = None
     tokens = tokenize.generate_tokens(io.StringIO(source).readline)
     try:
@@ -117,6 +126,13 @@ def _screen(source, offsets):
                     fail("E_RESOURCE", f"Source nests brackets more than {MAX_DEPTH} levels deep", token)
             elif token.type == tokenize.OP and token.string in _CLOSERS:
                 depth = max(0, depth - 1)
+            elif token.type == tokenize.INDENT:
+                # Only a loop body indents in an accepted config.
+                indent += 1
+                if indent > MAX_LOOP_DEPTH:
+                    fail("E_RESOURCE", f"Source nests loops more than {MAX_LOOP_DEPTH} levels deep", token)
+            elif token.type == tokenize.DEDENT:
+                indent = max(0, indent - 1)
             if token.type not in _LAYOUT:
                 previous = token
     except HNDLError:  # a ValueError, like the tokenizer's null-byte error
@@ -132,6 +148,7 @@ class Validator:
         self.aliases = frozenset(aliases)
         self.offsets = offsets
         self.lines = lines
+        self.loops = 0
 
     def location(self, node):
         # col_offset counts UTF-8 bytes of the dedented line; report characters
@@ -151,7 +168,7 @@ class Validator:
     def statement(self, node):
         handler = self.STATEMENTS.get(type(node))
         if handler is None:
-            self.reject("Statement is outside the declarative Python subset", node)
+            self.reject(self.REJECTED.get(type(node), "Statement is outside the declarative Python subset"), node)
         return handler(self, node)
 
     def expr_statement(self, node):
@@ -172,10 +189,55 @@ class Validator:
             self.reject("Unpacking targets must be distinct", node)
         if any(name in self.aliases for name in names):
             self.reject("Registered operator aliases cannot be rebound", node, code="E_NAME")
+        if LOOP_ITERATOR in names:
+            self.reject(f"range cannot be rebound; it is only permitted as the loop iterator in {_LOOP_FORM}", node)
         return {"kind": "assign", "targets": names, "unpack": unpack,
                 "value": self.expression(node.value, assignment=True), "source": self.location(node)}
 
-    STATEMENTS = {ast.Expr: expr_statement, ast.Assign: assign_statement}
+    def for_statement(self, node):
+        """``for _ in range(N):`` with a positive int literal; the body is unrolled N times."""
+        if not isinstance(node.target, ast.Name) or node.target.id != LOOP_TARGET:
+            self.reject(f"The loop target must be _, as in {_LOOP_FORM}; loops have no usable loop variable, "
+                        f"so {_ESCAPE_HATCH}", node.target)
+        iterator = node.iter
+        if not (isinstance(iterator, ast.Call) and isinstance(iterator.func, ast.Name)
+                and iterator.func.id == LOOP_ITERATOR):
+            self.reject(f"Loops must iterate over range(N), as in {_LOOP_FORM}", iterator)
+        if iterator.keywords or len(iterator.args) != 1:
+            self.reject("range() in a loop takes exactly one argument, a positive integer literal", iterator)
+        count = iterator.args[0]
+        if not (isinstance(count, ast.Constant) and type(count.value) is int and count.value > 0):
+            self.reject("range() count must be a positive integer literal such as range(8); "
+                        "expressions, names, bools and zero or negative counts are not permitted", count)
+        if node.orelse:
+            self.reject("for ... else is not permitted", node.orelse[0])
+        if self.loops >= MAX_LOOP_DEPTH:
+            self.reject(f"Source nests loops more than {MAX_LOOP_DEPTH} levels deep", node, code="E_RESOURCE")
+        self.loops += 1
+        try:
+            body = self.statements(node.body)
+        finally:
+            self.loops -= 1
+        # The unrolled node count, checked against max_nodes before the
+        # interpreter emits the first iteration. Every call record is one node,
+        # and every iteration must emit one, so max_nodes also bounds the work
+        # of unrolling: range(10**9) over a bare rebinding would never finish.
+        nodes = sum(_node_count(statement) for statement in body)
+        if not nodes:
+            self.reject("A loop body must call at least one operator; assignments alone would repeat "
+                        "without building anything", node)
+        return {"kind": "for", "count": count.value, "body": body, "nodes": count.value * nodes,
+                "source": self.location(node)}
+
+    STATEMENTS = {ast.Expr: expr_statement, ast.Assign: assign_statement, ast.For: for_statement}
+    # Constructs with a specific message; anything else outside STATEMENTS gets the generic one.
+    REJECTED = {
+        ast.While: f"while loops are not permitted; use a bounded {_LOOP_FORM}",
+        ast.AsyncFor: f"async for is not permitted; use {_LOOP_FORM}",
+        ast.If: f"if statements are not permitted; configs have no conditionals, so {_ESCAPE_HATCH}",
+        ast.Break: "break is not permitted; a loop always runs all of its range(N) iterations",
+        ast.Continue: "continue is not permitted; a loop always runs its whole body",
+    }
 
     # Expressions ----------------------------------------------------------
 
@@ -185,7 +247,26 @@ class Validator:
             self.reject("Keyword expansion or duplicate keywords are not permitted", node)
         return names
 
+    def reserved(self, node):
+        """Reject the loop placeholder and ``range`` outside the loop header."""
+        name = node.id if isinstance(node, ast.Name) else (
+            node.func.id if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) else None)
+        if name == LOOP_TARGET:
+            self.reject(f"_ is the loop placeholder and cannot be used as a value; loops have no usable "
+                        f"loop variable, so {_ESCAPE_HATCH}", node)
+        if name == LOOP_ITERATOR:
+            self.reject(f"range is only permitted as the loop iterator in {_LOOP_FORM}", node)
+        comprehension = self.COMPREHENSIONS.get(type(node))
+        if comprehension is not None:
+            self.reject(f"{comprehension} are not permitted; use {_LOOP_FORM} to repeat statements", node)
+        if isinstance(node, ast.IfExp):
+            self.reject(f"Conditional expressions are not permitted; {_ESCAPE_HATCH}", node)
+
+    COMPREHENSIONS = {ast.ListComp: "List comprehensions", ast.SetComp: "Set comprehensions",
+                      ast.DictComp: "Dict comprehensions", ast.GeneratorExp: "Generator expressions"}
+
     def expression(self, node, *, assignment=False, initializers=False):
+        self.reserved(node)
         if isinstance(node, ast.Name):
             if not _valid_name(node.id):
                 self.reject("Invalid local name", node)
@@ -218,6 +299,7 @@ class Validator:
                 "source": self.location(node)}
 
     def literal(self, node, *, initializers=False, call=False):
+        self.reserved(node)
         if isinstance(node, ast.Call):
             # Only an init= mapping value may be a call, and only one of the
             # fixed initializer schemes; operator aliases stay out of literals.
@@ -254,12 +336,26 @@ class Validator:
         self.reject("Arguments must be literal values or tensor expressions; containers cannot contain calls", node)
 
 
+def _node_count(record):
+    """How many nodes one statement or expression record emits when interpreted."""
+    kind = record["kind"]
+    if kind == "for":
+        return record["nodes"]
+    if kind in ("expr", "assign"):
+        return _node_count(record["value"])
+    if kind == "call":
+        return 1 + sum(map(_node_count, record["args"])) + sum(_node_count(value) for _, value in record["kwargs"])
+    if kind in ("tuple", "list", "tensor_tuple"):
+        return sum(map(_node_count, record["items"]))
+    return 0  # names, literals, dicts and initializer calls hold no operator call
+
+
 def parse(source, aliases):
     """Validate ``source`` against the allowlist and return its statement records."""
     source = _source_text(source)
     aliases = tuple(aliases)
-    if "x" in aliases or "out" in aliases:
-        raise HNDLError("E_NAME", "Operator aliases x and out are reserved by the declarative frontend")
+    if "x" in aliases or "out" in aliases or LOOP_ITERATOR in aliases:
+        raise HNDLError("E_NAME", "Operator aliases x, out and range are reserved by the declarative frontend")
     shadowed = sorted(SCHEME_NAMES.intersection(aliases))
     if shadowed:
         raise HNDLError("E_NAME", "Operator aliases shadow initializer schemes reserved by the "

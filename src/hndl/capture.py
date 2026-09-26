@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 import re
 
-from .errors import HNDLError
+from .errors import HNDLError, source_location
 from .registry import Registry, normalize_arguments
 from .resolver import _limits
 from .settings import normalize_settings
@@ -46,8 +46,7 @@ class Symbol:
 
 
 def _error(code, message, source=None):
-    location = {} if source is None else {key: source[key] for key in ("line", "column") if key in source}
-    return HNDLError(code, message, **location)
+    return HNDLError(code, message, **source_location(source))
 
 
 class Capture:

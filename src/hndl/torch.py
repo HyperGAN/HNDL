@@ -12,7 +12,7 @@ import torch
 from torch import nn
 from torch.nn.modules import module as _torch_module
 
-from .errors import HNDLError
+from .errors import HNDLError, describe_iterations
 from .settings import MATRIX_SCHEMES
 from .types import batch_multiple, contract_header
 
@@ -116,9 +116,13 @@ def _module_kind(module):
 
 
 def _source_position(node):
-    """The ``(line, column)`` a declarative frontend recorded for a node, if any."""
+    """The ``(line, column, iterations)`` a declarative frontend recorded for a node, if any.
+
+    ``iterations`` holds one ``(index, count)`` per config loop the node was
+    unrolled from, outermost first.
+    """
     source = node.source if isinstance(node.source, Mapping) else {}
-    return source.get("line"), source.get("column")
+    return source.get("line"), source.get("column"), source.get("iterations")
 
 
 def _compile_shape(shape):
@@ -225,7 +229,8 @@ class GraphModule(nn.Module):
                 produced[f"node:{node.id}/{port}"] = plan.dtype if declared[port] == "any" else declared[port]
         self._output_dtypes = MappingProxyType(
             {name: DTYPES[produced[entry["ref"]]] for name, entry in plan.outputs.items()})
-        # What an error needs to name a node: its operation and source position.
+        # What an error needs to name a node: its operation and source position,
+        # including the loop iterations a config unrolled it from.
         self._node_labels = MappingProxyType(
             {node.id: (self._alias(node.op), *_source_position(node)) for node in plan.nodes})
         self._state_program = self._state_snapshot()
@@ -332,8 +337,8 @@ class GraphModule(nn.Module):
     def _error(self, message, node_id=None, code="E_RUNTIME"):
         if node_id is None:
             return HNDLError(code, message)
-        _, line, column = self._node_labels[node_id]
-        return HNDLError(code, message, node=node_id, line=line, column=column)
+        _, line, column, iterations = self._node_labels[node_id]
+        return HNDLError(code, message, node=node_id, line=line, column=column, iterations=iterations)
 
     def _port_error(self, port, value, dtype, batch, problem):
         """An ``E_RUNTIME`` for one port, with the contract beside the tensor."""
@@ -372,9 +377,11 @@ class GraphModule(nn.Module):
             pass
 
     def _failure_note(self, node_id, error, bound, batch, after_validation):
-        label, line, column = self._node_labels[node_id]
+        label, line, column, iterations = self._node_labels[node_id]
         position = "".join(f", {key} {value}" for key, value in (("line", line), ("column", column))
                            if value is not None)
+        if iterations:
+            position += f", {describe_iterations(iterations)}"
         lines = [f"{_NOTE_PREFIX} raised inside node {node_id!r} ({label}{position})"]
         if not self._state_matches():
             # State removed between calls breaks forward rather than reporting

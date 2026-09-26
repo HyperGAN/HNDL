@@ -177,8 +177,8 @@ gpt = network(
     """
     embedding(256, 128)
     pos_embed(64)
-    transformer_block(4, activation="gelu_tanh", causal=True)
-    transformer_block(4, activation="gelu_tanh", causal=True)
+    for _ in range(4):
+        transformer_block(4, activation="gelu_tanh", causal=True, name="block")
     layer_norm()
     linear(256, bias=False)
     """,
@@ -189,6 +189,8 @@ gpt = network(
     device="cuda:0",
 )
 ```
+
+`for _ in range(4):` repeats its body four times and builds exactly the layers you would get by writing it out four times; inside a loop, `name="block"` names the copies `block0` to `block3`. The count is an integer literal and there is no loop variable, so rebinding is how iterations connect: `h = add(h, feed_forward(layer_norm(h), 512))` in a loop stacks residual blocks. Layers that differ by iteration, such as per-stage widths, belong in native Python with `network_from_callable`.
 
 `transformer_block` is a pre-norm block with multi-head attention and a feed-forward branch; `attention`, `cross_attention`, `feed_forward`, `swiglu`, `rms_norm`, `moe`, and `hopfield` are available separately for other layouts. `dtype` selects the parameter and activation dtype for the whole plan; reduced precision is qualified on CUDA. The [catalog](https://hypergan.github.io/HNDL/operators/) lists every operator with its arguments, shape relation, and runnable examples, and [docs/networks.md](https://hypergan.github.io/HNDL/networks/) shows complete networks (LeNet, DCGAN, U-Net, ResNet-18, ViT, GPT, and more) written this way.
 
@@ -414,7 +416,7 @@ generator = network_file(
 )
 ```
 
-File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, loops, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
+File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, conditionals, loops other than `for _ in range(N):`, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
 
 The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader parses in process, bounds source size and nesting before parsing so pathological input fails with an `HNDLError` instead of a crash, and bounds graph and model size. See the [loading and trust contract](https://hypergan.github.io/HNDL/SPEC/#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
 
