@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Registered-state edits PyTorch runs no hook for are caught on the next
+  call.** `del module.weight`, `linear.bias = None` and direct writes to a
+  module's `_parameters`, `_buffers` or `_modules` used to go unnoticed on the
+  unchecked path until a new input signature, a move or cast, or a failing
+  layer forced a full check, so a layer could silently run without its bias.
+  Each call now compares those mappings with copies taken when the state last
+  matched the build, in one C-level comparison (about 10-17 ns per module
+  mapping: ~0.2 us for a five-node MLP, ~0.7 us for a transformer block).
+  State removed or added this way fails the next call with the same
+  `E_RUNTIME` report as a registration, naming the node and what changed; a
+  tensor swapped in under the same name re-checks every port, so
+  `torch.func.functional_call` runs the checked program on every call.
+
 ## 0.7.0 (2026-09-26)
 
 A minor release: configs repeat blocks with bounded `for _ in range(N):`

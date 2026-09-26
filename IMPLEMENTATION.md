@@ -80,11 +80,15 @@ print the contract beside the tensor that arrived, for example
 an exception raised inside a layer propagates unchanged (a `RuntimeError`
 stays a `RuntimeError`) with a note, printed under its message in the
 traceback, that names the node, its operation and source line, the tensors it
-received, and any registered-state change that explains it. PyTorch runs no registration hook for `del` of a
-registered name, for assigning `None` over a registered parameter, or for
-writing `_parameters`/`_buffers`/`_modules` directly, so those edits are
-reported at the next full check or when a layer then fails, not on the very
-next call.
+received, and any registered-state change that explains it. Edits PyTorch
+runs no registration hook for --- `del` of a registered name, assigning `None`
+over a registered parameter, writing `_parameters`/`_buffers`/`_modules`
+directly --- are caught on the next call as well: each call compares those
+mappings, in one C-level tuple comparison, with copies taken when the state
+last matched the build. State removed or added that way is an `E_RUNTIME`
+naming the node; a tensor swapped in under the same name re-checks every port,
+so `torch.func.functional_call`, which swaps tensors in exactly that way, runs
+the checked program on every call.
 
 Built-in unary operations take an optional leading tensor or `x=`. Custom
 unary operations use their declared input-port keyword. Every operator's
