@@ -158,6 +158,25 @@ def _ordered_nodes(graph, registry, limits):
     return ordered, specs, dtypes
 
 
+def _canonical_arguments(spec, args, source):
+    """Drop arguments added after release (``Arg(since=...)``) that hold their default.
+
+    Such a node means exactly what it meant before the argument existed, so it
+    keeps that release's args, argument origins and therefore digests. Saved
+    plans without the argument load because resolution fills the default and
+    drops it again; module construction fills it back in.
+    """
+    omitted = {name for name, value in args.items() if name in spec.args and spec.args[name].omitted(value)}
+    if not omitted:
+        return args, source
+    args = {name: value for name, value in args.items() if name not in omitted}
+    if source and "argument_origins" in source:
+        source = dict(source)
+        source["argument_origins"] = {name: origin for name, origin in source["argument_origins"].items()
+                                      if name not in omitted}
+    return args, source
+
+
 class _Solver:
     def __init__(self, graph, nodes, specs, limits, dtypes=None):
         self.graph, self.nodes, self.specs, self.limits = graph, nodes, specs, limits
@@ -422,12 +441,13 @@ class _Solver:
             output_shapes = {key: tuple(self.shapes[f"node:{node.id}/{key}"]) for key in node.outputs}
             if spec.finalize is not None:
                 args = dict(spec.finalize(dict(args), input_shapes, output_shapes))
+            args, source = _canonical_arguments(spec, args, node.source)
             origins = {}
-            source_origins = node.source.get("argument_origins", {}) if node.source else {}
+            source_origins = source.get("argument_origins", {}) if source else {}
             for name in args:
                 origins[name] = source_origins.get(name, "explicit" if name in node.args else "inferred")
             resolved.append(ResolvedNode(
-                id=node.id, op=node.op, args=args, inputs=node.inputs, outputs=node.outputs, source=node.source,
+                id=node.id, op=node.op, args=args, inputs=node.inputs, outputs=node.outputs, source=source,
                 input_shapes=input_shapes, output_shapes=output_shapes, provenance=origins,
                 initialization=node.initialization, trainability=node.trainability,
             ))

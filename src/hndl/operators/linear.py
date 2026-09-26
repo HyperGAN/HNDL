@@ -30,7 +30,7 @@ def _relation(s):
         "bias": Arg(bool, True, positional=False, help="Add a learned bias vector."),
         "spectral_norm": Arg(bool, False, positional=False,
                              help="Divide the weight by its largest singular value, estimated by power iteration."),
-        "equalized": Arg(bool, False, positional=False,
+        "equalized": Arg(bool, False, positional=False, since="0.7.0",
                          help="Initialize raw weights N(0,1), zero bias, and scale weights by 1/sqrt(fan_in) at runtime."),
     },
     examples=[

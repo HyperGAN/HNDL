@@ -404,7 +404,7 @@ def test_a_built_graph_round_trips_through_the_plan_and_a_state_dict():
     plan = resolve(source, **contract)
     assert plan.nodes[0].args == {"heads": 4, "causal": False, "dropout": 0.0, "bias": True, "qkv_bias": False,
                                   "out_bias": True, "rope": False, "relative_position_bias": True,
-                                  "spatial_shape": (4, 4), "equalized": False}
+                                  "spatial_shape": (4, 4)}
 
     restored = ResolvedPlan.from_json(plan.to_json(), registry=Registry.builtins())
     assert restored.to_json() == plan.to_json()

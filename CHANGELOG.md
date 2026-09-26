@@ -12,6 +12,15 @@
   parameter names stay unchanged. Initializer overrides target raw weights;
   equalized linear rejects combination with spectral normalization.
 
+- **Saved plans stay compatible when an operator gains an argument.** `Arg`
+  accepts `since="<release>"` for an argument added to an already released
+  operator. A resolved node that holds such an argument's default omits it
+  from its args and argument origins, and module construction fills it back
+  in. `equalized` is declared this way, so plans saved by 0.6.0 load again
+  (they failed with `E_INTEGRITY`), and any plan that does not set
+  `equalized=True` encodes and digests byte for byte as in 0.6.0. Writing
+  `equalized=False` explicitly is the same plan as omitting it.
+
 ## 0.6.0 (2026-09-21)
 
 A minor release adding TransGAN-style relative-position-bias attention and

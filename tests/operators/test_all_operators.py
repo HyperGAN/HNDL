@@ -81,7 +81,10 @@ def test_example_resolves_identically_in_both_frontends_and_round_trips(spec, ex
     assert restored.to_json() == plan.to_json()
     for node in plan.nodes:
         for name, arg in registry.by_identity(node.op).args.items():
-            assert name in node.args, f"{node.id}.{name} missing from the concrete plan"
+            # Only an argument added after release may be left out, and only at its default.
+            assert name in node.args or arg.since is not None, f"{node.id}.{name} missing from the concrete plan"
+            if name in node.args and arg.since is not None:
+                assert node.args[name] != arg.default, f"{node.id}.{name} keeps its post-release default"
 
 
 @pytest.mark.parametrize("spec,example", operator_examples())

@@ -131,7 +131,7 @@ def _reference(module):
         "dropout": Arg(float, 0.0, min=0, max=1, exclusive_max=True, positional=False,
                        help="Dropout probability on the attention weights, applied in training mode only."),
         "bias": Arg(bool, True, positional=False, help="Add a learned bias to each of the four projections."),
-        "equalized": Arg(bool, False, positional=False,
+        "equalized": Arg(bool, False, positional=False, since="0.7.0",
                          help="Use runtime fan-in scaling and N(0,1) raw weights for all four linear projections."),
         "qkv_bias": Arg(bool, True, positional=False,
                         help="Narrow bias for the query, key and value projections; they carry a bias only "

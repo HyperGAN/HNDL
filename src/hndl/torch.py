@@ -473,7 +473,10 @@ def _symbol_values(spec, node):
 
 def construct(spec, node, device, dtype):
     """Instantiate one operator's module from concrete plan arguments."""
-    kwargs = dict(node.args)
+    # A resolved node omits arguments added after release that hold their
+    # default (``Arg(since=...)``); the module still receives every argument.
+    kwargs = {name: arg.default for name, arg in spec.args.items() if arg.since is not None}
+    kwargs.update(node.args)
     if spec.init_symbols:
         symbols = _symbol_values(spec, node)
         for name in spec.init_symbols:

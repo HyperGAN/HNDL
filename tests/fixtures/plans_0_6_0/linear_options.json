@@ -1,0 +1,15 @@
+{
+  "hndl_version": "0.6.0",
+  "source": "linear(16, bias=False)\nrelu()\nlinear(spectral_norm=True)",
+  "input_shape": [
+    "B",
+    5,
+    12
+  ],
+  "output_shape": [
+    "B",
+    5,
+    6
+  ],
+  "plan": "{\"artifact_digest\":\"4fca7a40bc44b9e4209e7b44f3fb2e3db5450267f9369b78abc3138c85032521\",\"dtype\":\"float32\",\"frontend\":\"python_config@1\",\"input_dtype\":\"float32\",\"input_shape\":[\"B\",5,12],\"nodes\":[{\"args\":{\"bias\":false,\"in_features\":12,\"out_features\":16,\"spectral_norm\":false},\"id\":\"n0\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",5,12]},\"inputs\":{\"x\":\"input:x\"},\"op\":\"linear@1\",\"output_shapes\":{\"out\":[\"B\",5,16]},\"outputs\":[\"out\"],\"provenance\":{\"bias\":\"explicit\",\"in_features\":\"inferred\",\"out_features\":\"explicit\",\"spectral_norm\":\"operator default\"},\"source\":{\"argument_origins\":{\"bias\":\"explicit\",\"out_features\":\"explicit\",\"spectral_norm\":\"operator default\"},\"column\":1,\"line\":1},\"trainability\":{\"default\":null,\"overrides\":{}}},{\"args\":{},\"id\":\"n1\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",5,16]},\"inputs\":{\"x\":\"node:n0/out\"},\"op\":\"relu@1\",\"output_shapes\":{\"out\":[\"B\",5,16]},\"outputs\":[\"out\"],\"provenance\":{},\"source\":{\"argument_origins\":{},\"column\":1,\"line\":2},\"trainability\":{\"default\":null,\"overrides\":{}}},{\"args\":{\"bias\":true,\"in_features\":16,\"out_features\":6,\"spectral_norm\":true},\"id\":\"n2\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",5,16]},\"inputs\":{\"x\":\"node:n1/out\"},\"op\":\"linear@1\",\"output_shapes\":{\"out\":[\"B\",5,6]},\"outputs\":[\"out\"],\"provenance\":{\"bias\":\"operator default\",\"in_features\":\"inferred\",\"out_features\":\"inferred\",\"spectral_norm\":\"explicit\"},\"source\":{\"argument_origins\":{\"bias\":\"operator default\",\"spectral_norm\":\"explicit\"},\"column\":1,\"line\":3},\"trainability\":{\"default\":null,\"overrides\":{}}}],\"output_ref\":\"node:n2/out\",\"output_shape\":[\"B\",5,6],\"resolution_version\":1,\"schema_version\":1,\"semantic_digest\":\"84f8076bf14bc2294c5769f5eab963c2696317a09add283dec5a6ba31554b739\"}"
+}

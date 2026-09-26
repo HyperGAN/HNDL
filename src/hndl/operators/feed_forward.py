@@ -49,7 +49,7 @@ def _reference(module):
         "dropout": Arg(float, 0.0, min=0, max=1, exclusive_max=True, positional=False,
                        help="Dropout probability applied after the activation; 0 disables it."),
         "bias": Arg(bool, True, positional=False, help="Add a learned bias to both projections."),
-        "equalized": Arg(bool, False, positional=False,
+        "equalized": Arg(bool, False, positional=False, since="0.7.0",
                          help="Use runtime fan-in scaling and N(0,1) raw weights for both linear projections."),
     },
     examples=[

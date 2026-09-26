@@ -37,6 +37,7 @@ PAIR = "pair"
 INTS = "ints"
 STRS = "strs"
 _TYPES = {int: "int", float: "float", bool: "bool", str: "str", PAIR: "pair", INTS: "ints", STRS: "strs"}
+_RELEASE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
 _IDENT = re.compile(r"[a-z][a-z0-9_]*\Z")
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
 _PORT_SPEC = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)(\*?)\s*(?:\[([^\]]*)\])?\s*(?::\s*([A-Za-z0-9_]+))?\s*\Z")
@@ -70,6 +71,12 @@ class Arg(Immutable):
     Types are ``int``, ``float``, ``bool``, ``str``, ``"pair"`` (an int or two
     ints, normalized to a pair), ``"ints"`` (a tuple of ints) or ``"strs"``
     (a tuple of strings).
+
+    ``since="0.7.0"`` marks an argument added to an operator after it was
+    released, without bumping the operator's version. Its default must keep
+    the released behavior: a node holding that default omits the argument from
+    its resolved args, so plans that do not use it serialize and digest exactly
+    as they did before it existed, and saved plans without it still load.
     """
 
     type: object
@@ -84,6 +91,7 @@ class Arg(Immutable):
     dim: object = None
     positional: bool = True
     choices: object = None
+    since: object = None
 
     def __post_init__(self):
         if self.type not in _TYPES:
@@ -96,6 +104,12 @@ class Arg(Immutable):
             _registry_error("Arg exclusive-bound flags must be booleans")
         if self.inferable and self.has_default:
             _registry_error("An inferable argument cannot also declare a default")
+        if self.since is not None:
+            if type(self.since) is not str or not _RELEASE.fullmatch(self.since):
+                _registry_error("Arg since must name the release that added it, for example since=\"0.7.0\"")
+            if not self.has_default:
+                _registry_error("An argument added after release (since=) needs a default that keeps the "
+                                "released behavior")
         if self.dim is not None and (type(self.dim) is not str or not _SYMBOL.fullmatch(self.dim)):
             _registry_error("Arg dim must name a shape symbol")
         if self.dim is not None and self.type is not int:
@@ -142,6 +156,11 @@ class Arg(Immutable):
     @property
     def required(self):
         return not self.has_default and not self.inferable
+
+    def omitted(self, value):
+        """Whether a resolved node leaves this argument out: it was added after
+        release (``since``) and ``value`` is its default."""
+        return self.since is not None and type(value) is type(self.default) and value == self.default
 
     @property
     def type_name(self):
