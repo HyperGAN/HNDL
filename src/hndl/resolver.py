@@ -6,7 +6,7 @@ from math import prod
 import re
 import warnings
 
-from .errors import HNDLError
+from .errors import HNDLError, source_location
 from .operator import COMPUTE_DTYPES, ELLIPSIS, INDEX_DTYPES, NodeView, SUPPORTED_RANKS, Sym
 from .registry import Registry, normalize_arguments
 from .types import (BATCH, EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, ResolvedNode, ResolvedPlan,
@@ -156,7 +156,8 @@ def _ordered_nodes(graph, registry, limits):
         for port, ref in node.inputs.items():
             expected = spec.port_dtype(port, graph.dtype)
             if expected != "any" and dtypes[ref] != expected:
-                raise HNDLError("E_DTYPE", f"Port {port} expects {expected} but {ref} carries {dtypes[ref]}", node=node.id)
+                raise HNDLError("E_DTYPE", f"Port {port} expects {expected} but {ref} carries {dtypes[ref]}",
+                                node=node.id, **source_location(node.source))
         for port in node.outputs:
             declared = spec.port_dtype(port, graph.dtype)
             dtypes[f"node:{node.id}/{port}"] = graph.dtype if declared == "any" else declared
@@ -200,8 +201,7 @@ class _Solver:
 
     def error(self, code, message):
         source = self.node.source if self.node and self.node.source else {}
-        raise HNDLError(code, message, node=self.node.id if self.node else None,
-                        line=source.get("line"), column=source.get("column"))
+        raise HNDLError(code, message, node=self.node.id if self.node else None, **source_location(source))
 
     def set_shape(self, ref, values, code="E_CONSTRAINT"):
         values = list(values)

@@ -110,14 +110,19 @@ schemas bound literal values. On CPython 3.11–3.13, `ast.parse` of a few
 thousand chained operators (`-----1`, `relu()()()`, `lambda: lambda: ...`)
 exhausts a small thread stack and the process dies with SIGSEGV rather than
 raising, so before parsing the loader screens the token stream: more than 50
-levels of bracket nesting fails with `E_RESOURCE`, and more than 32 Python
-operators or keywords (valid configs use none) with `E_SYNTAX`. With the
+levels of bracket nesting or more than 8 levels of loop indentation fails with
+`E_RESOURCE`, and more than 32 Python operators or keywords (valid configs use
+none besides a loop's `for` and `in`) with `E_SYNTAX`. With the
 screen, every adversarial source tried at the size cap parses or fails with
 an `HNDLError` in a 256 KiB thread on 3.11–3.14, and the test suite keeps a
 set of them. Parsing never invokes `compile`, `eval`, `exec`, or a
 configuration-provided import or callback. Each statement kind is one handler
 in the parser's `Validator.STATEMENTS` and one in the interpreter's
-`_Interpreter.STATEMENTS` (`hndl/config.py`).
+`_Interpreter.STATEMENTS` (`hndl/config.py`). A `for _ in range(N):` loop
+stays one record, with its body and its multiplied-out node count; the
+interpreter checks that count against `max_nodes`, then runs the body `N`
+times, adding the iteration to each node's source metadata and to explicit
+names.
 
 The resolver and builder additionally bound graph size, dimensions, element
 counts, and registered parameter/buffer storage. Defaults are 4,096 nodes,

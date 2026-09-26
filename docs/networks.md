@@ -227,10 +227,9 @@ embedding(256, 128, name="wte")
 pos_embed(64, name="wpe")
 
 # Four pre-norm causal blocks: 4 heads of width 32, 4x feed-forward, tanh-approximated GELU.
-transformer_block(4, activation="gelu_tanh", causal=True, name="block0")
-transformer_block(4, activation="gelu_tanh", causal=True, name="block1")
-transformer_block(4, activation="gelu_tanh", causal=True, name="block2")
-transformer_block(4, activation="gelu_tanh", causal=True, name="block3")
+# The loop appends the iteration to the name, so the blocks are block0 ... block3.
+for _ in range(4):
+    transformer_block(4, activation="gelu_tanh", causal=True, name="block")
 
 # Final normalization, then the language-model head. Its width is the vocabulary
 # size, so the output contract determines it; GPT-2 ties it to wte, HNDL does not.
@@ -649,10 +648,8 @@ cls_token(name="cls")
 pos_embed(65)                      # 64 patch tokens + the class token
 
 # Encoder: four pre-norm blocks, gelu feed-forward of width 4*192 = 768.
-transformer_block(3, mlp_ratio=4)
-transformer_block(3, mlp_ratio=4)
-transformer_block(3, mlp_ratio=4)
-transformer_block(3, mlp_ratio=4)
+for _ in range(4):
+    transformer_block(3, mlp_ratio=4)
 
 # Head: normalize, read the class position, classify.
 layer_norm(name="final_norm")

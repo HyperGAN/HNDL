@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Configs can repeat statements with `for _ in range(N):`.** `N` is a
+  positive integer literal, loops nest, and the body takes any top-level
+  statement, so `h = add(h, feed_forward(layer_norm(h), 512))` in a loop
+  stacks residual blocks. A loop builds exactly the nodes, plan, semantic
+  digest and `state_dict()` keys of the statements written out by hand.
+  `name="block"` inside a loop becomes `block0`, `block1`, ...; nested loops
+  append every index, outermost first (`res1_3`). There is no loop variable,
+  arithmetic or conditional: other targets, `range` forms, `while`, `break`,
+  `continue`, `if`, comprehensions and `_` as a value fail with `E_SYNTAX`,
+  and index-dependent structure belongs in native Python. A loop that would
+  unroll past `max_nodes`, or loops nested more than 8 deep, fail with
+  `E_RESOURCE` before any node is created. Configuration, resolution and
+  runtime errors about an unrolled node report the iteration, as in
+  `line 12, column 5, iteration 3 of 8`, from new `iterations` node source
+  metadata. `range` is now a reserved operator alias in configs. The ViT and
+  GPT example networks use loops for their blocks.
 - **Config parsing runs in process.** The AST allowlist is unchanged and source
   is still never compiled or executed, but the `python -I -S` worker, its JSON
   wire protocol and its limits are gone. Parsing a small config drops from
