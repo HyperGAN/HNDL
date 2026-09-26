@@ -157,7 +157,7 @@ def test_registry_factories_require_selected_exact_identity():
     class SiLU(nn.SiLU):
         pass
 
-    with pytest.raises(HNDLError, match="E_STATE_VERSION"):
+    with pytest.raises(HNDLError, match="E_CAPTURE: my_silu was taken from another registry"):
         capture(lambda x: registry.ops.my_silu())
     graph = capture(lambda x: registry.ops.my_silu(), registry=registry)
     assert graph.nodes[0].op == "example.silu@1"

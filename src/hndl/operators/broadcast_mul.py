@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from ..operator import Example, operator
-from ._relations import broadcast
+from ..relations import broadcast
 
 
 def _relation(s):
