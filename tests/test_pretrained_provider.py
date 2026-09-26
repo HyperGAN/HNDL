@@ -644,18 +644,23 @@ def test_a_layers_plan_round_trips_and_a_config_without_one_is_unchanged(trunk_c
     assert plain.semantic_digest != plan.semantic_digest
 
 
-def test_a_plan_saved_before_layers_existed_has_to_be_re_resolved(trunk_checkpoint, trunk_registry):
-    """Plan digests cover every canonical argument, so a `pretrained` node saved
-    without `layers=` no longer matches its own digest and fails to restore."""
+def test_a_plan_saved_before_layers_existed_loads_completed(trunk_checkpoint, trunk_registry):
+    """layers= was added to `pretrained` without since=, so a node saved without
+    it no longer matches its own digest. Its default is the released behavior,
+    so restoring fills it in, warns, and loads rather than refusing."""
     digest = digest_of(trunk_checkpoint)
     plan = resolve(f'pretrained("{trunk_checkpoint}", provider="trunk", sha256="{digest}", layer="layer1.0")',
                    input_shape=TRUNK_INPUT, output_shape=("B", 4, 8, 8), registry=trunk_registry)
     data = json.loads(plan.to_json())
     for node in data["nodes"]:
         del node["args"]["layers"]
+        del node["provenance"]["layers"]
+        del node["source"]["argument_origins"]["layers"]
     older = ResolvedPlan(nodes=tuple(ResolvedNode(**node) for node in data["nodes"]),
                          input_shape=data["input_shape"], output_shape=data["output_shape"],
                          output_ref=data["output_ref"], dtype=data["dtype"], frontend=data["frontend"],
                          input_dtype=data["input_dtype"]).to_json()
-    with pytest.raises(HNDLError, match="E_INTEGRITY"):
-        ResolvedPlan.from_json(older, registry=trunk_registry)
+    with pytest.warns(UserWarning, match=r"filled layers=\(\) \(operator default\)"):
+        restored = ResolvedPlan.from_json(older, registry=trunk_registry)
+    assert restored.to_json() == plan.to_json()
+    build(restored, device=DEVICE, registry=trunk_registry)

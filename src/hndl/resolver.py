@@ -4,6 +4,7 @@ from dataclasses import replace
 from collections.abc import Mapping
 from math import prod
 import re
+import warnings
 
 from .errors import HNDLError
 from .operator import COMPUTE_DTYPES, ELLIPSIS, INDEX_DTYPES, NodeView, SUPPORTED_RANKS, Sym
@@ -12,9 +13,13 @@ from .types import (BATCH, EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, Resolve
                     batch_multiple)
 
 
+# Each default stops a real failure: an unbounded graph or port count, a typo
+# that asks for a huge tensor or model (checked on the meta device before any
+# allocation), or a relation that never settles. They are not budgets for
+# legitimate networks; pass ``limits=`` to raise one.
 DEFAULT_LIMITS = {
     "max_nodes": 4096, "max_edges": 16_384, "max_dimension": 1_048_576,
-    "max_elements": 268_435_456, "max_state_bytes": 1_073_741_824,
+    "max_elements": 268_435_456, "max_state_bytes": 64 * 2**30,
     "max_iterations": 256,
 }
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -496,8 +501,92 @@ def resolve_graph(graph, registry=None, limits=None):
                         named_inputs=inputs, named_outputs=outputs)
 
 
+def _shape_text(shape):
+    return "[" + ", ".join(str(part) for part in shape) + "]"
+
+
+def _plan_differences(plan, verified, registry):
+    """Compare a saved plan with its re-resolution, node by node.
+
+    Returns ``(benign, conflicts)`` as readable lines. A difference is benign
+    when the missing value is fully determined by what the saved plan already
+    fixes: an operator's declared default, or an argument bound to a dimension
+    symbol whose extent is read off a saved (and verified) port shape. Anything
+    else --- a port shape that does not satisfy the equations, a saved value
+    the equations change, or an argument only a policy or relation search
+    would choose --- is a conflict, because accepting it would silently change
+    the network the plan and its checkpoint describe.
+    """
+    benign, conflicts = [], []
+    resolved = {node.id: node for node in verified.nodes}
+    for saved in plan.nodes:
+        node = resolved[saved.id]
+        spec = registry.by_identity(saved.op)
+        for kind, saved_ports, ports in (("input", saved.input_shapes, node.input_shapes),
+                                         ("output", saved.output_shapes, node.output_shapes)):
+            for port, shape in saved_ports.items():
+                if tuple(ports[port]) != tuple(shape):
+                    conflicts.append(f"node {saved.id}: {kind} {port} is saved as {_shape_text(shape)} "
+                                     f"but the equations give {_shape_text(ports[port])}")
+        for name in sorted(set(saved.args) | set(node.args)):
+            if name in saved.args and name in node.args:
+                if saved.args[name] != node.args[name]:
+                    conflicts.append(f"node {saved.id}: {name} is saved as {saved.args[name]!r} "
+                                     f"but the equations give {node.args[name]!r}")
+            elif name in saved.args:
+                arg = spec.args.get(name)
+                if arg is not None and arg.omitted(saved.args[name]):
+                    benign.append(f"node {saved.id}: dropped {name}={saved.args[name]!r} (default of an added argument)")
+                else:
+                    conflicts.append(f"node {saved.id}: {name}={saved.args[name]!r} is saved but the "
+                                     "equations drop it")
+            else:
+                origin = node.provenance.get(name)
+                value = node.args[name]
+                arg = spec.args.get(name)
+                if origin == "operator default":
+                    benign.append(f"node {saved.id}: filled {name}={value!r} (operator default)")
+                elif origin == "inferred" and arg is not None and arg.dim is not None:
+                    benign.append(f"node {saved.id}: filled {name}={value!r} (dimension {arg.dim} of a saved port)")
+                else:
+                    conflicts.append(f"node {saved.id}: {name} is missing and would be chosen again as "
+                                     f"{value!r} ({origin}); a saved plan never re-runs that choice")
+    return benign, conflicts
+
+
+def _completed(plan, verified, registry):
+    """The saved plan with the arguments re-resolution filled or dropped.
+
+    Saved source and provenance are kept; only the changed arguments take
+    their origin from the re-resolution.
+    """
+    resolved = {node.id: node for node in verified.nodes}
+    nodes = []
+    for saved in plan.nodes:
+        node = resolved[saved.id]
+        changed = set(saved.args) ^ set(node.args)
+        provenance = {name: saved.provenance.get(name, node.provenance.get(name)) for name in node.args}
+        source = saved.source
+        if source and "argument_origins" in source:
+            origins = {name: origin for name, origin in source["argument_origins"].items() if name not in changed}
+            origins.update({name: origin for name, origin in node.source["argument_origins"].items()
+                            if name in changed and name in node.args})
+            source = {**source, "argument_origins": origins}
+        nodes.append(replace(saved, args=node.args, provenance=provenance, source=source))
+    return replace(plan, nodes=tuple(nodes), registry=registry)
+
+
 def validate_concrete_plan(plan, *, registry=None, limits=None):
-    """Verify saved concrete equations, never re-run source/callable/policy choice."""
+    """Verify saved concrete equations, never re-run source/callable/policy choice.
+
+    The saved arguments are resolved again as explicit values against the
+    saved external contracts. A plan whose re-resolution matches it exactly is
+    returned unchanged. One that differs only by values the saved plan already
+    determines (see ``_plan_differences``) --- typically a plan written before
+    an operator gained a defaulted argument --- is returned completed, with a
+    warning naming what was filled and the new semantic digest. Any other
+    difference fails with ``E_INTEGRITY`` and lists every mismatch.
+    """
     if not isinstance(plan, ResolvedPlan):
         raise HNDLError("E_SCHEMA", "Expected an immutable ResolvedPlan")
     registry = registry or plan.registry or Registry.builtins()
@@ -517,6 +606,16 @@ def validate_concrete_plan(plan, *, registry=None, limits=None):
                   input_dtype=plan.input_dtype, named_inputs=plan.named_inputs,
                   named_outputs=plan.named_outputs)
     verified = resolve_graph(graph, registry, bounds)
-    if plan.semantic_digest != verified.semantic_digest:
-        raise HNDLError("E_INTEGRITY", "Saved concrete arguments and port shapes are inconsistent; no inferred replacement is accepted")
-    return replace(plan, registry=registry)
+    if plan.semantic_digest == verified.semantic_digest:
+        return replace(plan, registry=registry)
+    benign, conflicts = _plan_differences(plan, verified, registry)
+    if conflicts or not benign:
+        details = conflicts or ["the re-resolved plan differs in a field outside node arguments and port shapes"]
+        raise HNDLError("E_INTEGRITY", "Saved plan does not satisfy its operators' equations:\n  "
+                        + "\n  ".join(details)
+                        + "\nRe-resolve it from its source with this release.")
+    warnings.warn("Saved plan lacks arguments this release declares; completed it from values the plan "
+                  "already determines:\n  " + "\n  ".join(benign)
+                  + f"\nIts semantic digest changes from {plan.semantic_digest} to {verified.semantic_digest}; "
+                  "save it again to keep the completed form.", stacklevel=2)
+    return _completed(plan, verified, registry)
