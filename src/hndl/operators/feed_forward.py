@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
+from ._equalized import EqualLinear
 
 ACTIVATIONS = {
     "gelu": lambda h: F.gelu(h),
@@ -24,10 +25,12 @@ def _reference(module):
     up, down, p = module.up, module.down, module.dropout.p
 
     def run(x):
-        hidden = activation(F.linear(x, up.weight, up.bias))
+        up_gain = up.in_features ** -0.5 if getattr(up, 'equalized', False) else 1
+        down_gain = down.in_features ** -0.5 if getattr(down, 'equalized', False) else 1
+        hidden = activation(F.linear(x, up.weight * up_gain, up.bias))
         if p:
             hidden = F.dropout(hidden, p, module.training)
-        return F.linear(hidden, down.weight, down.bias)
+        return F.linear(hidden, down.weight * down_gain, down.bias)
 
     return run
 
@@ -46,10 +49,14 @@ def _reference(module):
         "dropout": Arg(float, 0.0, min=0, max=1, exclusive_max=True, positional=False,
                        help="Dropout probability applied after the activation; 0 disables it."),
         "bias": Arg(bool, True, positional=False, help="Add a learned bias to both projections."),
+        "equalized": Arg(bool, False, positional=False, since="0.7.0",
+                         help="Use runtime fan-in scaling and N(0,1) raw weights for both linear projections."),
     },
     examples=[
         Example("feed_forward(64)", ("B", 32), ("B", 32),
                 "The block preserves the feature width, so it drops into any position."),
+        Example("feed_forward(64, equalized=True)", ("B", 32), ("B", 32),
+                "Equalized projections preserve the selected activation and dropout."),
         Example('linear(32)\nfeed_forward(96, activation="silu")\nlinear()', ("B", 16), ("B", 10),
                 "The inner width is explicit; the surrounding widths are inferred."),
         Example('feed_forward(64, activation="gelu_tanh")', ("B", 8, 24), ("B", 8, 24),
@@ -79,6 +86,12 @@ class FeedForward(nn.Module):
     `down.weight` and `down.bias`. With biases the block holds
     `2 * D * hidden + hidden + D` parameters, and `2 * D * hidden` without.
 
+    ``equalized=True`` initializes both raw projection weights N(0,1), zeros
+    their biases, and scales each weight by the inverse square root of its own
+    fan-in (D for up, hidden for down) on every forward. Gain and learning-rate
+    multiplier are one. Activations and dropout are unchanged. ``init=`` and
+    checkpoints contain raw weights; parameter names and shapes stay the same.
+
     `activation` selects one of:
 
     | Name | Formula |
@@ -94,12 +107,13 @@ class FeedForward(nn.Module):
     dtype, with no upcasting.
     """
 
-    def __init__(self, hidden, activation, dropout, bias, *, D):
+    def __init__(self, hidden, activation, dropout, bias, *, D, equalized=False):
         super().__init__()
         self.activation = activation
-        self.up = nn.Linear(D, hidden, bias=bias)
+        linear = EqualLinear if equalized else nn.Linear
+        self.up = linear(D, hidden, bias=bias)
         self.dropout = nn.Dropout(float(dropout))
-        self.down = nn.Linear(hidden, D, bias=bias)
+        self.down = linear(hidden, D, bias=bias)
 
     def forward(self, x):
         return self.down(self.dropout(ACTIVATIONS[self.activation](self.up(x))))

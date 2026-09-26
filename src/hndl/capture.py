@@ -6,8 +6,9 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 import re
 
-from .errors import HNDLError
+from .errors import HNDLError, source_location
 from .registry import Registry, normalize_arguments
+from .resolver import _limits
 from .settings import normalize_settings
 from .types import (EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, named_contracts,
                     named_dtypes)
@@ -45,8 +46,7 @@ class Symbol:
 
 
 def _error(code, message, source=None):
-    location = {} if source is None else {key: source[key] for key in ("line", "column") if key in source}
-    return HNDLError(code, message, **location)
+    return HNDLError(code, message, **source_location(source))
 
 
 class Capture:
@@ -73,9 +73,7 @@ class Capture:
         self.inputs = {name: Symbol(self, f"input:{name}") for name in self.input_contracts}
         self.input = next(iter(self.inputs.values()))
         self.current: Symbol | None = self.input
-        self.max_nodes = 4096 if limits is None else limits.get("max_nodes", 4096)
-        if type(self.max_nodes) is not int or self.max_nodes < 1:
-            raise HNDLError("E_RESOURCE", "max_nodes must be a positive integer")
+        self.max_nodes = _limits(limits)["max_nodes"]
         self._token = None
 
     def __enter__(self):

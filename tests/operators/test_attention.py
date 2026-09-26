@@ -254,7 +254,7 @@ def test_relative_position_bias_matches_the_explicit_oracle(device, causal, rope
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("grid", [(8, 8), (16, 16), (32, 32)])
 def test_global_grids_match_the_shipped_reference(device, grid):
-    """The sizes HyperGAN asks for, global or used as one window of a partition."""
+    """Common image-token grids, global or used as one window of a partition."""
     positions = grid[0] * grid[1]
     module = make_module(device, torch.float32, heads=2, width=8, relative_position_bias=True,
                          spatial_shape=grid, table=True, seed=grid[0])
@@ -394,7 +394,8 @@ def test_deepcopy_preserves_behavior_and_shares_no_state():
     assert clone.relative_position_bias_table is not module.relative_position_bias_table
     assert clone.relative_position_index is not module.relative_position_index
     with torch.no_grad():
-        clone.relative_position_bias_table.add_(1.0)
+        # Perturb entries independently: a uniform shift cancels in the softmax.
+        clone.relative_position_bias_table.normal_(generator=torch.Generator().manual_seed(0))
     assert not torch.allclose(clone(x), module(x))
 
 

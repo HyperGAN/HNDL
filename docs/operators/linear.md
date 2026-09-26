@@ -23,6 +23,7 @@ x[B, ..., D_in] -> out[B, ..., D_out]
 | `in_features` | int | inferred | >= 1; <= 2147483647; binds `D_in` | Input width. Normally inferred from the incoming tensor. |
 | `bias` | bool | `True` | — | Add a learned bias vector. |
 | `spectral_norm` | bool | `False` | — | Divide the weight by its largest singular value, estimated by power iteration. |
+| `equalized` | bool | `False` | — | Initialize raw weights N(0,1), zero bias, and scale weights by 1/sqrt(fan_in) at runtime. |
 
 ## Description
 
@@ -30,6 +31,15 @@ Computes ``out = x @ weight.T + bias`` with ``weight`` of shape
 ``[out_features, in_features]``, applied to the last axis of ``[B, D]``
 or ``[B, T, D]`` inputs. No activation is applied; add one explicitly.
 Parameters are ``weight`` and, when enabled, ``bias``.
+
+## Equalized learning rate
+
+``equalized=True`` initializes raw weights from N(0,1) and biases at zero.
+Every forward uses ``weight / sqrt(in_features)``; bias remains unscaled.
+Gain and learning-rate multiplier are both one; activations remain separate.
+Parameter names and shapes are unchanged, but checkpoints and ``init=``
+contain raw weights. Loading ordinary linear weights directly therefore
+changes their effective scale. This option cannot combine with spectral norm.
 
 ## Spectral normalization
 
@@ -91,6 +101,24 @@ Parameters: 512
 
 ### Example 3
 
+Equalized learning rate with unit gain and unchanged parameter shapes.
+
+```python
+linear(32, equalized=True)
+```
+
+Input `['B', 16]` → output `['B', 32]`.
+
+```text
+Network: [B, 16] -> [B, 32]  dtype=float32
+index  name  operation  input shapes  output shapes
+0      n0    linear     x=[B, 16]     out=[B, 32]
+```
+
+Parameters: 544
+
+### Example 4
+
 On a [B, T, D] sequence the map applies to every position.
 
 ```python
@@ -111,7 +139,7 @@ index  name  operation  input shapes   output shapes
 
 Parameters: 2,632
 
-### Example 4
+### Example 5
 
 A spectrally normalized GAN critic head: every layer is 1-Lipschitz by construction.
 

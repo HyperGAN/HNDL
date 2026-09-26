@@ -1,0 +1,15 @@
+{
+  "hndl_version": "0.6.0",
+  "source": "feed_forward(64)\nfeed_forward(48, activation=\"silu\", bias=False)",
+  "input_shape": [
+    "B",
+    6,
+    16
+  ],
+  "output_shape": [
+    "B",
+    6,
+    16
+  ],
+  "plan": "{\"artifact_digest\":\"7fec5172ceace0280a9c72572b77dbbc73ba37c58e262dde45c2677d4aec3bb8\",\"dtype\":\"float32\",\"frontend\":\"python_config@1\",\"input_dtype\":\"float32\",\"input_shape\":[\"B\",6,16],\"nodes\":[{\"args\":{\"activation\":\"gelu\",\"bias\":true,\"dropout\":0.0,\"hidden\":64},\"id\":\"n0\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",6,16]},\"inputs\":{\"x\":\"input:x\"},\"op\":\"feed_forward@1\",\"output_shapes\":{\"out\":[\"B\",6,16]},\"outputs\":[\"out\"],\"provenance\":{\"activation\":\"operator default\",\"bias\":\"operator default\",\"dropout\":\"operator default\",\"hidden\":\"explicit\"},\"source\":{\"argument_origins\":{\"activation\":\"operator default\",\"bias\":\"operator default\",\"dropout\":\"operator default\",\"hidden\":\"explicit\"},\"column\":1,\"line\":1},\"trainability\":{\"default\":null,\"overrides\":{}}},{\"args\":{\"activation\":\"silu\",\"bias\":false,\"dropout\":0.0,\"hidden\":48},\"id\":\"n1\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",6,16]},\"inputs\":{\"x\":\"node:n0/out\"},\"op\":\"feed_forward@1\",\"output_shapes\":{\"out\":[\"B\",6,16]},\"outputs\":[\"out\"],\"provenance\":{\"activation\":\"explicit\",\"bias\":\"explicit\",\"dropout\":\"operator default\",\"hidden\":\"explicit\"},\"source\":{\"argument_origins\":{\"activation\":\"explicit\",\"bias\":\"explicit\",\"dropout\":\"operator default\",\"hidden\":\"explicit\"},\"column\":1,\"line\":2},\"trainability\":{\"default\":null,\"overrides\":{}}}],\"output_ref\":\"node:n1/out\",\"output_shape\":[\"B\",6,16],\"resolution_version\":1,\"schema_version\":1,\"semantic_digest\":\"660b4f2e5827d5d17df725b5797bbc51ec1584c09c3632e83f57a0982f12ede8\"}"
+}

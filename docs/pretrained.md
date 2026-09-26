@@ -174,9 +174,10 @@ or read it from the `E_PRETRAINED` message raised when `sha256=` is missing.
   and a conflict with `layer=` or `readout=` each fail with `E_PRETRAINED`.
   `layers=` is a new canonical argument of `pretrained`, and plan digests cover
   every canonical argument, so a plan saved before this release that holds a
-  `pretrained` node no longer matches its own digest: restoring it fails with
-  `E_INTEGRITY` and it has to be re-resolved once from its source. Plans
-  without a `pretrained` node are untouched.
+  `pretrained` node no longer matches its own digest. Restoring it fills in
+  `layers=()`, the operator default, warns with the new digest, and loads;
+  save it again to keep the completed form. Plans without a `pretrained` node
+  are untouched.
 - **`readout=`** names host code instead of a submodule, for checkpoints whose
   useful tensor comes from a method rather than `forward` — DINOv2's
   `forward_features(x)["x_norm_patchtokens"]`, for example. The host binds named

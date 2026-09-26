@@ -112,6 +112,26 @@ so create tensors normally; parameters are then cast to the plan dtype.
 `forward` receives tensors in declared input-port order and returns one
 tensor, or a tuple/dict for multiple output ports.
 
+## Changing a released operator
+
+Saved plans record resolved arguments under the operator's
+`identity@version`, and their digests cover those arguments. To add an
+optional argument to an operator that has already shipped, keep the version
+and declare the argument with `since="<release that adds it>"`:
+
+```python
+"equalized": Arg(bool, False, positional=False, since="0.7.0", help="..."),
+```
+
+Its default must reproduce the released behavior exactly. A resolved node
+that holds the default leaves the argument out of its args and argument
+origins, so plans that do not use it keep their bytes and digests, and plans
+saved before it existed still load; the module constructor still receives
+the default. Only a node that sets another value records it. Removing an
+argument, changing a default, or changing what existing arguments compute
+needs a new `version=` instead. `tests/fixtures/plans_0_6_0` holds plans
+saved by a release; they must keep loading.
+
 ## Checklist
 
 1. Create `src/hndl/operators/<alias>.py` with the decorated class.

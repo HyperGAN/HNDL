@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.7.0 (2026-09-26)
+
+A minor release: configs repeat blocks with bounded `for _ in range(N):`
+loops, networks check their contracts once per input signature instead of on
+every call, config parsing runs in process, saved plans stay loadable as
+operators gain arguments, and new equalized-learning-rate and
+coordinate-rendering primitives join the catalog.
+
+- **Configs can repeat statements with `for _ in range(N):`.** `N` is a
+  positive integer literal, loops nest, and the body takes any top-level
+  statement, so `h = add(h, feed_forward(layer_norm(h), 512))` in a loop
+  stacks residual blocks. A loop builds exactly the nodes, plan, semantic
+  digest and `state_dict()` keys of the statements written out by hand.
+  `name="block"` inside a loop becomes `block0`, `block1`, ...; nested loops
+  append every index, outermost first (`res1_3`). There is no loop variable,
+  arithmetic or conditional: other targets, `range` forms, `while`, `break`,
+  `continue`, `if`, comprehensions and `_` as a value fail with `E_SYNTAX`,
+  and index-dependent structure belongs in native Python. A loop that would
+  unroll past `max_nodes`, or loops nested more than 8 deep, fail with
+  `E_RESOURCE` before any node is created. Configuration, resolution and
+  runtime errors about an unrolled node report the iteration, as in
+  `line 12, column 5, iteration 3 of 8`, from new `iterations` node source
+  metadata. `range` is now a reserved operator alias in configs. The ViT and
+  GPT example networks use loops for their blocks.
+- **Config parsing runs in process.** The AST allowlist is unchanged and source
+  is still never compiled or executed, but the `python -I -S` worker, its JSON
+  wire protocol and its limits are gone. Parsing a small config drops from
+  about 32 ms to under 0.2 ms, and it no longer requires Linux. Source stays
+  capped at 64 KiB. Before `ast.parse` runs, the token stream is screened for
+  bracket nesting past 50 levels and more than 32 Python operators or keywords
+  (valid configs use none), because on CPython 3.11–3.13 deeply chained
+  expressions crash `ast.parse` on a small thread stack instead of raising;
+  such input now fails with `E_SYNTAX` or `E_RESOURCE`. The per-literal,
+  line-count, AST-node and integer-bit limits are dropped: the source cap and
+  each operator's argument schema already bound those values.
+- **Restoring a plan explains a mismatch, and fills values the plan already
+  determines.** `E_INTEGRITY` from revalidation lists every differing port
+  shape and argument per node. A plan missing only an operator default (saved
+  before the operator gained that argument, like `pretrained` plans from before
+  `layers=`) or an argument bound to a saved port dimension now loads completed,
+  with a warning naming what was filled and the new semantic digest. A missing
+  value only a policy or relation search would choose is still refused. Digest
+  mismatches now say the file is corrupted or was edited by hand.
+- The default `max_state_bytes` rises from 1 GiB to 64 GiB. The old default
+  refused to build a GPT-2-medium-sized network (405M parameters, 1.6 GB); the
+  new one still catches a typo that asks for a huge model before allocating.
+  `ResolvedPlan.from_json` drops its 16 MiB input cap and duplicate `max_nodes`
+  check; revalidation still applies `max_nodes`.
+
+- **Contracts are checked once per input signature, not on every call.** The
+  first forward whose inputs have a given shape, dtype and device (in a given
+  training mode and autocast state) still checks every node's ports and that
+  no module created or removed registered state; later calls with the same
+  signature compare only the inputs and run the layers back to back. Moving
+  or casting the model, or registering a parameter, buffer or submodule on
+  any of its modules, makes the next call check everything again. The fixed
+  per-call cost of a five-node MLP drops from ~30-40 us to ~6-9 us: at batch
+  32 it runs ~1.2x hand-written PyTorch instead of ~1.8x.
+  Errors say more: `E_RUNTIME` names the node, its operation and source line,
+  and prints the contract in HNDL notation beside the tensor that arrived
+  (`expected [B=32, 64]:float32 on cpu` / `got [32, 63]:float32 on cpu`);
+  dtypes are spelled `float32`, not `torch.float32`. An exception raised
+  inside a layer keeps its type, message and traceback (a `RuntimeError` or
+  out-of-memory error is still caught as one) and gains a note, via
+  `add_note`, naming the node, its operation and source line, its inputs
+  against their contract, and any registered-state change that explains it;
+  an exception passing out through nested graphs carries only the innermost
+  node's note. Registered
+  state edits PyTorch runs no hook for --- `del` of a registered name,
+  `module.param = None`, direct writes to `_parameters`/`_buffers`/`_modules`
+  --- are reported at the next full check or when a layer then fails, not on
+  the very next call.
+
+- Add `broadcast_mul`, `coordinate_grid`, `fourier_features`, and `grid_sample`
+  for style-conditioned coordinate renderers composed in HNDL. Fourier tables
+  and coordinate grids are persistent buffers; sampling follows PyTorch semantics.
+
+- Add opt-in `equalized=True` to `linear`, `attention`, and `feed_forward`:
+  raw N(0,1) weights, zero biases, and runtime `1/sqrt(fan_in)` weight scaling
+  with unit gain and learning-rate multiplier. Existing defaults, shapes and
+  parameter names stay unchanged. Initializer overrides target raw weights;
+  equalized linear rejects combination with spectral normalization.
+
+- **Saved plans stay compatible when an operator gains an argument.** `Arg`
+  accepts `since="<release>"` for an argument added to an already released
+  operator. A resolved node that holds such an argument's default omits it
+  from its args and argument origins, and module construction fills it back
+  in. `equalized` is declared this way, so plans saved by 0.6.0 load again
+  (they failed with `E_INTEGRITY`), and any plan that does not set
+  `equalized=True` encodes and digests byte for byte as in 0.6.0. Writing
+  `equalized=False` explicitly is the same plan as omitting it.
+
 ## 0.6.0 (2026-09-21)
 
 A minor release adding TransGAN-style relative-position-bias attention and
@@ -167,7 +259,7 @@ opt-in performance/optimization test suite.
 
 ## 0.4.0 (2026-09-21)
 
-A minor release for HyperGAN's fixed-context discriminator: `concat` joins tensors along the batch axis with the multiple tracked as `k*B`, and a new `chunk` operator cuts an axis back into equal sections.
+A minor release for batch-axis joins: `concat` joins tensors along the batch axis with the multiple tracked as `k*B`, and a new `chunk` operator cuts an axis back into equal sections.
 
 - **`concat` joins along the batch axis, tracked as `k*B`.** `axis=0` was
   rejected; it now stacks examples, so
@@ -211,7 +303,7 @@ A minor release for HyperGAN's fixed-context discriminator: `concat` joins tenso
 
 ## 0.3.0 (2026-09-21)
 
-A minor release for HyperGAN's multiscale discriminators: one pretrained forward pass returns several intermediate layers, operators may declare variadic output ports, and `.hndl` files count as Python on GitHub.
+A minor release for multiscale feature extraction: one pretrained forward pass returns several intermediate layers, operators may declare variadic output ports, and `.hndl` files count as Python on GitHub.
 
 - **Several layers from one pretrained forward pass.** A provider checkpoint
   can now return more than one intermediate tensor:
@@ -246,7 +338,7 @@ A minor release for HyperGAN's multiscale discriminators: one pretrained forward
 
 ## 0.2.1 (2026-09-21)
 
-A patch release for HyperGAN's migration: cast networks check inputs in the
+A patch release: cast networks check inputs in the
 dtype they were cast to, and provider checkpoints read tensors through
 host-registered readouts.
 
@@ -278,7 +370,7 @@ host-registered readouts.
 
 ## 0.2.0 (2026-09-21)
 
-A feature release driven by HyperGAN's migration to HNDL: networks copy
+A feature release: networks copy
 with `copy.deepcopy`, graphs take named inputs and publish named outputs,
 GAN critics get spectral normalization and deterministic pooling, and
 local `.pth` checkpoints load through registered providers.

@@ -4,7 +4,7 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: 0.5.0.** Config strings, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 65 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
+**Status: 0.7.0.** Config strings with bounded `for` loops, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 69 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
 
 Install on Linux with Python 3.11–3.14:
 
@@ -73,7 +73,7 @@ last_layer = model[-1]
 features = model[:2]                     # nn.Sequential sharing these layers
 ```
 
-Unnamed operations receive IDs such as `n0`; `model["n0"]` and `model[0]` return the same module. Optional names appear in the branching example below. Slices reuse their parameters, so training a slice also updates the original model. The complete model retains its resolved shape contract; a slice is a regular PyTorch sequence. Standard `state_dict()`, `train()`, and `eval()` remain available. Moving the model with `.cpu()` or `.cuda()` and casting it with `.double()`, `.half()`, `.bfloat16()`, `.float()`, or `.to(dtype=...)` retarget the runtime checks too, so a cast model takes tensors of its new compute dtype; ports declared as integers, such as token ids, keep the dtype the plan declared. And `copy.deepcopy(model)` returns an independent model --- its own parameters and buffers, the same trainability flags and training mode, and no draw on the random state --- which is what a moving-average copy of a model needs. The resolved plan is immutable, so the copy shares it. To store a model, save `model.plan.to_json()` next to `torch.save(model.state_dict())` and rebuild it; pickling the module itself is not supported.
+Unnamed operations receive IDs such as `n0`; `model["n0"]` and `model[0]` return the same module. Optional names appear in the branching example below. Slices reuse their parameters, so training a slice also updates the original model. The complete model retains its resolved shape contract; a slice is a regular PyTorch sequence. Standard `state_dict()`, `train()`, and `eval()` remain available. Moving the model with `.cpu()` or `.cuda()` and casting it with `.double()`, `.half()`, `.bfloat16()`, `.float()`, or `.to(dtype=...)` retarget the runtime checks too, so a cast model takes tensors of its new compute dtype; ports declared as integers, such as token ids, keep the dtype the plan declared. Those checks run once: the first call with a given input shape, dtype and device checks every layer's inputs and outputs against the plan, and later calls with the same inputs run the layers directly, at close to hand-written speed. A mismatch is an `E_RUNTIME` error naming the layer, its operation and its source line, with the expected and actual shapes; an error raised inside a layer keeps its own type and gains a note with the same details. And `copy.deepcopy(model)` returns an independent model --- its own parameters and buffers, the same trainability flags and training mode, and no draw on the random state --- which is what a moving-average copy of a model needs. The resolved plan is immutable, so the copy shares it. To store a model, save `model.plan.to_json()` next to `torch.save(model.state_dict())` and rebuild it; pickling the module itself is not supported.
 
 Initial weights use PyTorch’s normal random state. For repeatable initialization in the same environment, call [`torch.manual_seed(7)`](https://docs.pytorch.org/docs/stable/notes/randomness.html#pytorch-random-number-generator) before constructing the network.
 
@@ -177,8 +177,8 @@ gpt = network(
     """
     embedding(256, 128)
     pos_embed(64)
-    transformer_block(4, activation="gelu_tanh", causal=True)
-    transformer_block(4, activation="gelu_tanh", causal=True)
+    for _ in range(4):
+        transformer_block(4, activation="gelu_tanh", causal=True, name="block")
     layer_norm()
     linear(256, bias=False)
     """,
@@ -189,6 +189,8 @@ gpt = network(
     device="cuda:0",
 )
 ```
+
+`for _ in range(4):` repeats its body four times and builds exactly the layers you would get by writing it out four times; inside a loop, `name="block"` names the copies `block0` to `block3`. The count is an integer literal and there is no loop variable, so rebinding is how iterations connect: `h = add(h, feed_forward(layer_norm(h), 512))` in a loop stacks residual blocks. Layers that differ by iteration, such as per-stage widths, belong in native Python with `network_from_callable`.
 
 `transformer_block` is a pre-norm block with multi-head attention and a feed-forward branch; `attention`, `cross_attention`, `feed_forward`, `swiglu`, `rms_norm`, `moe`, and `hopfield` are available separately for other layouts. `dtype` selects the parameter and activation dtype for the whole plan; reduced precision is qualified on CUDA. The [catalog](https://hypergan.github.io/HNDL/operators/) lists every operator with its arguments, shape relation, and runnable examples, and [docs/networks.md](https://hypergan.github.io/HNDL/networks/) shows complete networks (LeNet, DCGAN, U-Net, ResNet-18, ViT, GPT, and more) written this way.
 
@@ -414,9 +416,9 @@ generator = network_file(
 )
 ```
 
-File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, loops, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
+File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, conditionals, loops other than `for _ in range(N):`, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
 
-The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader applies source, parser, graph, and model-size limits and parses all declarative input in an isolated worker. Even AST parsing can exhaust resources, so syntax restrictions alone are insufficient. See the [loading and trust contract](https://hypergan.github.io/HNDL/SPEC/#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
+The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader parses in process, bounds source size and nesting before parsing so pathological input fails with an `HNDLError` instead of a crash, and bounds graph and model size. See the [loading and trust contract](https://hypergan.github.io/HNDL/SPEC/#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
 
 ## Register your own operation
 
