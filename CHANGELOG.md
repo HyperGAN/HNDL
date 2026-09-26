@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-09-26)
+
+A minor release for operators defined outside HNDL: `ops` calls operators
+registered on the capture's registry, shape relations are public in
+`hndl.relations`, and `hndl.testing` runs the built-in operator harness on
+host operators. The forward fast path also notices parameters, buffers, and
+submodules that were deleted, cleared, or added without a registration hook.
 
 - **`ops` calls custom operators.** Inside `resolve_callable` or
   `network_from_callable`, the global `from hndl import ops` now looks each
