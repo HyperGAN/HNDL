@@ -3,8 +3,6 @@
 import ast
 import re
 from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 
@@ -72,15 +70,24 @@ def test_frontends_files_and_saved_plan_have_same_numerical_identity(tmp_path):
     assert "[B, 10]" in str(config_plan)
 
 
-def test_many_concat_edges_stay_within_a_bounded_resolution_time():
-    # This source fits the parser budgets. Non-concatenated dimensions must
-    # propagate once per edge rather than comparing every pair of inputs.
-    script = '''
-from hndl import resolve
-plan = resolve("concat(" + ",".join(["x"] * 4000) + ")",
-               input_shape=("B", 1, 1, 1), output_shape=("B", 4000, 1, 1))
-assert plan.nodes[0].output_shapes["out"] == ("B", 4000, 1, 1)
-'''
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                            text=True, timeout=5)
-    assert result.returncode == 0, result.stderr
+def test_many_concat_edges_stay_linear_in_solver_work(monkeypatch):
+    # Non-concatenated dimensions must propagate once per edge rather than
+    # comparing every pair of inputs. Counting shape updates keeps this a
+    # deterministic complexity check instead of a wall-clock one.
+    from hndl.resolver import _Solver
+
+    calls = [0]
+    original = _Solver.set_shape
+
+    def counted(self, *args, **kwargs):
+        calls[0] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Solver, "set_shape", counted)
+    edges = 4000
+    plan = resolve("concat(" + ",".join(["x"] * edges) + ")",
+                   input_shape=("B", 1, 1, 1), output_shape=("B", edges, 1, 1))
+    assert plan.nodes[0].output_shapes["out"] == ("B", edges, 1, 1)
+    # Each sweep touches every port a handful of times; pairwise comparison
+    # would need on the order of edges**2 = 16,000,000 updates.
+    assert calls[0] < 100 * edges
