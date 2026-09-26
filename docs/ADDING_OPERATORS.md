@@ -87,8 +87,11 @@ Fields:
   `s.axis(port, i, value)`, `s.equal(p, q)`, `s.arg(name, value)`,
   `s.product(p, q)`, `s.interval(port, i, lo, hi)`, `s.error(code, msg)`,
   `s.batch(port)`, `s.share_batch(*ports)`,
-  `s.args`, `s.inputs`, and `s.policy` (the selected policy identity or None). Shared relations live in `operators/_relations.py`.
-  Give `shape_text=` a one-line description for the docs.
+  `s.args`, `s.inputs`, and `s.policy` (the selected policy identity or None). Shared relations
+  live in the public module `hndl.relations` (see
+  [Shared relations](#shared-relations)); built-ins import them with
+  `from ..relations import ...`. Give `shape_text=` a one-line description
+  for the docs.
 - `args` maps names to `Arg(type, default, ...)`. Omit the default to require
   the value. `inferable=True` lets the resolver solve an omitted dimension;
   `dim="D_out"` ties it to a shape symbol in both directions. Types: `int`,
@@ -111,6 +114,76 @@ it names as a keyword-only parameter (`*, D`) and, if requested,
 so create tensors normally; parameters are then cast to the plan dtype.
 `forward` receives tensors in declared input-port order and returns one
 tensor, or a tuple/dict for multiple output ports.
+
+## Shared relations
+
+`hndl.relations` is public and stable, and it is what the built-in
+convolutions, `conv1d`, `broadcast_add` and `broadcast_mul` use, so an
+operator declared anywhere can reuse the same arithmetic:
+
+| Helper | Kind | Meaning |
+| --- | --- | --- |
+| `conv_output(extent, kernel, stride=1, padding=0, dilation=1)` | arithmetic | Output extent of a convolution or pooling window, as `torch.nn.Conv*d` computes it |
+| `conv_input_range(extent, kernel, stride=1, padding=0, dilation=1)` | arithmetic | `(lower, upper)`, every input extent that maps to `extent`; empty when `lower > upper` |
+| `conv_transpose_output(extent, kernel, stride=1, padding=0, dilation=1, output_padding=0)` | arithmetic | Output extent of a transposed convolution |
+| `conv_transpose_input(...)` | arithmetic | The one input extent a transposed convolution maps to `extent`, or None |
+| `conv_axis(s, axis, kernel, stride=1, padding=0, dilation=1, *, x="x", out="out")` | relation | One axis of `x` and `out` related by `conv_output`: forward exactly, backward as an interval |
+| `conv_transpose_axis(s, axis, ..., output_padding=0, *, x="x", out="out")` | relation | The same for a transposed convolution; exact both ways |
+| `spatial("conv2d")`, `spatial("conv_transpose2d")` | relation factory | The whole 2D convolution rule: ranks, channels read from and written to `in_channels`/`out_channels`, `groups`, both spatial axes |
+| `elementwise_join(*ports)` | relation factory | Every listed port and `out` share one shape |
+| `broadcast(s, operation)` | relation | Equal-rank broadcasting of `a` and `b` into `out` |
+
+Relation helpers take the node view `s` and only add facts, so they combine
+freely inside one `relation=` function. An operator that keeps every
+`factor`-th position of a `[B, C, L]` signal has the geometry of a kernel-1
+convolution with stride `factor`, so `conv_axis` gives it forward and
+backward length inference:
+
+```python
+from torch import nn
+
+from hndl import Arg, Example, Registry
+from hndl.relations import conv_axis
+
+registry = Registry.builtins()
+
+
+def decimate_relation(s):
+    s.rank("x", 3)
+    s.rank("out", 3)
+    channels = s.shape("x")[1] or s.shape("out")[1]
+    s.axis("x", 1, channels)
+    s.axis("out", 1, channels)
+    conv_axis(s, 2, kernel=1, stride=s.args["factor"])
+
+
+@registry.operator(
+    "decimate",
+    identity="example.decimate",
+    summary="Keep every factor-th position of a [B, C, L] signal.",
+    shape="x -> out",
+    relation=decimate_relation,
+    shape_text="L_out = floor((L_in - 1) / factor) + 1, channels unchanged",
+    args={"factor": Arg(int, min=1, help="Keep one position in every factor.")},
+    examples=[Example("conv1d(8, kernel_size=3, padding=1)\ndecimate(2)", ("B", 4, 16), ("B", 8, 8))],
+    reference=lambda module: lambda x: x[:, :, ::module.factor],
+)
+class Decimate(nn.Module):
+    """``out = x[:, :, ::factor]``."""
+
+    def __init__(self, factor):
+        super().__init__()
+        self.factor = factor
+
+    def forward(self, x):
+        return x[:, :, ::self.factor]
+```
+
+A known input length fixes the output length. A known output length narrows
+the input to the interval `conv_input_range` returns (lengths 15 and 16 both
+decimate by 2 to 8), and the resolver reports that ambiguity unless
+something else fixes the length; it never picks one. An output length no
+input reaches fails with `E_CONSTRAINT`.
 
 ## Changing a released operator
 
@@ -166,3 +239,88 @@ model = network("linear(64); my_silu(); linear()", input_shape=("B", 128), outpu
 ```
 
 `registry.add(cls)` registers a class decorated elsewhere with `hndl.operator`.
+
+### Calling it from Python
+
+In native Python, pass the same registry to `resolve_callable` or
+`network_from_callable` and call the operator through `ops` like a built-in.
+Inside a capture, `ops` looks every alias up in the registry the capture runs
+under:
+
+```python
+from hndl import ops
+from hndl.torch import network_from_callable
+
+def model(x):
+    ops.linear(64)
+    ops.my_silu()
+    return ops.linear()
+
+net = network_from_callable(model, input_shape=("B", 128), output_shape=("B", 10),
+                            registry=registry, device="cpu")
+```
+
+`registry.ops.my_silu()` is equivalent and may be mixed with `ops` in one
+capture. A factory from a different registry's `ops` fails with `E_CAPTURE`
+unless the capture's registry holds that very declaration, which is true of
+the built-ins every `Registry.builtins()` shares. Outside a capture `ops`
+only knows the built-in catalog.
+
+### Testing it
+
+`hndl.testing` is the harness every built-in operator passes, public so a
+package runs it against its own registry. `check_operator` runs all of it on
+every example, on every available device:
+
+```python
+from hndl import testing
+
+def test_my_operators():
+    testing.check_operator(registry, "decimate")
+```
+
+It checks the declaration (summary, docstring, help text, examples,
+`shape_text` for a relation), then for each example: both frontends resolve
+it to the same plan, which round-trips through JSON unchanged; it builds,
+runs forward and backward to a finite output of the declared shape, and
+rebuilds identically from the same seed, in float32 on every device and in
+float16 and bfloat16 on CUDA; and it matches the declared `reference=`.
+Failures raise `AssertionError` naming the alias, example and device. Pass
+`devices=["cpu"]` or `dtypes=["float32"]` to narrow it.
+
+For one pytest case per example, parametrize with `example_params`, limited
+to the package's own aliases so the built-in catalog is not rerun:
+
+```python
+import pytest
+
+@pytest.mark.parametrize("spec,example", testing.example_params(registry, ["decimate"]))
+@pytest.mark.parametrize("device", testing.available_devices())
+def test_example(spec, example, device):
+    testing.check_round_trip(registry, spec, example)
+    testing.check_build_and_run(registry, spec, example, device=device)
+    testing.check_reference(registry, spec, example, device=device)
+```
+
+`import hndl` never imports pytest, and `hndl.testing` imports it only inside
+`example_params` and `operator_params`. Examples that download a checkpoint
+(`Example(..., network=True)`) carry the `network` mark there and are skipped
+by `check_operator` unless it is called with `network=True`.
+
+### Evolving it
+
+A host operator evolves under the same rules as a built-in (see
+[Changing a released operator](#changing-a-released-operator)): its
+`identity@version` is recorded in every saved plan. To add an optional
+argument without breaking plans saved by earlier releases of the package,
+declare it with `since="<package release that adds it>"` and a default that
+reproduces the old behavior:
+
+```python
+"offset": Arg(int, 0, min=0, positional=False, since="1.1.0", help="Index of the first kept position."),
+```
+
+`check_round_trip` enforces the resulting plan layout: a node that keeps the
+default leaves the argument out of the plan, and every other argument is
+recorded. Anything else (removing an argument, changing a default or what
+the operator computes) needs a new `version=`.

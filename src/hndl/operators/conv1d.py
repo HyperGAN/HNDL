@@ -3,7 +3,7 @@ from torch.nn import functional as F
 from torch.nn.utils import parametrizations
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
-from ._relations import conv_output
+from ..relations import conv_axis
 
 
 def _relation(s):
@@ -18,16 +18,7 @@ def _relation(s):
     for channels in (a[1], b[1]):
         if channels is not None and channels % args["groups"]:
             s.error("E_CONSTRAINT", f"groups={args['groups']} must divide input and output channels")
-    kernel, stride, pad, dilation = (args[key] for key in ("kernel_size", "stride", "padding", "dilation"))
-    length_in, length_out = a[2], b[2]
-    if length_in is not None:
-        s.axis("out", 2, conv_output(length_in, kernel, stride, pad, dilation))
-    if length_out is not None:
-        lower = max(1, (length_out - 1) * stride - 2 * pad + dilation * (kernel - 1) + 1)
-        upper = length_out * stride - 2 * pad + dilation * (kernel - 1)
-        if lower > upper:
-            s.error("E_CONSTRAINT", "Convolution inverse has no positive input length")
-        s.interval("x", 2, lower, upper)
+    conv_axis(s, 2, *(args[key] for key in ("kernel_size", "stride", "padding", "dilation")))
 
 
 def _reference(module):

@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- **`ops` calls custom operators.** Inside `resolve_callable` or
+  `network_from_callable`, the global `from hndl import ops` now looks each
+  alias up in the registry that capture runs under, so an operator registered
+  on it is called as `ops.my_op()` instead of failing with `E_OPERATOR`.
+  `registry.ops.my_op()` still works and mixes freely with `ops` in one
+  capture. Outside a capture `ops` still checks aliases against the built-in
+  catalog, and a factory read there resolves its alias when it is called.
+- **A factory from another registry fails with `E_CAPTURE`.** Calling
+  `other.ops.my_op()` in a capture whose registry does not hold that exact
+  declaration used to fail with `E_STATE_VERSION`; it now fails with
+  `E_CAPTURE`, naming the operator and saying which registry to pass. The same
+  identity declared by a different class in the capture's registry is rejected
+  the same way instead of being accepted. Built-in factories from any
+  `Registry.builtins()` keep working in every built-in registry, which shares
+  their declarations.
+- **`hndl.relations` is public.** The convolution arithmetic, the 2D
+  convolution relation, elementwise joins and broadcasting that the built-ins
+  use in `relation=` functions move from the private
+  `hndl.operators._relations` to a documented module, joined by
+  `conv_input_range`, `conv_transpose_input` and the per-axis relations
+  `conv_axis` and `conv_transpose_axis` for operators with their own strided
+  axes. The old import path re-exports them.
+- **`hndl.testing` is public.** The harness every built-in operator passes,
+  `check_operator(registry, alias)`, runs on any registry: declaration
+  completeness, then for every example on every available device the
+  frontend and JSON round trip, build, forward and backward, reproducible
+  rebuild and reference comparison, plus float16 and bfloat16 on CUDA.
+  `check_declaration`, `check_round_trip`, `check_build_and_run` and
+  `check_reference` run one check each, and `example_params` and
+  `operator_params` build pytest parameters for them. The built-in suite now
+  runs through it. Importing `hndl` or `hndl.testing` does not import pytest.
+- `docs/ADDING_OPERATORS.md` covers operators declared outside the package:
+  calling them through `ops`, reusing `hndl.relations` in a strided
+  operator's relation, testing them with `hndl.testing`, and adding
+  arguments with `Arg(since=...)`.
+
 ## 0.7.0 (2026-09-26)
 
 A minor release: configs repeat blocks with bounded `for _ in range(N):`

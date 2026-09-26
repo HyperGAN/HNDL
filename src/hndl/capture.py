@@ -49,6 +49,18 @@ def _error(code, message, source=None):
     return HNDLError(code, message, **source_location(source))
 
 
+def _foreign_operator(registry, op):
+    if op.key in registry._identities:
+        problem = "declares that identity with a different implementation"
+    else:
+        problem = "does not hold it"
+    hint = "pass the registry that declares it to resolve_callable or network_from_callable"
+    if op.alias in registry.aliases:
+        hint += f", or call ops.{op.alias} to use the capture's own binding"
+    return (f"{op.alias} was taken from another registry's ops and binds {op.key}, but this "
+            f"capture's registry {problem}; {hint}")
+
+
 class Capture:
     """One scoped authoring transaction, shared by the two frontends."""
 
@@ -91,9 +103,12 @@ class Capture:
 
     def emit(self, op, positional, keyword, *, source=None):
         # Factories carry exact identities, never whichever alias is newest.
-        registered = self.registry.by_identity(op.key)
-        if registered.key != op.key:
-            raise _error("E_CAPTURE", "Operator is not present in this capture registry", source)
+        # ``registry.ops`` binds a declaration when the attribute is read; it
+        # may run in any capture whose registry holds that very declaration,
+        # as every registry built from ``Registry.builtins()`` does for the
+        # built-ins, and nowhere else.
+        if self.registry._identities.get(op.key) is not op:
+            raise _error("E_CAPTURE", _foreign_operator(self.registry, op), source)
         args = list(positional)
         kwargs = dict(keyword)
         name = kwargs.pop("name", _DEFAULT)
@@ -234,22 +249,53 @@ class Capture:
 
 
 class OperatorNamespace:
-    """Attribute factories with fixed operator identities, not live modules."""
+    """Attribute factories for symbolic operator calls.
+
+    ``registry.ops`` is bound to that registry: each attribute is the exact
+    declaration its alias names there. The global ``hndl.ops`` is unbound:
+    inside a capture it resolves each alias against the registry the capture
+    runs under, the one passed to ``resolve_callable`` or
+    ``network_from_callable``, so operators registered on that registry need
+    no separate namespace. Outside a capture it checks aliases against the
+    built-in catalog, and calling a factory there fails with ``E_CAPTURE``.
+    """
 
     def __init__(self, registry=None):
         self._registry = registry
 
+    def __repr__(self):
+        return "hndl.ops" if self._registry is None else f"<operators of {self._registry!r}>"
+
     def __getattr__(self, alias):
         if alias.startswith("_"):
             raise AttributeError(alias)
-        registry = Registry.builtins() if self._registry is None else self._registry
-        op = registry.get(alias)
+        if self._registry is not None:
+            return self._bound(alias, self._registry.get(alias))
+        capture = _ACTIVE.get()
+        # Validate the alias now so a typo fails where it is written.
+        (Registry.builtins() if capture is None else capture.registry).get(alias)
+        return self._late(alias)
 
+    @staticmethod
+    def _bound(alias, op):
         def operation(*args, **kwargs):
             capture = _ACTIVE.get()
             if capture is None:
                 raise HNDLError("E_CAPTURE", "Symbolic operations require an active authoring capture")
             return capture.emit(op, args, kwargs)
+
+        operation.__name__ = alias
+        return operation
+
+    @staticmethod
+    def _late(alias):
+        def operation(*args, **kwargs):
+            capture = _ACTIVE.get()
+            if capture is None:
+                raise HNDLError("E_CAPTURE", "Symbolic operations require an active authoring capture")
+            # Resolved on every call, so a factory read in one capture and
+            # called in another follows the registry it is called under.
+            return capture.emit(capture.registry.get(alias), args, kwargs)
 
         operation.__name__ = alias
         return operation

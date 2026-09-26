@@ -3,7 +3,7 @@ from torch.nn.utils import parametrizations
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, PAIR, Policy, operator
-from ._relations import spatial
+from ..relations import spatial
 
 
 def _validate(args):

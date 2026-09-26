@@ -453,7 +453,7 @@ model = network(
 )
 ```
 
-Configs now understand `my_silu()`. Native functions use `registry.ops.my_silu()` and pass that same registry to `network_from_callable`. The shape string `x[B, ...] -> out[B, ...]` says the output has exactly the input's shape, so constraints propagate in both directions through the layer. Each node gets its own instance of the class, constructed with the resolved arguments.
+Configs now understand `my_silu()`. Native functions pass that same registry to `network_from_callable` and call `ops.my_silu()` like any built-in: inside a capture, `ops` looks aliases up in the capture's registry. `registry.ops.my_silu()` also works. The shape string `x[B, ...] -> out[B, ...]` says the output has exactly the input's shape, so constraints propagate in both directions through the layer. Each node gets its own instance of the class, constructed with the resolved arguments.
 
 Operations with several inputs, different output dimensions, or scalar arguments declare them in the same place. The built-in adaptive normalization is declared as:
 
@@ -473,9 +473,9 @@ class AdaptiveNorm(nn.Module):
     def forward(self, x, params): ...
 ```
 
-The shared `C` means both shapes use the same channel count; `2*C` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model. Arguments carry help text, and examples are runnable configs; `python -m hndl.docs` renders both into [docs/operators](https://hypergan.github.io/HNDL/operators/). See [docs/ADDING_OPERATORS.md](https://hypergan.github.io/HNDL/ADDING_OPERATORS/) for the complete format, including the `relation=` hook for rules the shape string cannot express.
+The shared `C` means both shapes use the same channel count; `2*C` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model. Arguments carry help text, and examples are runnable configs; `python -m hndl.docs` renders both into [docs/operators](https://hypergan.github.io/HNDL/operators/). See [docs/ADDING_OPERATORS.md](https://hypergan.github.io/HNDL/ADDING_OPERATORS/) for the complete format, including the `relation=` hook for rules the shape string cannot express and the convolution and broadcasting helpers in `hndl.relations` that the built-ins use there.
 
-Shape declarations are claims made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct.
+Shape declarations are claims made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct. `hndl.testing.check_operator(registry, "my_silu")` runs the harness every built-in passes: each example resolves identically in both frontends, round-trips through JSON, builds, runs forward and backward on every available device, and matches the operator's `reference=` when it declares one.
 
 ## Experiment with less boilerplate
 
