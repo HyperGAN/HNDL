@@ -416,7 +416,7 @@ generator = network_file(
 
 File loading reads bounded UTF-8 text and uses the same declarative parser as `network(...)`. There are no imports, attribute lookups, loops, or arbitrary function calls in configs. Calls identify operations already registered by your application. A config cannot register or import an implementation.
 
-The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader applies source, parser, graph, and model-size limits and parses all declarative input in an isolated worker. Even AST parsing can exhaust resources, so syntax restrictions alone are insufficient. See the [loading and trust contract](https://hypergan.github.io/HNDL/SPEC/#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
+The loader translates an explicitly allowed subset of Python's AST into graph data. It never executes config code with `eval` or `exec`, and invalid input never falls back to native Python. The loader parses in process, bounds source size and nesting before parsing so pathological input fails with an `HNDLError` instead of a crash, and bounds graph and model size. See the [loading and trust contract](https://hypergan.github.io/HNDL/SPEC/#loading-limits-and-trust-boundaries). Registered implementations remain trusted application code.
 
 ## Register your own operation
 

@@ -22,6 +22,11 @@ _PORT_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 _BATCH_MULTIPLE = re.compile(r"([1-9][0-9]{0,6})\*B\Z")
 
 
+_CORRUPTED = ("Saved plan is corrupted or was edited by hand: its {field} does not match its contents. "
+              "Restore the file, or re-resolve the plan from its source; to change a plan, edit it in "
+              "Python and save it with to_json().")
+
+
 def batch_multiple(value):
     """How many plan batches a symbolic batch entry stands for, or ``None``.
 
@@ -354,8 +359,8 @@ class ResolvedPlan(Immutable):
 
     @classmethod
     def from_json(cls, source, *, registry=None, limits=None):
-        if not isinstance(source, str) or len(source.encode("utf-8")) > 16 * 1024 * 1024:
-            raise HNDLError("E_RESOURCE", "Saved plan must be a JSON string of at most 16 MiB")
+        if not isinstance(source, str):
+            raise HNDLError("E_SCHEMA", "Saved plan must be a JSON string")
         def unique_pairs(pairs):
             result = {}
             for key, value in pairs:
@@ -375,16 +380,15 @@ class ResolvedPlan(Immutable):
             if (type(data["schema_version"]) is not int or data["schema_version"] != 1
                     or type(data["resolution_version"]) is not int or data["resolution_version"] != 1):
                 raise HNDLError("E_STATE_VERSION", "Expected plan schema 1 and resolution version 1")
+            # The digests detect corruption and hand edits; they are not a
+            # signature. Consistency with the operators is checked below.
             artifact = data.pop("artifact_digest")
             if artifact != digest(data):
-                raise HNDLError("E_INTEGRITY", "Saved plan artifact digest does not match its contents")
+                raise HNDLError("E_INTEGRITY", _CORRUPTED.format(field="artifact_digest"))
             semantic = data.pop("semantic_digest")
-            from .resolver import _limits
             serialized_nodes = data.pop("nodes")
             if not isinstance(serialized_nodes, list):
                 raise HNDLError("E_SCHEMA", "Saved nodes must be a list")
-            if len(serialized_nodes) > _limits(limits)["max_nodes"]:
-                raise HNDLError("E_RESOURCE", "Saved plan exceeds max_nodes")
             required_node_fields = {"id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
                                     "initialization", "trainability", "source", "provenance"}
             if any(type(item) is not dict or set(item) != required_node_fields for item in serialized_nodes):
@@ -395,7 +399,7 @@ class ResolvedPlan(Immutable):
                     data[f"named_{key}"] = _saved_ports(data.pop(key), key, fields)
             plan = cls(nodes=nodes, registry=registry, **data)
             if semantic != plan.semantic_digest:
-                raise HNDLError("E_INTEGRITY", "Saved plan semantic digest does not match its contents")
+                raise HNDLError("E_INTEGRITY", _CORRUPTED.format(field="semantic_digest"))
             from .resolver import validate_concrete_plan
             return validate_concrete_plan(plan, registry=registry, limits=limits)
         except HNDLError:

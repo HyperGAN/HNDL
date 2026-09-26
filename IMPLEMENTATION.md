@@ -43,10 +43,10 @@ and the [authored networks](docs/networks.md) are generated from the code.
 
 ## Runtime and operation arguments
 
-The supported platform is Linux, on Python 3.11–3.14. Config parsing uses a
-Python 3.11 grammar with an explicit AST allowlist in an isolated Linux worker.
-Unsupported platforms fail instead of falling back to in-process parsing.
-Native authoring executes trusted Python; it is not sandboxed.
+The tested platform is Linux, on Python 3.11–3.14. Config parsing uses a
+Python 3.11 grammar with an explicit AST allowlist, in process; it compiles and
+executes nothing and does not depend on the platform. Native authoring executes
+trusted Python; it is not sandboxed.
 
 The backend requires PyTorch 2.6 or newer in the 2.x series. Tensors have
 rank two `[B, F]`, rank three `[B, T, D]` (a sequence of `T` positions with
@@ -85,18 +85,27 @@ resolution, the one documented exception to allocation-free resolution.
 
 ## Loading and allocation limits
 
-Both string and file loading use the same parser worker. The fixed parser
-limits are 64 KiB of UTF-8 source, 4,096 lines, 16,384 AST nodes, nesting depth
-96, 1,024 items per literal container, 16 KiB per string literal, and 256 bits
-per integer literal. Worker address space is capped at 256 MiB and CPU time
-at two seconds; the parent also enforces a wall-clock timeout. The worker
-protocol is bounded at 2 MiB. Parsing never invokes `eval`, `exec`, or a
-configuration-provided import or callback.
+Both string and file loading use the same in-process parser
+(`hndl/_parser.py`). It bounds source at 64 KiB of UTF-8; operator argument
+schemas bound literal values. On CPython 3.11–3.13, `ast.parse` of a few
+thousand chained operators (`-----1`, `relu()()()`, `lambda: lambda: ...`)
+exhausts a small thread stack and the process dies with SIGSEGV rather than
+raising, so before parsing the loader screens the token stream: more than 50
+levels of bracket nesting fails with `E_RESOURCE`, and more than 32 Python
+operators or keywords (valid configs use none) with `E_SYNTAX`. With the
+screen, every adversarial source tried at the size cap parses or fails with
+an `HNDLError` in a 256 KiB thread on 3.11–3.14, and the test suite keeps a
+set of them. Parsing never invokes `compile`, `eval`, `exec`, or a
+configuration-provided import or callback. Each statement kind is one handler
+in the parser's `Validator.STATEMENTS` and one in the interpreter's
+`_Interpreter.STATEMENTS` (`hndl/config.py`).
 
 The resolver and builder additionally bound graph size, dimensions, element
 counts, and registered parameter/buffer storage. Defaults are 4,096 nodes,
 16,384 input edges, 1,048,576 per dimension, 268,435,456 elements per
-example, 1 GiB of registered state, and 256 solver iterations. Pass a
+example, 64 GiB of registered state, and 256 solver iterations. Each stops a
+real failure (a runaway graph, a typo that asks for a huge tensor or model, a
+relation that never settles) rather than budgeting ordinary networks. Pass a
 `limits` dictionary to resolution or construction to override these limits
 explicitly; keys are `max_nodes`, `max_edges`, `max_dimension`,
 `max_elements`, `max_state_bytes`, and `max_iterations`. Storage is measured
@@ -157,9 +166,12 @@ Schema 1 uses sorted JSON object keys, compact separators, UTF-8 without ASCII
 escaping, arrays for tuples, finite numbers, and SHA-256 digests. Node order,
 identities, arguments, shapes, dtypes, initialization, and trainability
 participate in the semantic digest. Source/frontend metadata and argument
-provenance affect the artifact digest but not the semantic digest. Plan JSON
-is limited to 16 MiB. Restoring arbitrary third-party artifacts is not the
-same isolation boundary as loading declarative source.
+provenance affect the artifact digest but not the semantic digest. The
+digests detect corruption and hand edits. Restoring re-resolves the saved
+arguments and fails with a per-node list of mismatches; a plan missing only an
+operator default or a dimension-bound argument loads completed, with a warning
+(SPEC §12). Restoring arbitrary third-party artifacts is not the same boundary
+as loading declarative source.
 
 ## Construction settings
 

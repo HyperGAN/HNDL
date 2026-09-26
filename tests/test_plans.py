@@ -11,7 +11,7 @@ import pytest
 
 from torch import nn
 
-from hndl import Registry
+from hndl import Registry, resolve
 from hndl.errors import HNDLError
 from hndl.resolver import resolve_graph, validate_concrete_plan
 from hndl.types import Graph, Node, ResolvedPlan, canonical, digest
@@ -101,11 +101,29 @@ def test_rehashed_forged_plan_rejected(field, value):
         ResolvedPlan.from_json(rehash(data))
 
 
-def test_persisted_omission_cannot_be_silently_reinferred():
-    data = json.loads(mlp_plan().to_json())
+def test_missing_arguments_the_plan_determines_are_filled_with_a_warning():
+    # A plan written before an operator gained a defaulted argument, or one
+    # whose dimension-bound argument is readable off its saved port shapes,
+    # loads completed rather than being refused.
+    original = mlp_plan()
+    data = json.loads(original.to_json())
+    del data["nodes"][0]["args"]["bias"]
     del data["nodes"][1]["args"]["out_features"]
-    with pytest.raises(HNDLError, match="E_INTEGRITY"):
+    with pytest.warns(UserWarning) as caught:
+        restored = ResolvedPlan.from_json(rehash(data))
+    message = str(caught[0].message)
+    assert "node hidden: filled bias=True (operator default)" in message
+    assert "node head: filled out_features=2 (dimension D_out of a saved port)" in message
+    assert restored.to_json() == original.to_json()
+
+
+def test_missing_arguments_only_a_search_would_choose_are_refused_with_a_diff():
+    plan = resolve("conv(8, kernel_size=3)", input_shape=("B", 3, 8, 8), output_shape=("B", 8, 6, 6))
+    data = json.loads(plan.to_json())
+    del data["nodes"][0]["args"]["in_channels"]
+    with pytest.raises(HNDLError, match="E_INTEGRITY") as refused:
         ResolvedPlan.from_json(rehash(data))
+    assert "node n0: in_channels is missing and would be chosen again as 3 (inferred)" in str(refused.value)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -145,8 +163,9 @@ def test_custom_plan_requires_explicit_exact_registration():
 def test_validation_rejects_changed_shape_before_backend_build():
     plan = mlp_plan()
     forged = replace(plan, nodes=(replace(plan.nodes[0], output_shapes={"out": ("B", 5)}), plan.nodes[1]))
-    with pytest.raises(HNDLError, match="E_INTEGRITY"):
+    with pytest.raises(HNDLError, match="E_INTEGRITY") as refused:
         validate_concrete_plan(forged)
+    assert "node hidden: output out is saved as [B, 5] but the equations give [B, 4]" in str(refused.value)
 
 
 def test_fresh_process_restore_without_author_code(tmp_path):

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **Config parsing runs in process.** The AST allowlist is unchanged and source
+  is still never compiled or executed, but the `python -I -S` worker, its JSON
+  wire protocol and its limits are gone. Parsing a small config drops from
+  about 32 ms to under 0.2 ms, and it no longer requires Linux. Source stays
+  capped at 64 KiB. Before `ast.parse` runs, the token stream is screened for
+  bracket nesting past 50 levels and more than 32 Python operators or keywords
+  (valid configs use none), because on CPython 3.11–3.13 deeply chained
+  expressions crash `ast.parse` on a small thread stack instead of raising;
+  such input now fails with `E_SYNTAX` or `E_RESOURCE`. The per-literal,
+  line-count, AST-node and integer-bit limits are dropped: the source cap and
+  each operator's argument schema already bound those values.
+- **Restoring a plan explains a mismatch, and fills values the plan already
+  determines.** `E_INTEGRITY` from revalidation lists every differing port
+  shape and argument per node. A plan missing only an operator default (saved
+  before the operator gained that argument, like `pretrained` plans from before
+  `layers=`) or an argument bound to a saved port dimension now loads completed,
+  with a warning naming what was filled and the new semantic digest. A missing
+  value only a policy or relation search would choose is still refused. Digest
+  mismatches now say the file is corrupted or was edited by hand.
+- The default `max_state_bytes` rises from 1 GiB to 64 GiB. The old default
+  refused to build a GPT-2-medium-sized network (405M parameters, 1.6 GB); the
+  new one still catches a typo that asks for a huge model before allocating.
+  `ResolvedPlan.from_json` drops its 16 MiB input cap and duplicate `max_nodes`
+  check; revalidation still applies `max_nodes`.
+
 - Add `broadcast_mul`, `coordinate_grid`, `fourier_features`, and `grid_sample`
   for style-conditioned coordinate renderers composed in HNDL. Fourier tables
   and coordinate grids are persistent buffers; sampling follows PyTorch semantics.

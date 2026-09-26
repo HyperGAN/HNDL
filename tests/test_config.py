@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -7,7 +8,6 @@ import pytest
 
 from hndl import HNDLError, Registry, ResolvedPlan, ops, resolve, resolve_callable
 from hndl.config import MAX_SOURCE_BYTES, _parse, capture_config, resolve_file
-import hndl.config as config
 
 
 def capture(source, **kwargs):
@@ -116,11 +116,9 @@ def test_config_never_executes_source_or_falls_back(tmp_path):
         capture(lambda x: x)
 
 
-def test_limits_fail_before_parent_allocation_or_unbounded_loading(tmp_path, monkeypatch):
+def test_limits_fail_before_parent_allocation_or_unbounded_loading(tmp_path):
     with pytest.raises(HNDLError, match="E_RESOURCE"):
         capture("#" * (MAX_SOURCE_BYTES + 1))
-    with pytest.raises(HNDLError, match="E_RESOURCE"):
-        capture("\n" * 4096)
     with pytest.raises(HNDLError, match="E_RESOURCE"):
         capture("linear(" + "9" * 100 + ")")
     with pytest.raises(HNDLError, match="E_RESOURCE"):
@@ -135,44 +133,81 @@ def test_limits_fail_before_parent_allocation_or_unbounded_loading(tmp_path, mon
         resolve_file(invalid, input_shape=("B", 128), output_shape=("B", 10))
 
 
-def test_linux_isolation_and_no_unbounded_fallback(monkeypatch):
-    monkeypatch.setattr(config.sys, "platform", "darwin")
-    with pytest.raises(HNDLError, match="Linux"):
-        capture("relu()")
+def test_parsing_runs_in_process_on_any_platform(monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Parsing must not start a process")
+
+    monkeypatch.setattr(subprocess, "run", unexpected)
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert len(capture("relu()").nodes) == 1
 
 
-def test_worker_invocation_is_isolated_for_strings_and_output_is_checked(monkeypatch):
-    original = subprocess.run
-    commands = []
+_CAP = MAX_SOURCE_BYTES - 64
+# Unscreened, most of these make ast.parse on CPython 3.11-3.13 overflow a
+# 512 KiB thread stack and kill the process with SIGSEGV.
+PATHOLOGICAL = [
+    "linear(" + "-" * _CAP + "1)",
+    "linear(" + "~" * _CAP + "1)",
+    "linear(" + "not " * (_CAP // 4) + "1)",
+    "linear(" + "(" * (_CAP // 2) + "1" + ")" * (_CAP // 2) + ")",
+    "relu" + "()" * (_CAP // 2),
+    '"a"' + "()" * (_CAP // 2),
+    "x" + ".a" * (_CAP // 2),
+    "x" + "[0]" * (_CAP // 3),
+    "linear(1" + "+1" * (_CAP // 2) + ")",
+    "linear(2" + "**2" * (_CAP // 3) + ")",
+    "linear(" + "1 if 1 else " * (_CAP // 12) + "1)",
+    "linear(" + "lambda:" * (_CAP // 7) + "1)",
+    "linear(" + "lambda a, b=" * (_CAP // 12) + "1)",
+    "linear(" + "[" * 49 + "-" * 32 + "1" + "]" * 49 + ")",
+    "linear(" + "[" * 49 + "lambda:" * 32 + "1" + "]" * 49 + ")",
+    "".join(" " * i + "if 1:\n" for i in range(99)) + " " * 99 + "relu()\n",
+]
 
-    def observed(command, **kwargs):
-        commands.append(command)
-        return original(command, **kwargs)
 
-    monkeypatch.setattr(config.subprocess, "run", observed)
-    capture("relu()")
-    assert commands[0][:3] == [sys.executable, "-I", "-S"]
-    assert Path(commands[0][3]).name == "_parser_worker.py"
-
-    def malformed(command, **kwargs):
-        kwargs["stdout"].write(json.dumps({"ok": True, "program": {"bad": 1}}).encode())
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(config.subprocess, "run", malformed)
-    with pytest.raises(HNDLError, match="E_RESOURCE"):
-        capture("relu()")
+@pytest.mark.parametrize("source", PATHOLOGICAL)
+def test_pathological_nesting_at_the_size_cap_fails_cleanly(source):
+    assert len(source.encode()) <= MAX_SOURCE_BYTES
+    with pytest.raises(HNDLError, match="E_SYNTAX|E_RESOURCE"):
+        capture(source)
 
 
-def test_timeout_and_worker_failure_are_explicit(monkeypatch):
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(args[0], 5)
+def test_pathological_nesting_fails_cleanly_on_a_small_thread_stack():
+    # A crash here would take the test process down, so run it in a child.
+    script = '''
+import json, sys, threading
+from hndl import HNDLError
+from hndl.config import _parse
+aliases, outcomes = ("linear", "relu"), []
+def run():
+    for source in json.load(sys.stdin):
+        try:
+            _parse(source, aliases)
+            outcomes.append("parsed")
+        except HNDLError as exc:
+            outcomes.append(exc.code)
+threading.stack_size(256 * 1024)
+thread = threading.Thread(target=run)
+thread.start()
+thread.join()
+print(json.dumps(outcomes))
+'''
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+    result = subprocess.run([sys.executable, "-c", script], input=json.dumps(PATHOLOGICAL), env=env,
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert set(json.loads(result.stdout)) <= {"E_SYNTAX", "E_RESOURCE"}
 
-    monkeypatch.setattr(config.subprocess, "run", timeout)
-    with pytest.raises(HNDLError, match="wall-time"):
-        capture("relu()")
-    monkeypatch.setattr(config.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], -9))
-    with pytest.raises(HNDLError, match="E_RESOURCE"):
-        capture("relu()")
+
+def test_valid_configs_are_not_limited_by_the_nesting_screen():
+    many = "\n".join(f"h{i} = linear(64, name='l{i}', init={{'weight': normal(std=0.02), 'bias': -0.5}})"
+                     for i in range(300))
+    assert len(_parse(many, Registry.builtins().aliases)["statements"]) == 300
+    negatives = "reshape(" + repr(tuple([-1] * 2000)) + ")"
+    assert len(_parse(negatives, Registry.builtins().aliases)["statements"]) == 1
+    nested = "linear(" + "[" * 40 + "1" + "]" * 40 + ")"
+    assert len(_parse(nested, Registry.builtins().aliases)["statements"]) == 1
 
 
 def test_invalid_ast_and_argument_locations_use_original_source_columns():
