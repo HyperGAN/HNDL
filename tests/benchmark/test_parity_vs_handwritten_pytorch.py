@@ -15,22 +15,43 @@ The comparison is not free of overhead on purpose: ``GraphModule._execute``
 validates every node's shape, dtype and device on the first call for each
 input signature (see ``_run_checked`` in ``src/hndl/torch.py``), which a
 hand-written module never does, and on every later call compares that
-signature before running the modules from a slot-indexed program. The timing
-loop repeats one signature, so it measures the second, cheap path.
-:data:`TOLERANCE` is the generous multiple of hand-written time that overhead is
-allowed to cost. These assertions are meant to fail loudly rather than skip if
-that overhead ever grows unreasonable.
+signature, and every module's ``_parameters``/``_buffers``/``_modules`` with
+the copies recorded when the state last matched the build, before running the
+modules from a slot-indexed program. The timing loop repeats one signature, so
+it measures the second, cheap path. :data:`TOLERANCE` is the multiple of
+hand-written time that overhead is allowed to cost. These assertions are meant
+to fail loudly rather than skip if that overhead ever grows unreasonable.
 
 That overhead is a roughly **constant** cost per forward call — about 2 us per
-call plus well under 1 us per node on this machine, so ~6-9 us for the
+call plus well under 1 us per node on this machine, so ~7-10 us for the
 five-node MLP, independent of batch size — which means the ratio a case
 reports depends on how much arithmetic the batch gives it to amortize against.
 The MLP is timed at batch 256, where the fixed cost was once large; at batch
-32 the same network now measures about 1.15-1.2x. (Before validation moved to
+32 the same network now measures about 1.15-1.25x. (Before validation moved to
 once per signature, every call checked every port and replayed the
 registered-state walk: ~5 us per node after the resolved-shape and
 baked-program caches, ~13 us before them, and batch 32 measured ~1.7x and
-~2.5x respectively.)
+~2.5x respectively.) The registered-state comparison costs ~0.2 us per call for
+the MLP and ~0.5 us for the transformer block.
+
+Measured ratios, 16 runs of ``python -m pytest -m benchmark tests/benchmark``
+on a 24-core CPU machine shared with other work (load average 3-25), torch
+2.14, Python 3.14, 2026-09-26:
+
+===========================  =============
+case                         ratio range
+===========================  =============
+mlp (batch 256)              1.00x - 1.13x
+conv_stack (batch 16)        0.97x - 1.17x
+transformer_block (batch 8)  1.10x - 1.24x
+===========================  =============
+
+:data:`TOLERANCE` sits at 1.5x, about 20% over the worst of those. The
+convolution case is almost all arithmetic, so its ratio is the noisiest: one
+extra run of the code before the registered-state comparison measured it at
+1.91x on the busy machine. A failure there alone, on a loaded machine, is
+worth re-running before it is believed; a failure of the MLP, whose ratio
+barely moves, is not noise.
 
 Run with ``-s`` to see each case's two timings and their ratio.
 """
@@ -46,7 +67,8 @@ from ._timing import format_measurement, measure
 pytestmark = pytest.mark.benchmark
 
 #: hndl's mean forward time may be at most this multiple of hand-written PyTorch's.
-TOLERANCE = 2.0
+#: The worst ratio measured over 16 runs was 1.24x (see the module docstring).
+TOLERANCE = 1.5
 
 DEVICE = "cpu"
 
