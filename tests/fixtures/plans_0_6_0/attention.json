@@ -1,0 +1,15 @@
+{
+  "hndl_version": "0.6.0",
+  "source": "attention(4)\nattention(2, causal=True, rope=True, bias=False)",
+  "input_shape": [
+    "B",
+    8,
+    32
+  ],
+  "output_shape": [
+    "B",
+    8,
+    32
+  ],
+  "plan": "{\"artifact_digest\":\"7a0f5932df9057a89c938c9c176906396eedca8eef51373bcb4a0a7ccf13a9af\",\"dtype\":\"float32\",\"frontend\":\"python_config@1\",\"input_dtype\":\"float32\",\"input_shape\":[\"B\",8,32],\"nodes\":[{\"args\":{\"bias\":true,\"causal\":false,\"dropout\":0.0,\"heads\":4,\"out_bias\":true,\"qkv_bias\":true,\"relative_position_bias\":false,\"rope\":false,\"spatial_shape\":[0,0]},\"id\":\"n0\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",8,32]},\"inputs\":{\"x\":\"input:x\"},\"op\":\"attention@1\",\"output_shapes\":{\"out\":[\"B\",8,32]},\"outputs\":[\"out\"],\"provenance\":{\"bias\":\"operator default\",\"causal\":\"operator default\",\"dropout\":\"operator default\",\"heads\":\"explicit\",\"out_bias\":\"operator default\",\"qkv_bias\":\"operator default\",\"relative_position_bias\":\"operator default\",\"rope\":\"operator default\",\"spatial_shape\":\"operator default\"},\"source\":{\"argument_origins\":{\"bias\":\"operator default\",\"causal\":\"operator default\",\"dropout\":\"operator default\",\"heads\":\"explicit\",\"out_bias\":\"operator default\",\"qkv_bias\":\"operator default\",\"relative_position_bias\":\"operator default\",\"rope\":\"operator default\",\"spatial_shape\":\"operator default\"},\"column\":1,\"line\":1},\"trainability\":{\"default\":null,\"overrides\":{}}},{\"args\":{\"bias\":false,\"causal\":true,\"dropout\":0.0,\"heads\":2,\"out_bias\":true,\"qkv_bias\":true,\"relative_position_bias\":false,\"rope\":true,\"spatial_shape\":[0,0]},\"id\":\"n1\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",8,32]},\"inputs\":{\"x\":\"node:n0/out\"},\"op\":\"attention@1\",\"output_shapes\":{\"out\":[\"B\",8,32]},\"outputs\":[\"out\"],\"provenance\":{\"bias\":\"explicit\",\"causal\":\"explicit\",\"dropout\":\"operator default\",\"heads\":\"explicit\",\"out_bias\":\"operator default\",\"qkv_bias\":\"operator default\",\"relative_position_bias\":\"operator default\",\"rope\":\"explicit\",\"spatial_shape\":\"operator default\"},\"source\":{\"argument_origins\":{\"bias\":\"explicit\",\"causal\":\"explicit\",\"dropout\":\"operator default\",\"heads\":\"explicit\",\"out_bias\":\"operator default\",\"qkv_bias\":\"operator default\",\"relative_position_bias\":\"operator default\",\"rope\":\"explicit\",\"spatial_shape\":\"operator default\"},\"column\":1,\"line\":2},\"trainability\":{\"default\":null,\"overrides\":{}}}],\"output_ref\":\"node:n1/out\",\"output_shape\":[\"B\",8,32],\"resolution_version\":1,\"schema_version\":1,\"semantic_digest\":\"97b2f68f0b7c984cfb52ebfbc48d6ca3e1de17027d0afab2a1d094bc51b41201\"}"
+}

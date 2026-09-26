@@ -1,0 +1,13 @@
+{
+  "hndl_version": "0.6.0",
+  "source": "linear(8)\nrelu()\nlinear()",
+  "input_shape": [
+    "B",
+    4
+  ],
+  "output_shape": [
+    "B",
+    2
+  ],
+  "plan": "{\"artifact_digest\":\"1ad7ab5894c19cb55a923ce951d6953e4053bd69027a33854251009a98b1b4cb\",\"dtype\":\"float32\",\"frontend\":\"python_config@1\",\"input_dtype\":\"float32\",\"input_shape\":[\"B\",4],\"nodes\":[{\"args\":{\"bias\":true,\"in_features\":4,\"out_features\":8,\"spectral_norm\":false},\"id\":\"n0\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",4]},\"inputs\":{\"x\":\"input:x\"},\"op\":\"linear@1\",\"output_shapes\":{\"out\":[\"B\",8]},\"outputs\":[\"out\"],\"provenance\":{\"bias\":\"operator default\",\"in_features\":\"inferred\",\"out_features\":\"explicit\",\"spectral_norm\":\"operator default\"},\"source\":{\"argument_origins\":{\"bias\":\"operator default\",\"out_features\":\"explicit\",\"spectral_norm\":\"operator default\"},\"column\":1,\"line\":1},\"trainability\":{\"default\":null,\"overrides\":{}}},{\"args\":{},\"id\":\"n1\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",8]},\"inputs\":{\"x\":\"node:n0/out\"},\"op\":\"relu@1\",\"output_shapes\":{\"out\":[\"B\",8]},\"outputs\":[\"out\"],\"provenance\":{},\"source\":{\"argument_origins\":{},\"column\":1,\"line\":2},\"trainability\":{\"default\":null,\"overrides\":{}}},{\"args\":{\"bias\":true,\"in_features\":8,\"out_features\":2,\"spectral_norm\":false},\"id\":\"n2\",\"initialization\":{\"kind\":\"torch_default@1\",\"overrides\":{}},\"input_shapes\":{\"x\":[\"B\",8]},\"inputs\":{\"x\":\"node:n1/out\"},\"op\":\"linear@1\",\"output_shapes\":{\"out\":[\"B\",2]},\"outputs\":[\"out\"],\"provenance\":{\"bias\":\"operator default\",\"in_features\":\"inferred\",\"out_features\":\"inferred\",\"spectral_norm\":\"operator default\"},\"source\":{\"argument_origins\":{\"bias\":\"operator default\",\"spectral_norm\":\"operator default\"},\"column\":1,\"line\":3},\"trainability\":{\"default\":null,\"overrides\":{}}}],\"output_ref\":\"node:n2/out\",\"output_shape\":[\"B\",2],\"resolution_version\":1,\"schema_version\":1,\"semantic_digest\":\"bdaf5d0921984d25948920814d9363c27c67b276055fde29c01850438bd7230b\"}"
+}
