@@ -394,7 +394,8 @@ def test_deepcopy_preserves_behavior_and_shares_no_state():
     assert clone.relative_position_bias_table is not module.relative_position_bias_table
     assert clone.relative_position_index is not module.relative_position_index
     with torch.no_grad():
-        clone.relative_position_bias_table.add_(1.0)
+        # Perturb entries independently: a uniform shift cancels in the softmax.
+        clone.relative_position_bias_table.normal_(generator=torch.Generator().manual_seed(0))
     assert not torch.allclose(clone(x), module(x))
 
 
