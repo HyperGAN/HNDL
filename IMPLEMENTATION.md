@@ -83,12 +83,18 @@ traceback, that names the node, its operation and source line, the tensors it
 received, and any registered-state change that explains it. Edits PyTorch
 runs no registration hook for --- `del` of a registered name, assigning `None`
 over a registered parameter, writing `_parameters`/`_buffers`/`_modules`
-directly --- are caught on the next call as well: each call compares those
-mappings, in one C-level tuple comparison, with copies taken when the state
-last matched the build. State removed or added that way is an `E_RUNTIME`
-naming the node; a tensor swapped in under the same name re-checks every port,
-so `torch.func.functional_call`, which swaps tensors in exactly that way, runs
-the checked program on every call.
+directly --- are caught on the next call as well when they remove an entry,
+set one to `None`, add one, or replace a submodule: each call compares, in C,
+which names those mappings hold and which of them are `None`, and which
+submodules, with a record taken when the state last matched the build. That is
+an `E_RUNTIME` naming the node. A tensor swapped in under a registered name is
+not a change and stays on the unchecked path, like an in-place update, so
+`torch.func.functional_call`, which swaps tensors in that way on every call,
+runs no extra checks; the record holds no tensors, so nothing a functional
+call passed in outlives it. Not caught: a whole mapping replaced
+(`module._parameters = {...}`), a mapping reordered, one name removed and
+another added in the same `_parameters` or `_buffers` between two calls, and
+a submodule swapped for one whose `__eq__` says it equals the old one.
 
 Built-in unary operations take an optional leading tensor or `x=`. Custom
 unary operations use their declared input-port keyword. Every operator's

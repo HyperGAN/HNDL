@@ -877,28 +877,6 @@ def test_a_parameter_set_to_none_is_reported_on_the_next_call_and_can_be_repaire
     assert checks == []  # back on the unchecked path
 
 
-def test_a_tensor_replaced_without_a_hook_revalidates_every_port():
-    """Same name, different tensor: no state error, but nothing validated is trusted."""
-    model = _mlp(device="cpu")
-    checks = _count_checks(model)
-    x = torch.randn(3, 4)
-    model(x)
-    head = model["head"]
-    head._parameters["weight"] = nn.Parameter(torch.zeros(2, 5))
-    head._parameters["bias"] = nn.Parameter(torch.ones(2))
-    checks.clear()
-    torch.testing.assert_close(model(x), torch.ones(3, 2))
-    assert checks
-    checks.clear()
-    model(x)
-    assert checks == []
-    head._parameters["weight"] = nn.Parameter(torch.zeros(3, 5))
-    head._parameters["bias"] = nn.Parameter(torch.ones(3))
-    with pytest.raises(HNDLError, match=r"^E_RUNTIME .*linear 'head' output 'out': expected shape \[B=3, 2\], "
-                                        r"got \[3, 3\]"):
-        model(x)
-
-
 def test_a_hookless_edit_during_a_fast_call_is_reported_on_the_next_call():
     registry = Registry.builtins()
 
@@ -926,19 +904,73 @@ def test_a_hookless_edit_during_a_fast_call_is_reported_on_the_next_call():
         model(x)
 
 
-def test_functional_call_runs_the_checked_program():
-    """``torch.func.functional_call`` swaps tensors in without a hook: each call is fully checked."""
+def test_a_tensor_swapped_in_under_its_name_stays_on_the_unchecked_path():
+    """``torch.func.functional_call`` swaps fresh tensors in on every call, without a hook.
+
+    A swap registers no new name, so it is not a registered-state change: each
+    call runs the unchecked program, as it does after an in-place update.
+    """
     model = _mlp(device="cpu")
-    x = torch.randn(3, 4)
-    expected = model(x)
     doubled = copy.deepcopy(model)
     with torch.no_grad():
         for parameter in doubled.parameters():
             parameter.mul_(2)
-    swapped = {name: 2 * parameter.detach() for name, parameter in model.named_parameters()}
-    for _ in range(2):
+    checks = _count_checks(model)
+    x = torch.randn(3, 4)
+    expected = model(x)
+    doubled(x)
+    checks.clear()
+    for _ in range(3):
+        swapped = {name: 2 * parameter.detach() for name, parameter in model.named_parameters()}
         torch.testing.assert_close(torch.func.functional_call(model, swapped, (x,)), doubled(x))
+        torch.testing.assert_close(model(x), expected)
+    head = model["head"]
+    head._parameters["weight"] = nn.Parameter(torch.zeros(2, 5))
+    head._parameters["bias"] = nn.Parameter(torch.ones(2))
+    torch.testing.assert_close(model(x), torch.ones(3, 2))
+    assert checks == []
+
+
+def _hypernetwork_weights(model):
+    """Weights computed from other tensors, so each carries an autograd graph."""
+    return {name: parameter * 2 for name, parameter in model.named_parameters()}
+
+
+@pytest.mark.parametrize("transform", ["plain", "grad", "vmap"])
+def test_deepcopy_after_functional_call(transform):
+    """Nothing a functional call swapped in is kept, so it never reaches ``copy.deepcopy``.
+
+    Non-leaf, grad-tracking and vmap-batched tensors all refuse deepcopy.
+    """
+    model = _stateful(device="cpu").eval()
+    x = torch.randn(3, 4)
+    expected = model(x)
+    if transform == "plain":
+        torch.func.functional_call(model, _hypernetwork_weights(model), (x,))
+    elif transform == "grad":
+        params = {name: parameter.detach() for name, parameter in model.named_parameters()}
+        torch.func.grad(lambda p: torch.func.functional_call(model, p, (x,)).sum())(params)
+    else:
+        stacked = {name: torch.stack([parameter.detach()] * 4) for name, parameter in model.named_parameters()}
+        assert torch.func.vmap(lambda p: torch.func.functional_call(model, p, (x,)))(stacked).shape == (4, 3, 2)
+    clone = copy.deepcopy(model)
+    torch.testing.assert_close(clone(x), expected)
     torch.testing.assert_close(model(x), expected)
+
+
+def test_functional_call_keeps_no_generated_weights_alive():
+    model = _mlp(device="cpu")
+    x = torch.randn(3, 4)
+    model(x)
+    source = torch.randn(64, 64, requires_grad=True)
+    intermediate = source * 1.0
+    alive = weakref.ref(intermediate)
+    scale = (intermediate * intermediate).sum() * 0 + 1  # saves ``intermediate`` for backward
+    torch.func.functional_call(model, {name: parameter.detach() * scale
+                                       for name, parameter in model.named_parameters()}, (x,))
+    del source, intermediate, scale
+    gc.collect()
+    assert alive() is None
 
 
 def test_a_cast_releases_the_tensors_it_replaced():

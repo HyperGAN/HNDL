@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 import copy
 import itertools
+import operator
 from types import MappingProxyType
 import weakref
 
@@ -32,9 +33,6 @@ _UNSET = object()
 #: The resolved-shape cache before any call: batch, dtype, then three programs.
 _UNCOMPILED = (_UNSET, None, (), (), ())
 
-#: Recorded stores that never equal the live ones: the next call re-checks state.
-_NO_STORES = ((), None)
-
 #: How many distinct validated input signatures a graph remembers before it
 #: forgets them all and starts again; bounds the cache under varying batch sizes.
 _MAX_SIGNATURES = 64
@@ -58,10 +56,11 @@ _autocast_enabled = getattr(torch._C, "_is_any_autocast_enabled", None) or (
 #
 # PyTorch runs no hook for three edits: ``del`` of a registered name, assigning
 # ``None`` over a registered *parameter*, and writing ``_parameters``,
-# ``_buffers`` or ``_modules`` directly. Each graph therefore also keeps a
-# copy of each of those dictionaries as it stood when its state last matched
-# the build, and every call compares the live dictionaries with the copies in
-# one tuple comparison (see ``GraphModule._record_stores``).
+# ``_buffers`` or ``_modules`` directly. Each graph therefore also records
+# what those dictionaries held when its state last matched the build ---
+# which names, which of them were ``None``, and which submodules --- and
+# every call compares that record with the live dictionaries in C (see
+# ``GraphModule._record_stores``).
 #
 # Keyed by ``id`` rather than held in a WeakSet so that a module defining
 # ``__eq__`` without ``__hash__`` can still be watched; an entry disappears
@@ -71,6 +70,10 @@ _ticks = itertools.count(1)
 _watch_generation = 0
 
 _Tensor = torch.Tensor
+_chain = itertools.chain.from_iterable
+_is = operator.is_
+#: Paired with dictionary values by ``map(_is, ...)``; never exhausted.
+_NONES = itertools.repeat(None)
 
 
 def _registration_hook(module, name, value):
@@ -198,14 +201,23 @@ class GraphModule(nn.Module):
     What was validated is forgotten when it may no longer hold: moving or
     casting the module (``.to()``, ``.cuda()``, ``.double()``, ...),
     registering a parameter, buffer or submodule on any module in the graph,
-    and changing an entry of any such module's ``_parameters``, ``_buffers`` or
-    ``_modules`` in any other way (``del``, ``module.weight = None``, a direct
-    write) all re-check the registered state before the next call and
-    revalidate every port on it. An exception raised inside a node's module propagates
-    as itself --- same type, message and traceback --- with one note naming the
-    node, its operation and source line, the tensors it received, and any
-    change to registered state that explains it. ``E_RUNTIME`` is kept for
-    what HNDL's own checks find.
+    and, on any such module, removing an entry of ``_parameters``,
+    ``_buffers`` or ``_modules``, setting one to ``None``, adding one, or
+    replacing a submodule (``del``, ``module.weight = None``, a direct write)
+    all re-check the registered state before the next call and revalidate
+    every port on it. A tensor swapped in under a registered name without a
+    hook, as ``torch.func.functional_call`` does, is not a change: it runs on
+    the unchecked path, like a parameter updated in place. Not detected
+    either: replacing a whole ``_parameters``/``_buffers``/``_modules``
+    dictionary, reordering one, removing one name and adding another in the
+    same ``_parameters`` or ``_buffers`` between two calls, and swapping in a
+    submodule whose ``__eq__`` says it equals the old one.
+
+    An exception raised inside a node's module propagates as itself --- same
+    type, message and traceback --- with one note naming the node, its
+    operation and source line, the tensors it received, and any change to
+    registered state that explains it. ``E_RUNTIME`` is kept for what HNDL's
+    own checks find.
     """
 
     def __init__(self, plan, modules, device, receipt, port_orders):
@@ -281,6 +293,8 @@ class GraphModule(nn.Module):
         result = type(self).__new__(type(self))
         memo[id(self)] = result
         for name, value in self.__dict__.items():
+            if name == "_stores":
+                continue  # rebuilt below from the copy's own modules
             # The architecture lock guards attribute writes; this rebuilds the
             # instance dictionary directly, exactly as unpickling would.
             object.__setattr__(result, name, value if name in SHARED_METADATA
@@ -320,11 +334,8 @@ class GraphModule(nn.Module):
         # Every validated signature named the old device and dtype. A move is
         # also a natural point to re-check registered state in full, which
         # catches the edits no registration hook reports (see _state_seen).
-        # Dropping the recorded stores also releases the tensors ``_apply``
-        # just replaced, rather than holding them until the next call.
         self._validated = {}
         self._state_seen = None
-        self._stores = _NO_STORES
         return self
 
     def _effective_dtype(self, dtype):
@@ -487,28 +498,35 @@ class GraphModule(nn.Module):
         return True
 
     def _record_stores(self):
-        """Every module's ``_parameters``, ``_buffers`` and ``_modules``, and a copy of each.
+        """What each call compares to catch the registered-state edits no hook reports.
 
-        Taken whenever the registered state has just been found to match the
-        build. ``stores == copies`` is then one comparison, run in C at about
-        10-17 ns per dictionary, that catches the edits no registration hook
-        reports: a key added, removed or set to ``None``, or a value replaced
-        by another object, in any of those dictionaries. Identity-only checks
-        written in Python (``map(operator.is_, ...)`` over the values) cost ten
-        times as much.
+        Returns ``(same, copies, views, shape)``, taken whenever the
+        registered state has just been found to match the build. ``same``
+        holds every module's ``_modules`` and every ``_parameters`` or
+        ``_buffers`` that is empty, and ``copies`` a copy of each, so
+        ``same == copies`` catches a submodule added, removed, set to ``None``
+        or replaced, and any entry added to an empty dictionary, in C at about
+        10-15 ns per dictionary.
 
-        Values are compared by identity first, so an unchanged store never
-        touches its tensors. A replaced tensor is compared elementwise with
-        the one it replaced, once, before the state is recorded again: for
-        tensors of more than one element that raises (``_execute`` counts it
-        as a change); two single-element tensors holding the same value
-        compare equal, the one replacement this misses. It changes no
-        registered name, so no state check's answer, and only skips
-        re-checking the ports.
+        The non-empty ``_parameters`` and ``_buffers`` are compared by
+        ``shape`` instead: the length of each (``views`` holds their values)
+        followed by whether each value is ``None``. That catches an entry
+        removed, added or set to ``None`` without ever touching a tensor.
+        Copies of these dictionaries would hold their tensors alive, and
+        comparing them would run an elementwise ``==`` whenever a tensor had
+        been swapped in under the same name, as ``torch.func.functional_call``
+        does on every call. A swapped tensor is deliberately not a change: it
+        registers no new name and runs on the unchecked path, as a parameter
+        updated in place does. Neither is a name removed and another added in
+        the same dictionary, a reordered dictionary, or a whole dictionary
+        replaced (``module._parameters = {...}``): the record watches the
+        dictionaries themselves.
         """
-        stores = tuple(store for row in self._state_program
-                       for store in (row[0]._parameters, row[0]._buffers, row[0]._modules))
-        return stores, tuple(dict(store) for store in stores)
+        modules = [row[0] for row in self._state_program]
+        tensor_stores = [store for module in modules for store in (module._parameters, module._buffers)]
+        same = tuple([module._modules for module in modules] + [store for store in tensor_stores if not store])
+        views = tuple([store.values() for store in tensor_stores if store])
+        return same, tuple(map(dict, same)), views, [*map(len, views), *map(_is, _chain(views), _NONES)]
 
     def _state_checked(self, generation):
         """Record that the registered state matched the build at ``generation``."""
@@ -765,17 +783,17 @@ class GraphModule(nn.Module):
             key += (value.shape, value.dtype, value.device)
         return tuple(key)
 
-    def _validate(self, inputs, signature, generation, stores_unchanged=True):
+    def _validate(self, inputs, signature, generation, stores_changed=False):
         """The first call for a signature: check everything, then remember it."""
-        if generation != self._state_seen or not stores_unchanged:
+        if stores_changed or generation != self._state_seen:
             # A parameter, buffer or submodule was registered, removed or
             # replaced on a module of this graph since the last check: confirm
             # the state still matches the build, and forget every validated
             # signature, because a parameter replaced under the same name can
-            # change any shape.
+            # change any shape. The stores are recorded once, after the call.
             self._verify_state("build")
             self._validated = {}
-            self._state_checked(generation)
+            self._state_seen = generation
         outputs = self._run_checked(inputs, compiling=False)
         generation = _watch_generation
         self._verify_state("forward")
@@ -795,13 +813,15 @@ class GraphModule(nn.Module):
             return outputs
         generation = _watch_generation
         signature = self._signature(inputs)
-        stores, recorded = self._stores
+        # _record_stores, compared: submodules and empty stores by identity,
+        # the other stores by length and which values are None.
+        same, copies, views, shape = self._stores
         try:
-            stores_unchanged = stores == recorded
-        except Exception:  # noqa: BLE001 - a replaced tensor compared elementwise
-            stores_unchanged = False
-        if not stores_unchanged or generation != self._state_seen or signature not in self._validated:
-            return self._validate(inputs, signature, generation, stores_unchanged)
+            changed = same != copies or [*map(len, views), *map(_is, _chain(views), _NONES)] != shape
+        except Exception:  # noqa: BLE001 - a submodule's own __eq__ raised
+            changed = True
+        if changed or generation != self._state_seen or signature not in self._validated:
+            return self._validate(inputs, signature, generation, changed)
         padding, program, output_slots = self._fast
         values = [*map(inputs.__getitem__, self._input_names), *padding]
         try:
