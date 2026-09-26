@@ -4,10 +4,13 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
 import copy
+import itertools
 from types import MappingProxyType
+import weakref
 
 import torch
 from torch import nn
+from torch.nn.modules import module as _torch_module
 
 from .errors import HNDLError
 from .settings import MATRIX_SCHEMES
@@ -16,7 +19,8 @@ from .types import batch_multiple, contract_header
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
 SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes",
-                             "_input_names", "_input_dtypes", "_output_dtypes", "_build_dtype",
+                             "_input_names", "_input_set", "_input_dtypes", "_output_dtypes",
+                             "_build_dtype", "_node_labels",
                              "_spec_inputs", "_spec_outputs", "_spec_in", "_spec_out"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
@@ -27,6 +31,94 @@ _UNSET = object()
 
 #: The resolved-shape cache before any call: batch, dtype, then three programs.
 _UNCOMPILED = (_UNSET, None, (), (), ())
+
+#: How many distinct validated input signatures a graph remembers before it
+#: forgets them all and starts again; bounds the cache under varying batch sizes.
+_MAX_SIGNATURES = 64
+
+#: How the note HNDL adds to an exception raised inside a node begins.
+_NOTE_PREFIX = "HNDL:"
+
+_is_compiling = torch.compiler.is_compiling
+# One C call answering "is any autocast region active"; the public query needs
+# a device type per call and costs three times as much.
+_autocast_enabled = getattr(torch._C, "_is_any_autocast_enabled", None) or (
+    lambda: torch.is_autocast_enabled("cpu") or torch.is_autocast_enabled("cuda"))
+
+# Every module inside a built graph is watched. Registering a parameter,
+# buffer or submodule on one --- ``register_*`` or plain attribute assignment,
+# including assigning ``None`` over a registered buffer or submodule ---
+# advances ``_watch_generation``, which is how a graph learns, for the price
+# of one integer comparison per call, that its registered state may have
+# changed. ``itertools.count`` hands out unique values even under concurrent
+# bumps, so a generation observed once is never observed again after a change.
+#
+# PyTorch runs no hook for three edits: ``del`` of a registered name, assigning
+# ``None`` over a registered *parameter*, and writing ``_parameters``,
+# ``_buffers`` or ``_modules`` directly. The first call for every input
+# signature, every ``.to()``/cast, and the failure path of any node that then
+# raises still compare the whole registered state against the build, so those
+# edits are reported there rather than on the next call.
+#
+# Keyed by ``id`` rather than held in a WeakSet so that a module defining
+# ``__eq__`` without ``__hash__`` can still be watched; an entry disappears
+# with its module, before that ``id`` can be reused.
+_watched = weakref.WeakValueDictionary()
+_ticks = itertools.count(1)
+_watch_generation = 0
+
+_Tensor = torch.Tensor
+
+
+def _registration_hook(module, name, value):
+    global _watch_generation
+    if _watched.get(id(module)) is module:
+        _watch_generation = next(_ticks)
+    # Returning None leaves the registration exactly as the caller asked.
+
+
+def _watch(state_program):
+    for row in state_program:
+        _watched[id(row[0])] = row[0]
+
+
+for _register in (_torch_module.register_module_parameter_registration_hook,
+                  _torch_module.register_module_buffer_registration_hook,
+                  _torch_module.register_module_module_registration_hook):
+    _register(_registration_hook)
+del _register
+
+
+def _dtype_text(dtype):
+    return "any" if dtype is None else str(dtype).removeprefix("torch.")
+
+
+def _contract_text(spec, batch):
+    """A compiled contract shape in HNDL notation, batch entries bound: ``[B=32, 64]``."""
+    parts = []
+    for dimension in spec:
+        if type(dimension) is tuple:
+            multiple, text = dimension
+            parts.append(text if multiple is None or batch is None else f"{text}={multiple * batch}")
+        else:
+            parts.append(str(dimension))
+    return "[" + ", ".join(parts) + "]"
+
+
+def _tensor_text(value):
+    if not isinstance(value, torch.Tensor):
+        return type(value).__name__
+    return f"{_shape_text(tuple(value.shape))}:{_dtype_text(value.dtype)} on {value.device}"
+
+
+def _module_kind(module):
+    return "None" if module is None else type(module).__name__
+
+
+def _source_position(node):
+    """The ``(line, column)`` a declarative frontend recorded for a node, if any."""
+    source = node.source if isinstance(node.source, Mapping) else {}
+    return source.get("line"), source.get("column")
 
 
 def _compile_shape(shape):
@@ -87,7 +179,25 @@ def _is_chain(plan):
 
 
 class GraphModule(nn.Module):
-    """Execute a frozen graph once per node and return named output tensors."""
+    """Execute a frozen graph once per node and return named output tensors.
+
+    Validation happens once per *input signature*, not once per call. The
+    first call whose external inputs have a given shape, dtype and device ---
+    in a given training mode and autocast state --- checks every port of every
+    node against the plan and then checks that no module created or removed
+    registered state. Later calls with the same signature compare that
+    signature and then run the modules back to back.
+
+    What was validated is forgotten when it may no longer hold: moving or
+    casting the module (``.to()``, ``.cuda()``, ``.double()``, ...) and
+    registering a parameter, buffer or submodule on any module in the graph
+    both re-check the registered state before the next call and revalidate
+    every port on it. An exception raised inside a node's module propagates
+    as itself --- same type, message and traceback --- with one note naming the
+    node, its operation and source line, the tensors it received, and any
+    change to registered state that explains it. ``E_RUNTIME`` is kept for
+    what HNDL's own checks find.
+    """
 
     def __init__(self, plan, modules, device, receipt, port_orders):
         super().__init__()
@@ -102,6 +212,7 @@ class GraphModule(nn.Module):
         self._chain = _is_chain(plan)
         self._port_orders = port_orders
         self._input_names = tuple(plan.inputs)
+        self._input_set = frozenset(self._input_names)
         self._input_dtypes = MappingProxyType(
             {name: DTYPES[entry["dtype"]] for name, entry in plan.inputs.items()})
         self._port_dtypes = {}
@@ -114,6 +225,9 @@ class GraphModule(nn.Module):
                 produced[f"node:{node.id}/{port}"] = plan.dtype if declared[port] == "any" else declared[port]
         self._output_dtypes = MappingProxyType(
             {name: DTYPES[produced[entry["ref"]]] for name, entry in plan.outputs.items()})
+        # What an error needs to name a node: its operation and source position.
+        self._node_labels = MappingProxyType(
+            {node.id: (self._alias(node.op), *_source_position(node)) for node in plan.nodes})
         self._state_program = self._state_snapshot()
         # Contract shapes with their batch entries pre-parsed; _resolve_shapes
         # turns these into concrete expectations once per distinct batch size.
@@ -124,6 +238,13 @@ class GraphModule(nn.Module):
         self._spec_out = {node.id: {port: _compile_shape(shape) for port, shape in node.output_shapes.items()}
                           for node in plan.nodes}
         self._compiled = _UNCOMPILED
+        self._fast = self._build_fast_program()
+        # Input signatures whose calls passed every check, and the watch
+        # generation at which the registered state last matched the build
+        # (``None`` forces a full re-check before the next call).
+        self._validated = {}
+        _watch(self._state_program)
+        self._state_seen = _watch_generation
         self.build_receipt = MappingProxyType(receipt)
 
     def __setattr__(self, name, value):
@@ -153,9 +274,13 @@ class GraphModule(nn.Module):
             # instance dictionary directly, exactly as unpickling would.
             object.__setattr__(result, name, value if name in SHARED_METADATA
                                else copy.deepcopy(value, memo))
-        # Cheap insurance: the clone rebuilds its baked program against its own
-        # modules rather than trusting a structure copied mid-flight.
+        # Cheap insurance: the clone rebuilds its baked programs against its own
+        # modules rather than trusting a structure copied mid-flight, validates
+        # its first call afresh, and watches its own modules for registrations.
         object.__setattr__(result, "_compiled", _UNCOMPILED)
+        object.__setattr__(result, "_fast", result._build_fast_program())
+        object.__setattr__(result, "_validated", {})
+        _watch(result._state_program)
         return result
 
     def __copy__(self):
@@ -180,6 +305,11 @@ class GraphModule(nn.Module):
         # only; a probe that came back integral means no compute-dtype change.
         if probe.is_floating_point() or probe.is_complex():
             self._runtime_dtype = probe.dtype
+        # Every validated signature named the old device and dtype. A move is
+        # also a natural point to re-check registered state in full, which
+        # catches the edits no registration hook reports (see _state_seen).
+        self._validated = {}
+        self._state_seen = None
         return self
 
     def _effective_dtype(self, dtype):
@@ -193,6 +323,92 @@ class GraphModule(nn.Module):
         """
         return self._runtime_dtype if dtype is not None and dtype == self._build_dtype else dtype
 
+    # -- errors -------------------------------------------------------------
+
+    def _node_name(self, node_id):
+        """``linear 'head'``: the operation and the node, as an error names them."""
+        return f"{self._node_labels[node_id][0]} {node_id!r}"
+
+    def _error(self, message, node_id=None, code="E_RUNTIME"):
+        if node_id is None:
+            return HNDLError(code, message)
+        _, line, column = self._node_labels[node_id]
+        return HNDLError(code, message, node=node_id, line=line, column=column)
+
+    def _port_error(self, port, value, dtype, batch, problem):
+        """An ``E_RUNTIME`` for one port, with the contract beside the tensor."""
+        where, spec, node_id = port
+        lines = [f"{where}: {problem}"]
+        if batch is not None and batch <= 0:
+            batch = None  # an empty batch binds no B worth printing
+        if isinstance(value, torch.Tensor):
+            lines.append(f"  expected {_contract_text(spec, batch)}:{_dtype_text(dtype)} on {self._runtime_device}")
+            lines.append(f"  got      {_tensor_text(value)}")
+            first = self._input_names[0]
+            if (batch is not None and where != f"input {first!r}" and value.ndim == len(spec)
+                    and any(type(d) is tuple and d[0] is not None and size != d[0] * batch
+                            for d, size in zip(spec, value.shape))):
+                lines.append(f"  B={batch} is this call's batch size, read from input {first!r}")
+        return self._error("\n".join(lines), node_id)
+
+    def _annotate_failure(self, node_id, error, bound, batch, after_validation):
+        """Add HNDL's context to an exception out of one node, as a note.
+
+        The exception itself propagates unchanged --- same type, same message,
+        same traceback --- so callers that catch ``RuntimeError`` (or an
+        out-of-memory error, to shrink the batch) keep working; the note is
+        what the traceback prints after the message. Everything here runs only
+        after a failure, and an exception passing out through several graphs
+        (a graph used as a node of another) keeps the innermost node's note.
+        """
+        if isinstance(error, HNDLError) and error.node is not None:
+            return  # an HNDL check already named its node
+        if any(isinstance(note, str) and note.startswith(_NOTE_PREFIX)
+               for note in getattr(error, "__notes__", ())):
+            return
+        try:
+            error.add_note(self._failure_note(node_id, error, bound, batch, after_validation))
+        except Exception:  # noqa: BLE001 - a note must never replace the real error
+            pass
+
+    def _failure_note(self, node_id, error, bound, batch, after_validation):
+        label, line, column = self._node_labels[node_id]
+        position = "".join(f", {key} {value}" for key, value in (("line", line), ("column", column))
+                           if value is not None)
+        lines = [f"{_NOTE_PREFIX} raised inside node {node_id!r} ({label}{position})"]
+        if not self._state_matches():
+            # State removed between calls breaks forward rather than reporting
+            # itself; say so, because that is the cause the error hides.
+            _, listed = self._state_summary()
+            lines.append(f"  registered state no longer matches the build: {listed}")
+        elif after_validation:
+            # The signature was validated earlier, so a node input that now
+            # breaks its contract means an upstream module changed its output.
+            compiled = self._compiled
+            if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
+                compiled = self._resolve_shapes(batch)
+            entry = next(entry for entry in compiled[3] if entry[5] == node_id)
+            for (_, expected, dtype, port), value in zip(entry[1], bound):
+                try:
+                    self._check(value, expected, dtype, port, batch)
+                except HNDLError as mismatch:
+                    lines.extend("  " + text for text in mismatch.message.splitlines())
+                    lines.append("  (an earlier call with the same input signature passed every check, "
+                                 "so an upstream module now produces a different tensor)")
+                    break
+        effective = self._effective_dtype
+        for port, value in zip(self._port_orders[node_id], bound):
+            spec = self._spec_in[node_id][port]
+            dtype = effective(self._port_dtypes[node_id][port])
+            lines.append(f"  input {port!r}: got {_tensor_text(value)}; contract "
+                         f"{_contract_text(spec, batch)}:{_dtype_text(dtype)} on {self._runtime_device}")
+        if type(error).__module__.startswith(("torch._dynamo", "torch._inductor")):
+            lines.append("  the error came from torch.compile compiling or running this node's module; "
+                         "run it without torch.compile to see the eager error")
+        return "\n".join(lines)
+
+    # -- registered state ---------------------------------------------------
+
     def _state_snapshot(self):
         """Record what ``named_parameters``/``named_buffers`` see, per module.
 
@@ -200,18 +416,23 @@ class GraphModule(nn.Module):
         things: the order ``modules()`` visits, each module's path from the
         root, and the keys each module contributes. Freezing the visited
         modules in one flat tuple --- alongside the child mapping that fixes
-        every path --- lets :meth:`_execute` re-derive the same answer without
-        recursing through ``named_modules`` or building a single string.
+        every path --- lets :meth:`_state_matches` re-derive the same answer
+        without recursing through ``named_modules`` or building a single string.
 
-        Each row is ``(module, parameter_keys, buffer_keys, children)``.
-        ``children`` is the module's ``_modules`` mapping as key/value pairs,
-        so a submodule swapped out under an unchanged key is still a change.
-        The key tuples are filtered exactly as PyTorch filters them: ``None``
-        slots are skipped, and a tensor already seen earlier in the walk is
-        skipped, with parameters and buffers de-duplicated independently.
+        Each row is ``(module, parameter_keys, buffer_keys, children, path,
+        node_id)``. ``children`` is the module's ``_modules`` mapping as
+        key/value pairs, so a submodule swapped out under an unchanged key is
+        still a change. The key tuples are filtered exactly as PyTorch filters
+        them: ``None`` slots are skipped, and a tensor already seen earlier in
+        the walk is skipped, with parameters and buffers de-duplicated
+        independently. ``path`` and ``node_id`` are only read to word errors.
         """
+        owners = {}
+        for key, layer in self.nodes._modules.items():
+            for module in layer.modules():
+                owners.setdefault(id(module), key.removeprefix("n_"))
         program, seen_parameters, seen_buffers = [], set(), set()
-        for module in self.modules():
+        for path, module in self.named_modules():
             keys = []
             for store, seen in ((module._parameters, seen_parameters),
                                 (module._buffers, seen_buffers)):
@@ -222,8 +443,97 @@ class GraphModule(nn.Module):
                     seen.add(id(value))
                     contributed.append(key)
                 keys.append(tuple(contributed))
-            program.append((module, keys[0], keys[1], tuple(module._modules.items())))
+            program.append((module, keys[0], keys[1], tuple(module._modules.items()),
+                            path, owners.get(id(module))))
         return tuple(program)
+
+    def _state_matches(self):
+        """Whether every module still registers exactly what it did at build.
+
+        Replays the build-time walk against the flat program instead of
+        recursing through the module tree again. Pinning every module's child
+        mapping keeps the two trees identical --- nothing can be grafted in
+        unseen --- so comparing each module's contributed keys answers exactly
+        what comparing the dotted name tuples used to answer. ``set.add``
+        returns None, so its clause always passes and only records the tensor.
+        """
+        seen_parameters, seen_buffers = set(), set()
+        for module, parameters, buffers, children, _, _ in self._state_program:
+            if (tuple(module._modules.items()) != children
+                    or tuple([key for key, value in module._parameters.items()
+                              if value is not None and id(value) not in seen_parameters
+                              and not seen_parameters.add(id(value))]) != parameters
+                    or tuple([key for key, value in module._buffers.items()
+                              if value is not None and id(value) not in seen_buffers
+                              and not seen_buffers.add(id(value))]) != buffers):
+                return False
+        return True
+
+    def _state_changes(self):
+        """What differs from the build-time walk, as ``(node_id, text)`` pairs."""
+        changes = []
+        seen = {"parameter": set(), "buffer": set()}
+        for module, parameters, buffers, children, path, node_id in self._state_program:
+            prefix = f"{path}." if path else ""
+            for kind, store, recorded in (("parameter", module._parameters, parameters),
+                                          ("buffer", module._buffers, buffers)):
+                ids, current = seen[kind], []
+                for key, value in store.items():
+                    if value is not None and id(value) not in ids:
+                        ids.add(id(value))
+                        current.append(key)
+                if tuple(current) == recorded:
+                    continue
+                for key in recorded:
+                    if key not in current:
+                        how = ("removed" if key not in store else "set to None" if store[key] is None
+                               else "re-registered as an alias of an earlier tensor")
+                        changes.append((node_id, f"{kind} '{prefix}{key}' was {how}"))
+                changes.extend((node_id, f"{kind} '{prefix}{key}' was added")
+                               for key in current if key not in recorded)
+                if set(current) == set(recorded):
+                    changes.append((node_id, f"the {kind}s of '{path}' were re-registered in a different order"))
+            now, before = module._modules, dict(children)
+            if tuple(now.items()) == children:
+                continue
+            for key, child in before.items():
+                if key not in now:
+                    changes.append((node_id, f"submodule '{prefix}{key}' was removed"))
+                elif now[key] is not child:
+                    how = (f"filled in with {_module_kind(now[key])} (it was None at build)" if child is None
+                           else f"replaced ({_module_kind(child)} -> {_module_kind(now[key])})")
+                    changes.append((node_id, f"submodule '{prefix}{key}' was {how}"))
+            changes.extend((node_id, f"submodule '{prefix}{key}' was added ({_module_kind(child)})")
+                           for key, child in now.items() if key not in before)
+            if set(now) == set(before) and all(now[key] is child for key, child in before.items()):
+                changes.append((node_id, f"the submodules of '{path}' were re-registered in a different order"))
+        return changes
+
+    def _state_summary(self):
+        """The first node whose registered state changed, and every change, as text."""
+        changes = self._state_changes() or [(None, "the module tree differs from the one recorded at build")]
+        node_id = next((owner for owner, _ in changes if owner is not None), None)
+        listed = "; ".join(text for _, text in changes[:6])
+        if len(changes) > 6:
+            listed += f"; and {len(changes) - 6} more"
+        return node_id, listed
+
+    def _state_error(self, when):
+        """``E_RUNTIME`` naming the node whose registered state changed, and how."""
+        node_id, listed = self._state_summary()
+        subject = self._node_name(node_id) if node_id is not None else "the network"
+        phrase = "changed during forward" if when == "forward" else "no longer matches the build"
+        lines = [f"registered state of {subject} {phrase}: {listed}"]
+        lines.append("  HNDL fixes every parameter, buffer and submodule when it builds a plan, so state "
+                     "added or removed later is not trained, seeded or saved as the plan describes; "
+                     "create it in __init__, or resolve and build a new plan to change the architecture")
+        return self._error("\n".join(lines), node_id)
+
+    def _verify_state(self, when):
+        if not self._state_matches():
+            raise self._state_error(when)
+
+    # -- the checked program ------------------------------------------------
 
     @staticmethod
     def _resolve(spec, batch):
@@ -263,41 +573,100 @@ class GraphModule(nn.Module):
         compiled = (
             batch, self._runtime_dtype,
             tuple((name, f"input:{name}", resolve(self._spec_inputs[name], batch),
-                   effective(self._input_dtypes[name]))
+                   effective(self._input_dtypes[name]),
+                   (f"input {name!r}", self._spec_inputs[name], None))
                   for name in self._input_names),
             self._build_program(expected_in, expected_out, effdt),
             tuple((name, entry["ref"], resolve(self._spec_outputs[name], batch),
-                   effective(self._output_dtypes[name]))
+                   effective(self._output_dtypes[name]),
+                   (f"output {name!r}", self._spec_outputs[name], None))
                   for name, entry in self.plan.outputs.items()))
         self._compiled = compiled
         return compiled
 
     def _build_program(self, expected_in, expected_out, effdt):
         """Bake the per-call constants --- labels, module handles, port sets --- into tuples."""
-        return tuple(
-            (self.nodes[f"n_{node.id}"],
-             tuple((node.inputs[port], expected_in[node.id][port], f"{node.id}/{port}",
-                    effdt[node.id][port])
-                   for port in self._port_orders[node.id]),
-             tuple((f"node:{node.id}/{port}", expected_out[node.id][port], f"{node.id}/{port}",
-                    effdt[node.id][port])
-                   for port in node.outputs),
-             node.outputs, frozenset(node.outputs), node.id)
-            for node in self.plan.nodes)
+        program = []
+        for node in self.plan.nodes:
+            name = self._node_name(node.id)
+            program.append((
+                self.nodes[f"n_{node.id}"],
+                tuple((node.inputs[port], expected_in[node.id][port], effdt[node.id][port],
+                       (f"{name} input {port!r} (from {node.inputs[port]})",
+                        self._spec_in[node.id][port], node.id))
+                      for port in self._port_orders[node.id]),
+                tuple((f"node:{node.id}/{port}", expected_out[node.id][port], effdt[node.id][port],
+                       (f"{name} output {port!r}", self._spec_out[node.id][port], node.id))
+                      for port in node.outputs),
+                node.outputs, frozenset(node.outputs), node.id))
+        return tuple(program)
 
-    def _check(self, value, expected, location, dtype):
+    def _build_fast_program(self):
+        """The unchecked loop: every tensor lives in a numbered slot.
+
+        External inputs take the first slots in declaration order and every
+        node output the next free one, so a node's arguments are list indices
+        rather than string-keyed lookups. Each row is ``(module, arguments,
+        single output slot or None, node)``: ``arguments`` is a bare slot for
+        a one-input node, the common case, and a tuple of slots otherwise;
+        ``node`` holds what only the multi-output and failure paths read.
+        """
+        slots = {f"input:{name}": index for index, name in enumerate(self._input_names)}
+        program = []
+        for node in self.plan.nodes:
+            ins = tuple(slots[node.inputs[port]] for port in self._port_orders[node.id])
+            outs = []
+            for port in node.outputs:
+                slots[f"node:{node.id}/{port}"] = len(slots)
+                outs.append(slots[f"node:{node.id}/{port}"])
+            program.append((self.nodes[f"n_{node.id}"], ins[0] if len(ins) == 1 else ins,
+                            outs[0] if len(outs) == 1 else None,
+                            (ins, tuple(outs), node.outputs, frozenset(node.outputs), node.id)))
+        padding = (None,) * (len(slots) - len(self._input_names))
+        outputs = tuple((name, slots[entry["ref"]]) for name, entry in self.plan.outputs.items())
+        return padding, tuple(program), outputs
+
+    def _check(self, value, expected, dtype, port, batch):
         if not isinstance(value, torch.Tensor):
-            raise HNDLError("E_RUNTIME", f"{location} must be a tensor")
+            raise self._port_error(port, value, dtype, batch, f"expected a tensor, got {type(value).__name__}")
         if type(expected) is str:
-            raise HNDLError("E_RUNTIME", f"{location}: contract entry {expected!r} is not a batch dimension")
+            raise self._port_error(port, value, dtype, batch,
+                                   f"contract entry {expected!r} is not a batch dimension")
         if value.shape != expected or value.ndim == 0 or value.shape[0] <= 0:
-            raise HNDLError("E_RUNTIME", f"{location}: expected shape {expected}, got {tuple(value.shape)}")
+            if value.ndim == 0:
+                problem = f"expected shape {_contract_text(port[1], batch)}, got a 0-dimensional tensor"
+            elif value.shape[0] <= 0 and value.ndim == len(expected):
+                problem = f"batch size must be positive, got shape {_shape_text(tuple(value.shape))}"
+            else:
+                problem = (f"expected shape {_contract_text(port[1], batch)}, "
+                           f"got {_shape_text(tuple(value.shape))}")
+            raise self._port_error(port, value, dtype, batch, problem)
         if dtype is not None and value.dtype != dtype:
-            raise HNDLError("E_RUNTIME", f"{location}: expected dtype {dtype}, got {value.dtype}")
+            raise self._port_error(port, value, dtype, batch,
+                                   f"expected dtype {_dtype_text(dtype)}, got {_dtype_text(value.dtype)}")
         if value.device != self._runtime_device:
-            raise HNDLError("E_RUNTIME", f"{location}: expected device {self._runtime_device}, got {value.device}")
+            raise self._port_error(port, value, dtype, batch,
+                                   f"expected device {self._runtime_device}, got {value.device}")
 
-    def _execute(self, inputs):
+    def _split_result(self, result, out_ports, out_set, node_id):
+        """A module's return value as one value per declared output port."""
+        if isinstance(result, dict) and set(result) == out_set:
+            return tuple(result[port] for port in out_ports)
+        if isinstance(result, (tuple, list)) and len(result) == len(out_ports):
+            return tuple(result)
+        if len(out_ports) == 1:
+            return (result,)
+        if isinstance(result, dict):
+            got = f"a dict with keys {tuple(result)}"
+        elif isinstance(result, (tuple, list)):
+            got = f"a {type(result).__name__} of {len(result)} values"
+        else:
+            got = f"one {type(result).__name__}"
+        raise self._error(f"{self._node_name(node_id)} returned {got}; expected output ports {out_ports}, "
+                          "as a tuple or list in that order or a dict with exactly those keys", node_id)
+
+    def _run_checked(self, inputs, compiling):
+        """One call with every port checked before and after its node."""
         leading = inputs[self._input_names[0]]
         batch = leading.shape[0] if isinstance(leading, torch.Tensor) and leading.ndim else None
         # The resolved expectations depend on the batch and on the dtype casts
@@ -309,54 +678,112 @@ class GraphModule(nn.Module):
         _, _, input_program, node_program, output_program = compiled
         check = self._check
         values = {}
-        for name, key, expected, dtype in input_program:
+        for name, key, expected, dtype, port in input_program:
             value = inputs[name]
-            check(value, expected, key, dtype)
+            check(value, expected, dtype, port, batch)
             values[key] = value
         for module, ins, outs, out_ports, out_set, node_id in node_program:
             bound = []
-            for ref, expected, location, dtype in ins:
+            for ref, expected, dtype, port in ins:
                 value = values[ref]
-                check(value, expected, location, dtype)
+                check(value, expected, dtype, port, batch)
                 bound.append(value)
-            result = module(*bound)
-            if isinstance(result, dict) and set(result) == out_set:
-                results = tuple(result[port] for port in out_ports)
-            elif isinstance(result, (tuple, list)) and len(result) == len(out_ports):
-                results = tuple(result)
-            elif len(out_ports) == 1:
-                results = (result,)
+            if compiling:
+                # No handler for dynamo to trace; a failure while compiling
+                # surfaces as the compiler reports it.
+                result = module(*bound)
             else:
-                raise HNDLError("E_RUNTIME", f"{node_id}: expected output ports {out_ports}")
-            for (key, expected, location, dtype), value in zip(outs, results):
-                check(value, expected, location, dtype)
+                try:
+                    result = module(*bound)
+                except Exception as error:
+                    self._annotate_failure(node_id, error, bound, batch, after_validation=False)
+                    raise
+            for (key, expected, dtype, port), value in zip(
+                    outs, self._split_result(result, out_ports, out_set, node_id)):
+                check(value, expected, dtype, port, batch)
                 values[key] = value
         outputs = {}
-        for name, ref, expected, dtype in output_program:
+        for name, ref, expected, dtype, port in output_program:
             value = values[ref]
-            check(value, expected, name, dtype)
+            check(value, expected, dtype, port, batch)
             outputs[name] = value
-        # Replay the build-time walk against the flat program instead of
-        # recursing through the module tree again. Pinning every module's child
-        # mapping keeps the two trees identical --- nothing can be grafted in
-        # unseen --- so comparing each module's contributed keys answers exactly
-        # what comparing the dotted name tuples used to answer. ``set.add``
-        # returns None, so its clause always passes and only records the tensor.
-        seen_parameters, seen_buffers = set(), set()
-        for module, parameters, buffers, children in self._state_program:
-            if (tuple(module._modules.items()) != children
-                    or tuple([key for key, value in module._parameters.items()
-                              if value is not None and id(value) not in seen_parameters
-                              and not seen_parameters.add(id(value))]) != parameters
-                    or tuple([key for key, value in module._buffers.items()
-                              if value is not None and id(value) not in seen_buffers
-                              and not seen_buffers.add(id(value))]) != buffers):
-                raise HNDLError("E_RUNTIME", "A module created or removed registered state during forward")
+        return outputs
+
+    def _signature(self, inputs):
+        """What a validated call is keyed on, or ``None`` for a non-tensor input."""
+        key = [self.training, _autocast_enabled()]
+        for name in self._input_names:
+            value = inputs[name]
+            if not isinstance(value, torch.Tensor):
+                return None
+            key += (value.shape, value.dtype, value.device)
+        return tuple(key)
+
+    def _validate(self, inputs, signature, generation):
+        """The first call for a signature: check everything, then remember it."""
+        if generation != self._state_seen:
+            # A parameter, buffer or submodule was registered on a module of
+            # this graph since the last check: confirm the state still matches
+            # the build, and forget every validated signature, because a
+            # parameter replaced under the same name can change any shape.
+            self._verify_state("build")
+            self._validated = {}
+            self._state_seen = generation
+        outputs = self._run_checked(inputs, compiling=False)
+        generation = _watch_generation
+        self._verify_state("forward")
+        self._state_seen = generation
+        validated = self._validated
+        if len(validated) >= _MAX_SIGNATURES:
+            validated.clear()
+        validated[signature] = True
+        return outputs
+
+    def _execute(self, inputs):
+        if _is_compiling():
+            # Traced once per guard set, so the full checks cost nothing per
+            # call there and dynamo turns them into guards.
+            outputs = self._run_checked(inputs, compiling=True)
+            self._verify_state("forward")
+            return outputs
+        generation = _watch_generation
+        signature = self._signature(inputs)
+        if generation != self._state_seen or signature not in self._validated:
+            return self._validate(inputs, signature, generation)
+        padding, program, output_slots = self._fast
+        values = [*map(inputs.__getitem__, self._input_names), *padding]
+        try:
+            for module, ins, out, node in program:
+                result = (module(values[ins]) if type(ins) is int
+                          else module(*[values[slot] for slot in ins]))
+                if out is not None and type(result) is _Tensor:
+                    values[out] = result
+                else:
+                    _, outs, out_ports, out_set, node_id = node
+                    for slot, value in zip(outs, self._split_result(result, out_ports, out_set, node_id)):
+                        values[slot] = value
+        except Exception as error:
+            ins, _, _, _, node_id = node
+            leading = values[0]
+            self._annotate_failure(node_id, error, [values[slot] for slot in ins],
+                                   leading.shape[0] if leading.ndim else None, after_validation=True)
+            raise
+        outputs = {name: values[slot] for name, slot in output_slots}
+        if _watch_generation != generation:
+            # Something registered state while this call ran --- perhaps one
+            # of its own modules. Check it now, as the first call would have.
+            generation = _watch_generation
+            self._verify_state("forward")
+            self._state_seen = generation
         return outputs
 
     def _bind(self, args, kwargs):
         """Bind runtime tensors to the declared external inputs, in order."""
         names = self._input_names
+        if not kwargs and len(args) == len(names):
+            return dict(zip(names, args))
+        if not args and kwargs.keys() == self._input_set:
+            return kwargs
         expected = "Expected exactly the external tensor inputs " + ", ".join(repr(n) for n in names)
         if len(args) > len(names):
             raise HNDLError("E_BINDING", expected)

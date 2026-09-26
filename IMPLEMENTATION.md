@@ -67,6 +67,25 @@ graph input is integer. Edge dtypes are checked at resolution (`E_DTYPE`), so
 an integer tensor cannot reach a floating-point port. Reduced precision is
 qualified on CUDA.
 
+A built model checks its contracts once per input signature, not on every
+call. The first call whose inputs have a given shape, dtype and device (in a
+given training mode and autocast state) checks every node's ports and that no
+module created or removed registered state; later calls with the same
+signature compare only the inputs and run the layers back to back. Moving or
+casting the model, or registering a parameter, buffer or submodule on any of
+its modules, makes the next call check everything again. Failures are
+`E_RUNTIME` errors that name the node, its operation and its source line and
+print the contract beside the tensor that arrived, for example
+`linear 'head' input 'x' (from node:hidden/out): expected shape [B=32, 64], got [32, 63]`;
+an exception raised inside a layer propagates unchanged (a `RuntimeError`
+stays a `RuntimeError`) with a note, printed under its message in the
+traceback, that names the node, its operation and source line, the tensors it
+received, and any registered-state change that explains it. PyTorch runs no registration hook for `del` of a
+registered name, for assigning `None` over a registered parameter, or for
+writing `_parameters`/`_buffers`/`_modules` directly, so those edits are
+reported at the next full check or when a layer then fails, not on the very
+next call.
+
 Built-in unary operations take an optional leading tensor or `x=`. Custom
 unary operations use their declared input-port keyword. Every operator's
 arguments, defaults, bounds, shape relation, and examples are listed in

@@ -12,21 +12,25 @@ architecture families stand in for the shapes hndl is used for: an MLP, a
 convolutional discriminator trunk, and a transformer block.
 
 The comparison is not free of overhead on purpose: ``GraphModule._execute``
-validates every node's shape, dtype and device on each forward call (see
-``_check`` in ``src/hndl/torch.py``), which a hand-written module never does.
+validates every node's shape, dtype and device on the first call for each
+input signature (see ``_run_checked`` in ``src/hndl/torch.py``), which a
+hand-written module never does, and on every later call compares that
+signature before running the modules from a slot-indexed program. The timing
+loop repeats one signature, so it measures the second, cheap path.
 :data:`TOLERANCE` is the generous multiple of hand-written time that overhead is
 allowed to cost. These assertions are meant to fail loudly rather than skip if
 that overhead ever grows unreasonable.
 
-That overhead is a roughly **constant** cost per forward call — about 5 us per
-node on this machine, so ~27 us for the five-node MLP, independent of batch
-size — which means the ratio a case reports depends on how much arithmetic the
-batch gives it to amortize against. The MLP is timed at batch 256 for that
-reason; at batch 32 the same network measures about 1.6x, which is the fixed
-overhead weighing on a 40 us forward pass rather than a per-element slowdown.
-(Both figures were ~2.5x larger before the resolved-shape and baked-program
-caches landed: the per-call cost used to be ~13 us per node and batch 32
-measured ~2.5x.)
+That overhead is a roughly **constant** cost per forward call — about 2 us per
+call plus well under 1 us per node on this machine, so ~6-9 us for the
+five-node MLP, independent of batch size — which means the ratio a case
+reports depends on how much arithmetic the batch gives it to amortize against.
+The MLP is timed at batch 256, where the fixed cost was once large; at batch
+32 the same network now measures about 1.15-1.2x. (Before validation moved to
+once per signature, every call checked every port and replayed the
+registered-state walk: ~5 us per node after the resolved-shape and
+baked-program caches, ~13 us before them, and batch 32 measured ~1.7x and
+~2.5x respectively.)
 
 Run with ``-s`` to see each case's two timings and their ratio.
 """
