@@ -388,11 +388,17 @@ def test_deepcopy_keeps_lookup_moves_and_the_state_consistency_check():
     assert clone._runtime_device == torch.device("cpu")
     x = torch.randn(2, 4)
     clone.eval()(x)
-    module, _, buffers, children = clone._state_program[-1]
-    object.__setattr__(clone, "_state_program",
-                       clone._state_program[:-1] + ((module, ("ghost",), buffers, children),))
-    with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
+    model.eval()(x)
+    # The clone records and watches its own modules: state registered on one
+    # of them after a validated call is caught on the clone's next call, and
+    # the original, whose modules are untouched, keeps running.
+    clone["head"].ghost = nn.Parameter(torch.zeros(1))
+    with pytest.raises(HNDLError, match="E_RUNTIME.*registered state.*'nodes.n_head.ghost' was added"):
         clone(x)
+    assert model(x).shape == (2, 2)
+    model["norm"].ghost = nn.Parameter(torch.zeros(1))
+    with pytest.raises(HNDLError, match="E_RUNTIME.*registered state"):
+        model(x)
 
 
 def test_state_registered_during_forward_is_rejected():
@@ -551,24 +557,24 @@ def test_floating_point_casts_move_the_runtime_dtype_checks(cast, dtype):
     assert all(p.dtype == dtype for p in model.parameters())
     result = _forward_or_skip(model, torch.randn(3, 4, dtype=dtype))
     assert result.dtype == dtype and result.shape == (3, 2)
-    with pytest.raises(HNDLError, match=f"E_RUNTIME.*expected dtype {dtype}, got torch.float32"):
+    with pytest.raises(HNDLError, match=f"E_RUNTIME.*expected dtype {str(dtype).removeprefix('torch.')}, got float32"):
         model(torch.randn(3, 4))
     restored = model.float()
     assert restored is model
     assert model(torch.randn(3, 4)).dtype == torch.float32
-    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float32, got torch.float64"):
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype float32, got float64"):
         model(torch.randn(3, 4, dtype=torch.float64))
 
 
 def test_double_tracks_parameterless_graphs_and_device_only_moves():
     model = network("relu()", input_shape=("B", 4), output_shape=("B", 4), device="cpu").double()
     assert model(torch.randn(2, 4, dtype=torch.float64)).dtype == torch.float64
-    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float64"):
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype float64"):
         model(torch.randn(2, 4))
 
     unmoved = _mlp(device="cpu").to("cpu")
     assert unmoved(torch.randn(2, 4)).dtype == torch.float32
-    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float32"):
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype float32"):
         unmoved(torch.randn(2, 4, dtype=torch.float64))
 
 
@@ -577,9 +583,9 @@ def test_casts_leave_integer_and_declared_dtypes_alone():
                     output_shape=("B", 5, 3), input_dtype="int64", device="cpu").double()
     tokens = torch.randint(0, 20, (2, 5))
     assert model(tokens).dtype == torch.float64
-    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.int64, got torch.int32"):
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype int64, got int32"):
         model(tokens.to(torch.int32))
-    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.int64, got torch.float64"):
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype int64, got float64"):
         model(tokens.to(torch.float64))
 
 
@@ -587,10 +593,256 @@ def test_deepcopy_carries_and_isolates_the_runtime_dtype():
     model = _mlp(device="cpu")
     clone = copy.deepcopy(model.double())
     assert clone(torch.randn(2, 4, dtype=torch.float64)).dtype == torch.float64
-    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype torch.float64"):
+    with pytest.raises(HNDLError, match="E_RUNTIME.*expected dtype float64"):
         clone(torch.randn(2, 4))
 
     original = _mlp(device="cpu")
     copy.deepcopy(original).double()
     assert original(torch.randn(2, 4)).dtype == torch.float32
     assert original._input_dtypes["x"] == torch.float32 and model._input_dtypes["x"] == torch.float32
+
+
+# -- Validation once per input signature ---------------------------------------
+
+
+def _count_checks(model):
+    """Count port checks on ``model``: zero on a call means it took the fast path."""
+    calls = []
+    check = model._check
+
+    def counting(*args):
+        calls.append(args)
+        return check(*args)
+
+    model._check = counting
+    return calls
+
+
+def test_ports_are_validated_once_per_input_signature():
+    model = _stateful(device="cpu")
+    checks = _count_checks(model)
+    x = torch.randn(3, 4)
+    expected = model(x)
+    assert len(checks) == 1 + 2 * 4 + 1  # external input, every node's ports, output
+    checks.clear()
+    torch.testing.assert_close(model(x), expected)
+    assert model(torch.randn(3, 4)).shape == (3, 2)
+    assert checks == []
+    model(torch.randn(5, 4))  # a new batch size is a new signature
+    assert checks
+    checks.clear()
+    model(torch.randn(3, 4))  # ... and the earlier one is still remembered
+    assert checks == []
+    model.eval()(x)  # so is a new training mode
+    assert checks
+    checks.clear()
+    model.eval()(x)
+    assert checks == []
+    model.to("cpu")(x)  # a move or cast forgets everything validated
+    assert checks
+    checks.clear()
+    nn.Linear(3, 3).register_parameter("elsewhere", nn.Parameter(torch.zeros(1)))
+    model(x)  # modules outside the graph registering state do not matter
+    assert checks == []
+
+
+def test_a_broken_input_after_the_first_call_is_reported_readably():
+    model = network('linear(8, name="hidden")\nrelu()\nlinear(2, name="head")',
+                    input_shape=("B", 4), output_shape=("B", 2), device="cpu")
+    model(torch.randn(3, 4))
+    with pytest.raises(HNDLError) as caught:
+        model(torch.randn(3, 5))
+    assert str(caught.value) == ("E_RUNTIME: input 'x': expected shape [B=3, 4], got [3, 5]\n"
+                                 "  expected [B=3, 4]:float32 on cpu\n"
+                                 "  got      [3, 5]:float32 on cpu")
+    with pytest.raises(HNDLError, match="^E_RUNTIME: input 'x': expected dtype float32, got float64\n"):
+        model(torch.randn(3, 4, dtype=torch.float64))
+    with pytest.raises(HNDLError, match="^E_RUNTIME: input 'x': expected a tensor, got list$"):
+        model([[0.0] * 4] * 3)
+    with pytest.raises(HNDLError, match="^E_RUNTIME: input 'x': batch size must be positive, got shape "
+                                        r"\[0, 4\]\n  expected \[B, 4\]:float32"):
+        model(torch.randn(0, 4))
+    assert model(torch.randn(3, 4)).shape == (3, 2)
+
+
+def test_a_second_input_names_the_batch_it_disagrees_with():
+    model = network("a = linear(x, 4)\nconcat(a, y, axis=1)", input_shape={"x": ("B", 3), "y": ("B", 2)},
+                    output_shape=("B", 6), device="cpu")
+    model(torch.randn(3, 3), torch.randn(3, 2))
+    with pytest.raises(HNDLError) as caught:
+        model(torch.randn(3, 3), torch.randn(2, 2))
+    assert str(caught.value).splitlines() == [
+        "E_RUNTIME: input 'y': expected shape [B=3, 2], got [2, 2]",
+        "  expected [B=3, 2]:float32 on cpu",
+        "  got      [2, 2]:float32 on cpu",
+        "  B=3 is this call's batch size, read from input 'x'",
+    ]
+
+
+def _flaky_registry(fail_from_call, error=None):
+    """An operator that works until call ``fail_from_call`` and then raises."""
+    registry = Registry.builtins()
+
+    @registry.operator("flaky", identity="tests.flaky", summary="Fail after a few calls.",
+                       shape="x[B, F] -> out[B, F]")
+    class Flaky(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, x):
+            self.calls += 1
+            if self.calls >= fail_from_call:
+                if error is not None:
+                    raise error
+                return x @ torch.ones(3, 3)
+            return x
+
+    return registry
+
+
+@pytest.mark.parametrize("fail_from_call", [1, 2])
+def test_a_torch_error_inside_a_node_names_the_node(fail_from_call):
+    """Raised during the validating first call or on the unchecked path, it reads the same."""
+    model = network('linear(4)\nflaky(name="odd")\nrelu()', input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=_flaky_registry(fail_from_call))
+    for _ in range(fail_from_call - 1):
+        model(torch.randn(2, 4))
+    with pytest.raises(HNDLError) as caught:
+        model(torch.randn(2, 4))
+    error = caught.value
+    assert (error.code, error.node, error.line, error.column) == ("E_RUNTIME", "odd", 2, 1)
+    assert str(error).splitlines() == [
+        "E_RUNTIME (node odd; line 2, column 1): flaky 'odd' raised RuntimeError: "
+        "mat1 and mat2 shapes cannot be multiplied (2x4 and 3x3)",
+        "  input 'x': got [2, 4]:float32 on cpu; contract [B=2, 4]:float32 on cpu",
+    ]
+    assert isinstance(error.__cause__, RuntimeError)
+
+
+def test_errors_callers_catch_by_type_leave_nodes_unwrapped():
+    registry = _flaky_registry(2, error=torch.cuda.OutOfMemoryError("CUDA out of memory"))
+    model = network("flaky()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
+    model(torch.randn(2, 4))
+    with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
+        model(torch.randn(2, 4))
+
+
+def test_an_hndl_error_inside_a_node_gains_the_node():
+    registry = _flaky_registry(1, error=HNDLError("E_RUNTIME", "extent 5 does not divide by 2"))
+    model = network('flaky(name="split_here")', input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=registry)
+    with pytest.raises(HNDLError) as caught:
+        model(torch.randn(2, 4))
+    assert str(caught.value) == ("E_RUNTIME (node split_here; line 1, column 1): "
+                                 "flaky 'split_here': extent 5 does not divide by 2")
+
+
+def test_an_upstream_node_changing_its_output_after_validation_is_reported_at_the_port():
+    registry = Registry.builtins()
+
+    @registry.operator("drifts", identity="tests.drifts", summary="Narrow its output after one call.",
+                       shape="x[B, F] -> out[B, F]")
+    class Drifts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, x):
+            self.calls += 1
+            return x if self.calls == 1 else x[:, :2]
+
+    model = network('drifts(name="d")\nlinear(4, name="head")', input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=registry)
+    model(torch.randn(2, 4))
+    with pytest.raises(HNDLError) as caught:
+        model(torch.randn(2, 4))
+    lines = str(caught.value).splitlines()
+    assert lines[0] == ("E_RUNTIME (node head; line 2, column 1): linear 'head' input 'x' (from node:d/out): "
+                        "expected shape [B=2, 4], got [2, 2]")
+    assert lines[-1].startswith("  linear 'head' then raised RuntimeError: mat1 and mat2")
+
+
+def _replaces_the_head_weight(model):
+    model["head"].weight = nn.Parameter(torch.randn(2, 7))
+
+
+@pytest.mark.parametrize("mutate, message", [
+    (lambda model: setattr(model["hidden"], "extra", nn.Linear(2, 2)),
+     "registered state of linear 'hidden' no longer matches the build: "
+     "submodule 'nodes.n_hidden.extra' was added (Linear)"),
+    (lambda model: model["hidden"].register_parameter("scale", nn.Parameter(torch.ones(1))),
+     "registered state of linear 'hidden' no longer matches the build: "
+     "parameter 'nodes.n_hidden.scale' was added"),
+    (lambda model: setattr(model["norm"], "running_mean", None),
+     "registered state of batch_norm 'norm' no longer matches the build: "
+     "buffer 'nodes.n_norm.running_mean' was set to None"),
+    (lambda model: delattr(model["head"], "weight"),
+     "registered state of linear 'head' no longer matches the build: "
+     "parameter 'nodes.n_head.weight' was removed"),
+    (_replaces_the_head_weight,
+     "linear 'head' raised RuntimeError: mat1 and mat2 shapes cannot be multiplied (3x5 and 7x2)"),
+])
+def test_a_submodule_or_parameter_mutated_after_the_first_call_is_reported(mutate, message):
+    model = _stateful(device="cpu").eval()
+    x = torch.randn(3, 4)
+    model(x)
+    mutate(model)
+    for _ in range(2):  # reported on every call until the state is repaired
+        with pytest.raises(HNDLError, match="^E_RUNTIME") as caught:
+            model(x)
+        assert message in str(caught.value)
+
+
+def test_a_parameter_set_to_none_is_reported_at_the_next_revalidation():
+    """PyTorch runs no registration hook for ``module.param = None``.
+
+    So the unchecked path keeps running --- here ``linear`` without its bias ---
+    until something revalidates the graph: a new input signature, a move or
+    cast, or any registration the hooks do see.
+    """
+    model = _mlp(device="cpu")
+    x = torch.randn(3, 4)
+    model(x)
+    model["hidden"].bias = None
+    assert model(x).shape == (3, 2)
+    for revalidate in (lambda: model(torch.randn(5, 4)), lambda: model.to("cpu")(x)):
+        with pytest.raises(HNDLError, match="^E_RUNTIME .*parameter 'nodes.n_hidden.bias' was set to None"):
+            revalidate()
+
+
+def test_state_registered_during_a_later_forward_is_rejected_after_that_call():
+    registry = Registry.builtins()
+
+    @registry.operator("grows_late", identity="tests.grows_late", summary="Grow state on call three.",
+                       shape="data[B, F] -> value[B, F]")
+    class GrowsLate(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, data):
+            self.calls += 1
+            if self.calls == 3:
+                self.extra = nn.Parameter(torch.zeros(1))
+            return data
+
+    model = network("grows_late()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
+    x = torch.randn(2, 4)
+    model(x)
+    model(x)
+    with pytest.raises(HNDLError, match="^E_RUNTIME .*registered state of grows_late 'n0' changed during "
+                                        "forward: parameter 'nodes.n_n0.extra' was added"):
+        model(x)
+    with pytest.raises(HNDLError, match="registered state .* no longer matches the build"):
+        model(x)
+
+
+def test_torch_compile_traces_the_checked_program():
+    model = _stateful(device="cpu").eval()
+    x = torch.randn(3, 4)
+    expected = model(x)
+    compiled = torch.compile(model, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(x), expected)
+    torch.testing.assert_close(compiled(x), expected)
+    torch.testing.assert_close(model(x), expected)
