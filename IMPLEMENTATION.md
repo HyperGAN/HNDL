@@ -77,8 +77,10 @@ its modules, makes the next call check everything again. Failures are
 `E_RUNTIME` errors that name the node, its operation and its source line and
 print the contract beside the tensor that arrived, for example
 `linear 'head' input 'x' (from node:hidden/out): expected shape [B=32, 64], got [32, 63]`;
-an exception raised inside a layer is wrapped the same way, with the original
-kept as `__cause__`. PyTorch runs no registration hook for `del` of a
+an exception raised inside a layer propagates unchanged (a `RuntimeError`
+stays a `RuntimeError`) with a note, printed under its message in the
+traceback, that names the node, its operation and source line, the tensors it
+received, and any registered-state change that explains it. PyTorch runs no registration hook for `del` of a
 registered name, for assigning `None` over a registered parameter, or for
 writing `_parameters`/`_buffers`/`_modules` directly, so those edits are
 reported at the next full check or when a layer then fails, not on the very

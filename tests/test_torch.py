@@ -701,41 +701,68 @@ def _flaky_registry(fail_from_call, error=None):
     return registry
 
 
+def _hndl_notes(error):
+    """The notes HNDL added to an exception raised inside a node."""
+    return [note for note in getattr(error, "__notes__", ()) if note.startswith("HNDL:")]
+
+
 @pytest.mark.parametrize("fail_from_call", [1, 2])
-def test_a_torch_error_inside_a_node_names_the_node(fail_from_call):
+def test_a_torch_error_inside_a_node_keeps_its_type_and_names_the_node(fail_from_call):
     """Raised during the validating first call or on the unchecked path, it reads the same."""
     model = network('linear(4)\nflaky(name="odd")\nrelu()', input_shape=("B", 4), output_shape=("B", 4),
                     device="cpu", registry=_flaky_registry(fail_from_call))
     for _ in range(fail_from_call - 1):
         model(torch.randn(2, 4))
-    with pytest.raises(HNDLError) as caught:
+    with pytest.raises(RuntimeError, match=r"^mat1 and mat2 shapes cannot be multiplied \(2x4 and 3x3\)\n") as caught:
         model(torch.randn(2, 4))
-    error = caught.value
-    assert (error.code, error.node, error.line, error.column) == ("E_RUNTIME", "odd", 2, 1)
-    assert str(error).splitlines() == [
-        "E_RUNTIME (node odd; line 2, column 1): flaky 'odd' raised RuntimeError: "
-        "mat1 and mat2 shapes cannot be multiplied (2x4 and 3x3)",
-        "  input 'x': got [2, 4]:float32 on cpu; contract [B=2, 4]:float32 on cpu",
-    ]
-    assert isinstance(error.__cause__, RuntimeError)
+    assert type(caught.value) is RuntimeError
+    assert _hndl_notes(caught.value) == [
+        "HNDL: raised inside node 'odd' (flaky, line 2, column 1)\n"
+        "  input 'x': got [2, 4]:float32 on cpu; contract [B=2, 4]:float32 on cpu"]
 
 
-def test_errors_callers_catch_by_type_leave_nodes_unwrapped():
+def test_errors_callers_catch_by_type_keep_their_type():
     registry = _flaky_registry(2, error=torch.cuda.OutOfMemoryError("CUDA out of memory"))
     model = network("flaky()", input_shape=("B", 4), output_shape=("B", 4), device="cpu", registry=registry)
     model(torch.randn(2, 4))
-    with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
+    with pytest.raises(torch.cuda.OutOfMemoryError, match="^CUDA out of memory\n") as caught:
         model(torch.randn(2, 4))
+    assert _hndl_notes(caught.value)[0].startswith("HNDL: raised inside node 'n0' (flaky, line 1, column 1)")
 
 
-def test_an_hndl_error_inside_a_node_gains_the_node():
+def test_an_hndl_error_inside_a_node_keeps_its_message_and_gains_a_note():
     registry = _flaky_registry(1, error=HNDLError("E_RUNTIME", "extent 5 does not divide by 2"))
     model = network('flaky(name="split_here")', input_shape=("B", 4), output_shape=("B", 4),
                     device="cpu", registry=registry)
     with pytest.raises(HNDLError) as caught:
         model(torch.randn(2, 4))
-    assert str(caught.value) == ("E_RUNTIME (node split_here; line 1, column 1): "
-                                 "flaky 'split_here': extent 5 does not divide by 2")
+    assert str(caught.value) == "E_RUNTIME: extent 5 does not divide by 2"
+    assert _hndl_notes(caught.value)[0].startswith("HNDL: raised inside node 'split_here' (flaky, line 1")
+
+
+def test_an_error_passing_out_through_nested_graphs_keeps_one_note():
+    """A built graph used as a node of another: only the innermost node is named."""
+    registry = _flaky_registry(2)
+    inner = network('linear(4)\nflaky(name="deep")', input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=registry)
+
+    @registry.operator("wrapped", identity="tests.wrapped", summary="Run an inner graph.",
+                       shape="x[B, F] -> out[B, F]")
+    class Wrapped(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = copy.deepcopy(inner)
+
+        def forward(self, x):
+            return self.inner(x)
+
+    outer = network('wrapped(name="outer_node")', input_shape=("B", 4), output_shape=("B", 4),
+                    device="cpu", registry=registry)
+    outer(torch.randn(2, 4))
+    with pytest.raises(RuntimeError) as caught:
+        outer(torch.randn(2, 4))
+    notes = _hndl_notes(caught.value)
+    assert len(notes) == 1 and notes[0].startswith("HNDL: raised inside node 'deep' (flaky, line 2")
 
 
 def test_an_upstream_node_changing_its_output_after_validation_is_reported_at_the_port():
@@ -755,43 +782,45 @@ def test_an_upstream_node_changing_its_output_after_validation_is_reported_at_th
     model = network('drifts(name="d")\nlinear(4, name="head")', input_shape=("B", 4), output_shape=("B", 4),
                     device="cpu", registry=registry)
     model(torch.randn(2, 4))
-    with pytest.raises(HNDLError) as caught:
+    with pytest.raises(RuntimeError, match="^mat1 and mat2") as caught:
         model(torch.randn(2, 4))
-    lines = str(caught.value).splitlines()
-    assert lines[0] == ("E_RUNTIME (node head; line 2, column 1): linear 'head' input 'x' (from node:d/out): "
-                        "expected shape [B=2, 4], got [2, 2]")
-    assert lines[-1].startswith("  linear 'head' then raised RuntimeError: mat1 and mat2")
+    assert _hndl_notes(caught.value)[0].splitlines()[:2] == [
+        "HNDL: raised inside node 'head' (linear, line 2, column 1)",
+        "  linear 'head' input 'x' (from node:d/out): expected shape [B=2, 4], got [2, 2]",
+    ]
 
 
 def _replaces_the_head_weight(model):
     model["head"].weight = nn.Parameter(torch.randn(2, 7))
 
 
-@pytest.mark.parametrize("mutate, message", [
-    (lambda model: setattr(model["hidden"], "extra", nn.Linear(2, 2)),
-     "registered state of linear 'hidden' no longer matches the build: "
-     "submodule 'nodes.n_hidden.extra' was added (Linear)"),
-    (lambda model: model["hidden"].register_parameter("scale", nn.Parameter(torch.ones(1))),
+@pytest.mark.parametrize("mutate, raised, message", [
+    # Registrations the hooks see are HNDL's own finding, before any node runs.
+    (lambda model: setattr(model["hidden"], "extra", nn.Linear(2, 2)), HNDLError,
+     "E_RUNTIME (node hidden; line 1, column 1): registered state of linear 'hidden' no longer matches "
+     "the build: submodule 'nodes.n_hidden.extra' was added (Linear)"),
+    (lambda model: model["hidden"].register_parameter("scale", nn.Parameter(torch.ones(1))), HNDLError,
      "registered state of linear 'hidden' no longer matches the build: "
      "parameter 'nodes.n_hidden.scale' was added"),
-    (lambda model: setattr(model["norm"], "running_mean", None),
+    (lambda model: setattr(model["norm"], "running_mean", None), HNDLError,
      "registered state of batch_norm 'norm' no longer matches the build: "
      "buffer 'nodes.n_norm.running_mean' was set to None"),
-    (lambda model: delattr(model["head"], "weight"),
-     "registered state of linear 'head' no longer matches the build: "
-     "parameter 'nodes.n_head.weight' was removed"),
-    (_replaces_the_head_weight,
-     "linear 'head' raised RuntimeError: mat1 and mat2 shapes cannot be multiplied (3x5 and 7x2)"),
+    # A deletion runs no hook: the node's own error surfaces, explained by a note.
+    (lambda model: delattr(model["head"], "weight"), AttributeError,
+     "HNDL: raised inside node 'head' (linear, line 1, column 60)\n"
+     "  registered state no longer matches the build: parameter 'nodes.n_head.weight' was removed"),
+    (_replaces_the_head_weight, RuntimeError, "mat1 and mat2 shapes cannot be multiplied (3x5 and 7x2)"),
 ])
-def test_a_submodule_or_parameter_mutated_after_the_first_call_is_reported(mutate, message):
+def test_a_submodule_or_parameter_mutated_after_the_first_call_is_reported(mutate, raised, message):
     model = _stateful(device="cpu").eval()
     x = torch.randn(3, 4)
     model(x)
     mutate(model)
     for _ in range(2):  # reported on every call until the state is repaired
-        with pytest.raises(HNDLError, match="^E_RUNTIME") as caught:
+        with pytest.raises(raised) as caught:
             model(x)
-        assert message in str(caught.value)
+        assert type(caught.value) is raised
+        assert message in "\n".join([str(caught.value), *_hndl_notes(caught.value)])
 
 
 def test_a_parameter_set_to_none_is_reported_at_the_next_revalidation():

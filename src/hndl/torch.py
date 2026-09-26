@@ -36,9 +36,8 @@ _UNCOMPILED = (_UNSET, None, (), (), ())
 #: forgets them all and starts again; bounds the cache under varying batch sizes.
 _MAX_SIGNATURES = 64
 
-#: Errors that pass out of a node untouched: callers catch these by type to
-#: react (shrink the batch, free memory), so wrapping them would break that.
-_UNWRAPPED = (torch.cuda.OutOfMemoryError, MemoryError)
+#: How the note HNDL adds to an exception raised inside a node begins.
+_NOTE_PREFIX = "HNDL:"
 
 _is_compiling = torch.compiler.is_compiling
 # One C call answering "is any autocast region active"; the public query needs
@@ -193,10 +192,11 @@ class GraphModule(nn.Module):
     casting the module (``.to()``, ``.cuda()``, ``.double()``, ...) and
     registering a parameter, buffer or submodule on any module in the graph
     both re-check the registered state before the next call and revalidate
-    every port on it. A torch error raised inside a node is reported as
-    ``E_RUNTIME`` naming the node, its operation and its source line, with the
-    tensors it received, and with any change to registered state that explains
-    it.
+    every port on it. An exception raised inside a node's module propagates
+    as itself --- same type, message and traceback --- with one note naming the
+    node, its operation and source line, the tensors it received, and any
+    change to registered state that explains it. ``E_RUNTIME`` is kept for
+    what HNDL's own checks find.
     """
 
     def __init__(self, plan, modules, device, receipt, port_orders):
@@ -351,63 +351,61 @@ class GraphModule(nn.Module):
                 lines.append(f"  B={batch} is this call's batch size, read from input {first!r}")
         return self._error("\n".join(lines), node_id)
 
-    def _node_failure(self, node_id, error, bound, batch):
-        """The ``E_RUNTIME`` to raise for an exception out of one node's module.
+    def _annotate_failure(self, node_id, error, bound, batch, after_validation):
+        """Add HNDL's context to an exception out of one node, as a note.
 
-        Returns ``None`` when the original exception should propagate as is:
-        out-of-memory errors, which callers catch by type, and HNDL errors that
-        already name their node. Everything here runs only after a failure.
+        The exception itself propagates unchanged --- same type, same message,
+        same traceback --- so callers that catch ``RuntimeError`` (or an
+        out-of-memory error, to shrink the batch) keep working; the note is
+        what the traceback prints after the message. Everything here runs only
+        after a failure, and an exception passing out through several graphs
+        (a graph used as a node of another) keeps the innermost node's note.
         """
-        if isinstance(error, _UNWRAPPED):
-            return None
-        name = self._node_name(node_id)
-        raised = f"{name} raised {type(error).__name__}: {error}"
+        if isinstance(error, HNDLError) and error.node is not None:
+            return  # an HNDL check already named its node
+        if any(isinstance(note, str) and note.startswith(_NOTE_PREFIX)
+               for note in getattr(error, "__notes__", ())):
+            return
+        try:
+            error.add_note(self._failure_note(node_id, error, bound, batch, after_validation))
+        except Exception:  # noqa: BLE001 - a note must never replace the real error
+            pass
+
+    def _failure_note(self, node_id, error, bound, batch, after_validation):
+        label, line, column = self._node_labels[node_id]
+        position = "".join(f", {key} {value}" for key, value in (("line", line), ("column", column))
+                           if value is not None)
+        lines = [f"{_NOTE_PREFIX} raised inside node {node_id!r} ({label}{position})"]
         if not self._state_matches():
             # State removed between calls breaks forward rather than reporting
-            # itself; say so, because that is the cause the torch error hides.
-            return self._state_error("build", then=raised.replace("\n", "\n    "))
-        if isinstance(error, HNDLError):
-            if error.node is not None:
-                return None
-            return self._error(f"{name}: {error.message}", node_id, code=error.code)
-        lines = [raised.replace("\n", "\n    ")]
+            # itself; say so, because that is the cause the error hides.
+            _, listed = self._state_summary()
+            lines.append(f"  registered state no longer matches the build: {listed}")
+        elif after_validation:
+            # The signature was validated earlier, so a node input that now
+            # breaks its contract means an upstream module changed its output.
+            compiled = self._compiled
+            if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
+                compiled = self._resolve_shapes(batch)
+            entry = next(entry for entry in compiled[3] if entry[5] == node_id)
+            for (_, expected, dtype, port), value in zip(entry[1], bound):
+                try:
+                    self._check(value, expected, dtype, port, batch)
+                except HNDLError as mismatch:
+                    lines.extend("  " + text for text in mismatch.message.splitlines())
+                    lines.append("  (an earlier call with the same input signature passed every check, "
+                                 "so an upstream module now produces a different tensor)")
+                    break
         effective = self._effective_dtype
         for port, value in zip(self._port_orders[node_id], bound):
             spec = self._spec_in[node_id][port]
             dtype = effective(self._port_dtypes[node_id][port])
             lines.append(f"  input {port!r}: got {_tensor_text(value)}; contract "
                          f"{_contract_text(spec, batch)}:{_dtype_text(dtype)} on {self._runtime_device}")
-        return self._error("\n".join(lines), node_id)
-
-    def _fast_failure(self, node, error, values):
-        """Diagnose an exception from the unchecked loop, after the fact.
-
-        The call's input signature was validated earlier, so the node's inputs
-        are re-checked against its contract first: a mismatch there means an
-        upstream module changed what it produces since, which is the useful
-        thing to report.
-        """
-        if isinstance(error, _UNWRAPPED):
-            return None
-        ins, _, _, _, node_id = node
-        bound = [values[slot] for slot in ins]
-        leading = values[0]
-        batch = leading.shape[0] if isinstance(leading, torch.Tensor) and leading.ndim else None
-        compiled = self._compiled
-        if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
-            compiled = self._resolve_shapes(batch)
-        entry = next(entry for entry in compiled[3] if entry[5] == node_id)
-        if self._state_matches():
-            for (_, expected, dtype, port), value in zip(entry[1], bound):
-                try:
-                    self._check(value, expected, dtype, port, batch)
-                except HNDLError as mismatch:
-                    return self._error(
-                        f"{mismatch.message}\n  (an earlier call with the same input signature passed "
-                        f"every check, so an upstream module now produces a different tensor)\n"
-                        f"  {self._node_name(node_id)} then raised {type(error).__name__}: {error}",
-                        node_id)
-        return self._node_failure(node_id, error, bound, batch)
+        if type(error).__module__.startswith(("torch._dynamo", "torch._inductor")):
+            lines.append("  the error came from torch.compile compiling or running this node's module; "
+                         "run it without torch.compile to see the eager error")
+        return "\n".join(lines)
 
     # -- registered state ---------------------------------------------------
 
@@ -511,18 +509,21 @@ class GraphModule(nn.Module):
                 changes.append((node_id, f"the submodules of '{path}' were re-registered in a different order"))
         return changes
 
-    def _state_error(self, when, then=None):
-        """``E_RUNTIME`` naming the node whose registered state changed, and how."""
+    def _state_summary(self):
+        """The first node whose registered state changed, and every change, as text."""
         changes = self._state_changes() or [(None, "the module tree differs from the one recorded at build")]
         node_id = next((owner for owner, _ in changes if owner is not None), None)
-        subject = self._node_name(node_id) if node_id is not None else "the network"
         listed = "; ".join(text for _, text in changes[:6])
         if len(changes) > 6:
             listed += f"; and {len(changes) - 6} more"
+        return node_id, listed
+
+    def _state_error(self, when):
+        """``E_RUNTIME`` naming the node whose registered state changed, and how."""
+        node_id, listed = self._state_summary()
+        subject = self._node_name(node_id) if node_id is not None else "the network"
         phrase = "changed during forward" if when == "forward" else "no longer matches the build"
         lines = [f"registered state of {subject} {phrase}: {listed}"]
-        if then is not None:
-            lines.append(f"  {then}")
         lines.append("  HNDL fixes every parameter, buffer and submodule when it builds a plan, so state "
                      "added or removed later is not trained, seeded or saved as the plan describes; "
                      "create it in __init__, or resolve and build a new plan to change the architecture")
@@ -695,10 +696,8 @@ class GraphModule(nn.Module):
                 try:
                     result = module(*bound)
                 except Exception as error:
-                    failure = self._node_failure(node_id, error, bound, batch)
-                    if failure is None:
-                        raise
-                    raise failure from error
+                    self._annotate_failure(node_id, error, bound, batch, after_validation=False)
+                    raise
             for (key, expected, dtype, port), value in zip(
                     outs, self._split_result(result, out_ports, out_set, node_id)):
                 check(value, expected, dtype, port, batch)
@@ -764,10 +763,11 @@ class GraphModule(nn.Module):
                     for slot, value in zip(outs, self._split_result(result, out_ports, out_set, node_id)):
                         values[slot] = value
         except Exception as error:
-            failure = self._fast_failure(node, error, values)
-            if failure is None:
-                raise
-            raise failure from error
+            ins, _, _, _, node_id = node
+            leading = values[0]
+            self._annotate_failure(node_id, error, [values[slot] for slot in ins],
+                                   leading.shape[0] if leading.ndim else None, after_validation=True)
+            raise
         outputs = {name: values[slot] for name, slot in output_slots}
         if _watch_generation != generation:
             # Something registered state while this call ran --- perhaps one

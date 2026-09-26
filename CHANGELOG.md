@@ -40,9 +40,12 @@
   and prints the contract in HNDL notation beside the tensor that arrived
   (`expected [B=32, 64]:float32 on cpu` / `got [32, 63]:float32 on cpu`);
   dtypes are spelled `float32`, not `torch.float32`. An exception raised
-  inside a layer is now an `E_RUNTIME` naming the node, with its inputs and
-  any registered-state change that explains it, and the original exception as
-  `__cause__` (out-of-memory errors still propagate unchanged). Registered
+  inside a layer keeps its type, message and traceback (a `RuntimeError` or
+  out-of-memory error is still caught as one) and gains a note, via
+  `add_note`, naming the node, its operation and source line, its inputs
+  against their contract, and any registered-state change that explains it;
+  an exception passing out through nested graphs carries only the innermost
+  node's note. Registered
   state edits PyTorch runs no hook for --- `del` of a registered name,
   `module.param = None`, direct writes to `_parameters`/`_buffers`/`_modules`
   --- are reported at the next full check or when a layer then fails, not on
