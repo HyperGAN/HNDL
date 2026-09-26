@@ -4,7 +4,7 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: 0.7.0.** Config strings with bounded `for` loops, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 69 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
+**Status: 0.8.0.** Config strings with bounded `for` loops, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 69 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
 
 Install on Linux with Python 3.11–3.14:
 
@@ -426,7 +426,7 @@ Every operation, built-in or yours, is an `nn.Module` with an `@operator` declar
 
 ```python
 from torch import nn
-from hndl import Registry
+from hndl import Example, Registry
 from hndl.torch import network
 
 registry = Registry.builtins()
@@ -436,6 +436,7 @@ registry = Registry.builtins()
     identity="example.silu",
     summary="Sigmoid-weighted linear unit.",
     shape="x[B, ...] -> out[B, ...]",
+    examples=[Example("linear(8)\nmy_silu()", ("B", 4), ("B", 8))],
 )
 class SiLU(nn.SiLU):
     """Computes ``x * sigmoid(x)`` elementwise."""
@@ -453,7 +454,7 @@ model = network(
 )
 ```
 
-Configs now understand `my_silu()`. Native functions use `registry.ops.my_silu()` and pass that same registry to `network_from_callable`. The shape string `x[B, ...] -> out[B, ...]` says the output has exactly the input's shape, so constraints propagate in both directions through the layer. Each node gets its own instance of the class, constructed with the resolved arguments.
+Configs now understand `my_silu()`. Native functions pass that same registry to `network_from_callable` and call `ops.my_silu()` like any built-in: inside a capture, `ops` looks aliases up in the capture's registry. `registry.ops.my_silu()` also works. The shape string `x[B, ...] -> out[B, ...]` says the output has exactly the input's shape, so constraints propagate in both directions through the layer. Each node gets its own instance of the class, constructed with the resolved arguments.
 
 Operations with several inputs, different output dimensions, or scalar arguments declare them in the same place. The built-in adaptive normalization is declared as:
 
@@ -473,9 +474,9 @@ class AdaptiveNorm(nn.Module):
     def forward(self, x, params): ...
 ```
 
-The shared `C` means both shapes use the same channel count; `2*C` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model. Arguments carry help text, and examples are runnable configs; `python -m hndl.docs` renders both into [docs/operators](https://hypergan.github.io/HNDL/operators/). See [docs/ADDING_OPERATORS.md](https://hypergan.github.io/HNDL/ADDING_OPERATORS/) for the complete format, including the `relation=` hook for rules the shape string cannot express.
+The shared `C` means both shapes use the same channel count; `2*C` means two style values per channel. This works in either direction: 32 feature channels require 64 style values, and 64 style values determine 32 channels. HNDL can therefore fill in an omitted style projection width before building the model. Arguments carry help text, and examples are runnable configs; `python -m hndl.docs` renders both into [docs/operators](https://hypergan.github.io/HNDL/operators/). See [docs/ADDING_OPERATORS.md](https://hypergan.github.io/HNDL/ADDING_OPERATORS/) for the complete format, including the `relation=` hook for rules the shape string cannot express and the convolution and broadcasting helpers in `hndl.relations` that the built-ins use there.
 
-Shape declarations are claims made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct.
+Shape declarations are claims made by trusted application code. Configs only call registered names. Custom implementations still need numerical and gradient checks; a shape declaration does not prove their code correct. `hndl.testing.check_operator(registry, "my_silu")` runs the harness every built-in passes on the operator's declared `examples=` (it needs at least one): each example resolves identically in both frontends, round-trips through JSON, builds, runs forward and backward on every available device, and matches the operator's `reference=` when it declares one.
 
 ## Experiment with less boilerplate
 

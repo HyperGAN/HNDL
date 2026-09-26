@@ -2,7 +2,7 @@ from torch import nn
 from torch.nn.utils import parametrizations
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, PAIR, Policy, operator
-from ._relations import spatial
+from ..relations import spatial
 
 DOWN2 = "spatial.down2@1"
 _spatial = spatial("conv2d")

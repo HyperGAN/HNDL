@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.8.0 (2026-09-26)
+
+A minor release for operators defined outside HNDL: `ops` calls operators
+registered on the capture's registry, shape relations are public in
+`hndl.relations`, and `hndl.testing` runs the built-in operator harness on
+host operators. The forward fast path also notices parameters, buffers, and
+submodules that were deleted, cleared, or added without a registration hook.
+
+- **`ops` calls custom operators.** Inside `resolve_callable` or
+  `network_from_callable`, the global `from hndl import ops` now looks each
+  alias up in the registry that capture runs under, so an operator registered
+  on it is called as `ops.my_op()` instead of failing with `E_OPERATOR`.
+  `registry.ops.my_op()` still works and mixes freely with `ops` in one
+  capture. Outside a capture `ops` still checks aliases against the built-in
+  catalog, and a factory read there resolves its alias when it is called.
+- **A factory from another registry fails with `E_CAPTURE`.** Calling
+  `other.ops.my_op()` in a capture whose registry does not hold that exact
+  declaration used to fail with `E_STATE_VERSION`; it now fails with
+  `E_CAPTURE`, naming the operator and saying which registry to pass. The same
+  identity declared by a different class in the capture's registry is rejected
+  the same way instead of being accepted. Built-in factories from any
+  `Registry.builtins()` keep working in every built-in registry, which shares
+  their declarations. The message suggests `ops.<alias>` only when the
+  capture's registry binds that alias to the same identity, and otherwise
+  names the operator the alias binds there.
+- **`hndl.relations` is public.** The convolution arithmetic, the 2D
+  convolution relation, elementwise joins and broadcasting that the built-ins
+  use in `relation=` functions move from the private
+  `hndl.operators._relations` to a documented module, joined by
+  `conv_input_range`, `conv_transpose_input` and the per-axis relations
+  `conv_axis` and `conv_transpose_axis` for operators with their own strided
+  axes. The old import path re-exports them. The per-axis relations fail with
+  `E_CONSTRAINT` when a port's rank has no such axis.
+- **`hndl.testing` is public.** The harness every built-in operator passes,
+  `check_operator(registry, alias)`, runs on any registry: declaration
+  completeness, then for every example on every available device the
+  frontend and JSON round trip, build, forward and backward, reproducible
+  rebuild and reference comparison, plus float16 and bfloat16 on CUDA.
+  `check_declaration`, `check_round_trip`, `check_build_and_run` and
+  `check_reference` run one check each, and `example_params` and
+  `operator_params` build pytest parameters for them. The built-in suite now
+  runs through it. Importing `hndl` or `hndl.testing` does not import pytest.
+  A check fails with `AssertionError`, except where HNDL itself rejects the
+  example while resolving, building or running it, such as `E_RUNTIME` for a
+  module whose output shape differs from its declaration. `devices` and
+  `dtypes` take one name or a list, and the class must carry its own
+  docstring rather than inherit one.
+- `docs/ADDING_OPERATORS.md` covers operators declared outside the package:
+  calling them through `ops`, reusing `hndl.relations` in a strided
+  operator's relation, testing them with `hndl.testing`, and adding
+  arguments with `Arg(since=...)`.
+- **Registered-state edits PyTorch runs no hook for are caught on the next
+  call.** `del module.weight`, `linear.bias = None` and direct writes to a
+  module's `_parameters`, `_buffers` or `_modules` used to go unnoticed on the
+  unchecked path until a new input signature, a move or cast, or a failing
+  layer forced a full check, so a layer could silently run without its bias.
+  Each call now compares, in C, which names those mappings hold, which of them
+  are `None`, and which submodules, with a record taken when the state last
+  matched the build: about 0.7 us per call for a five-node MLP and 1.3 us for
+  a transformer block. An entry removed, set to `None` or added, or a
+  submodule replaced, fails the next call with the same `E_RUNTIME` report as
+  a registration, naming the node and what changed. A tensor swapped in under
+  a registered name is not a change, so `torch.func.functional_call` stays on
+  the unchecked path, and the record holds no tensors, so nothing a functional
+  call passed in is kept alive or reaches `copy.deepcopy`. Not detected: a
+  whole mapping replaced, a mapping reordered, one name removed and another
+  added in the same `_parameters` or `_buffers` between two calls, and a
+  submodule replaced by one that compares equal to it.
+- The forward-latency parity benchmark (`-m benchmark`) allows hndl 1.5x
+  hand-written PyTorch for the MLP and transformer block, down from 2.0x, and
+  compares the fastest of ten interleaved rounds per side instead of one
+  sequential mean each. The convolution case keeps 2.0x: its ratio swings
+  with machine load and cannot see per-call overhead.
+
 ## 0.7.0 (2026-09-26)
 
 A minor release: configs repeat blocks with bounded `for _ in range(N):`
