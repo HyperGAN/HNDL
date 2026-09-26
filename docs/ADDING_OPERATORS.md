@@ -285,8 +285,10 @@ it to the same plan, which round-trips through JSON unchanged; it builds,
 runs forward and backward to a finite output of the declared shape, and
 rebuilds identically from the same seed, in float32 on every device and in
 float16 and bfloat16 on CUDA; and it matches the declared `reference=`.
-Failures raise `AssertionError` naming the alias, example and device. Pass
-`devices=["cpu"]` or `dtypes=["float32"]` to narrow it.
+Failures raise `AssertionError` naming the alias, example and device;
+what HNDL itself rejects on the way, such as a module whose output shape
+differs from its declaration, raises that `HNDLError` (`E_RUNTIME`) instead.
+Pass `devices="cpu"` or `dtypes=["float32"]` to narrow it.
 
 For one pytest case per example, parametrize with `example_params`, limited
 to the package's own aliases so the built-in catalog is not rerun:

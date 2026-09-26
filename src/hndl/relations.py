@@ -97,6 +97,20 @@ def conv_transpose_input(extent, kernel, stride=1, padding=0, dilation=1, output
 # -- relations -----------------------------------------------------------------------------
 
 
+def _extents(s, axis, x, out):
+    """The known extents of ``axis`` on ports ``x`` and ``out``, None where unknown."""
+    extents = []
+    for port in (x, out):
+        shape = s.shape(port)
+        if shape is None:
+            extents.append(None)
+            continue
+        if not -len(shape) <= axis < len(shape):
+            s.error("E_CONSTRAINT", f"Port {port} has rank {len(shape)}, which has no axis {axis}")
+        extents.append(shape[axis])
+    return extents
+
+
 def conv_axis(s, axis, kernel, stride=1, padding=0, dilation=1, *, x="x", out="out"):
     """Relate one axis of ``x`` and ``out`` by :func:`conv_output`, in both directions.
 
@@ -108,13 +122,14 @@ def conv_axis(s, axis, kernel, stride=1, padding=0, dilation=1, *, x="x", out="o
 
     Call it once per strided axis from a ``relation=`` function. It does not
     set ranks or touch other axes: pair it with ``s.rank`` and ``s.equal`` or
-    ``s.axis`` for the rest of the shape.
+    ``s.axis`` for the rest of the shape. A port whose rank has no ``axis``
+    fails with ``E_CONSTRAINT``.
     """
-    a, b = s.shape(x), s.shape(out)
-    if a is not None and a[axis] is not None:
-        s.axis(out, axis, conv_output(a[axis], kernel, stride, padding, dilation))
-    if b is not None and b[axis] is not None:
-        lower, upper = conv_input_range(b[axis], kernel, stride, padding, dilation)
+    a, b = _extents(s, axis, x, out)
+    if a is not None:
+        s.axis(out, axis, conv_output(a, kernel, stride, padding, dilation))
+    if b is not None:
+        lower, upper = conv_input_range(b, kernel, stride, padding, dilation)
         if lower > upper:
             s.error("E_CONSTRAINT", "Convolution inverse has no positive input extent")
         s.interval(x, axis, lower, upper)
@@ -124,15 +139,16 @@ def conv_transpose_axis(s, axis, kernel, stride=1, padding=0, dilation=1, output
     """Relate one axis of ``x`` and ``out`` by :func:`conv_transpose_output`, in both directions.
 
     Both directions are exact. An output extent that no integer input extent
-    reaches fails with ``E_CONSTRAINT``.
+    reaches fails with ``E_CONSTRAINT``, as does a port whose rank has no
+    ``axis``. Like :func:`conv_axis`, it does not set ranks.
     """
-    a, b = s.shape(x), s.shape(out)
-    if a is not None and a[axis] is not None:
-        s.axis(out, axis, conv_transpose_output(a[axis], kernel, stride, padding, dilation, output_padding))
-    if b is not None and b[axis] is not None:
-        extent = conv_transpose_input(b[axis], kernel, stride, padding, dilation, output_padding)
+    a, b = _extents(s, axis, x, out)
+    if a is not None:
+        s.axis(out, axis, conv_transpose_output(a, kernel, stride, padding, dilation, output_padding))
+    if b is not None:
+        extent = conv_transpose_input(b, kernel, stride, padding, dilation, output_padding)
         if extent is None:
-            s.error("E_CONSTRAINT", f"Target extent {b[axis]} requires a non-integer transpose-convolution input")
+            s.error("E_CONSTRAINT", f"Target extent {b} requires a non-integer transpose-convolution input")
         s.axis(x, axis, extent)
 
 

@@ -55,8 +55,11 @@ def _foreign_operator(registry, op):
     else:
         problem = "does not hold it"
     hint = "pass the registry that declares it to resolve_callable or network_from_callable"
-    if op.alias in registry.aliases:
+    local = registry._aliases.get(op.alias)
+    if local is not None and local.key == op.key:
         hint += f", or call ops.{op.alias} to use the capture's own binding"
+    elif local is not None:
+        hint += f" (ops.{op.alias} in this capture binds {local.key}, a different operator)"
     return (f"{op.alias} was taken from another registry's ops and binds {op.key}, but this "
             f"capture's registry {problem}; {hint}")
 

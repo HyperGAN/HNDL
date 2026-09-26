@@ -7,6 +7,7 @@ helpers in a custom ``relation=``, and the ``hndl.testing`` harness.
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ from torch import nn
 
 import hndl
 from hndl import Arg, Example, HNDLError, Registry, ops, resolve, resolve_callable, testing
-from hndl.relations import (conv_axis, conv_input_range, conv_output, conv_transpose_input,
+from hndl.relations import (conv_axis, conv_input_range, conv_output, conv_transpose_axis, conv_transpose_input,
                             conv_transpose_output, spatial)
 from hndl.torch import network_from_callable
 
@@ -238,36 +239,206 @@ def test_example_params_ids_and_filtering():
     assert all(not example.network for _, example in testing.example_cases(REGISTRY, network=False))
 
 
-def broken_registry(**overrides):
+class Shift(nn.Module):
+    """``out = x + 1``."""
+
+    def forward(self, x):
+        return x + 1
+
+
+def _allocating():
+    # parameter_counts and the build receipt's first estimate construct on meta.
+    return torch.empty(0).device.type != "meta"
+
+
+class WrongWidth(Shift):
+    """Drops half the features."""
+
+    def forward(self, x):
+        return x[:, :4]
+
+
+class NotFinite(Shift):
+    """Returns NaN."""
+
+    def forward(self, x):
+        return x * float("nan")
+
+
+class NaNGradient(Shift):
+    """A finite output whose input gradient is 0 * inf."""
+
+    def forward(self, x):
+        return x + 1 + 0 * (x - x.detach()).sqrt()
+
+
+class Noisy(Shift):
+    """Draws fresh noise in every forward."""
+
+    def forward(self, x):
+        return x + torch.rand_like(x)
+
+
+class HiddenParameter(Shift):
+    """Allocates a parameter only when it is not being measured."""
+
+    def __init__(self):
+        super().__init__()
+        if _allocating():
+            self.weight = nn.Parameter(torch.zeros(3))
+
+
+class HiddenBuffer(Shift):
+    """Allocates a buffer only when it is not being measured."""
+
+    def __init__(self):
+        super().__init__()
+        if _allocating():
+            self.register_buffer("state", torch.zeros(3))
+
+
+class IntegerParameter(Shift):
+    """Holds a parameter the plan's dtype cannot cast."""
+
+    def __init__(self):
+        super().__init__()
+        self.table = nn.Parameter(torch.zeros(3, dtype=torch.int64), requires_grad=False)
+
+
+class Undocumented(nn.Module):
+    def forward(self, x):
+        return x + 1
+
+
+def _rank_two(s):
+    s.rank("x", 2)
+    s.rank("out", 2)
+    s.equal("x", "out")
+
+
+def broken_registry(module=Shift, **overrides):
     registry = Registry.builtins()
     declaration = dict(identity="host.shift", summary="Add one.", shape="x[B, ...] -> out[B, ...]",
                        reference=lambda module: lambda x: x + 1,
                        examples=[Example("linear(8)\nshift()", ("B", 4), ("B", 8))])
     declaration.update(overrides)
-
-    @registry.operator("shift", **declaration)
-    class Shift(nn.Module):
-        """``out = x + 1``."""
-
-        def forward(self, x):
-            return x + 1
-
+    # A fresh subclass per registry, keeping only the class's own docstring.
+    cls = type(module.__name__, (module,), {"__doc__": module.__dict__.get("__doc__")})
+    registry.operator("shift", **declaration)(cls)
     return registry
 
 
-@pytest.mark.parametrize("overrides,message", [
-    ({"reference": lambda module: lambda x: x + 2}, "shift example 0 on cpu, reference: .*differs from the reference"),
-    ({"examples": [Example("linear(8)", ("B", 4), ("B", 8))]}, "example does not use shift"),
-    ({"examples": []}, "shift needs at least one Example"),
+@pytest.mark.parametrize("module,overrides,message", [
+    (Shift, {"reference": lambda module: lambda x: x + 2},
+     "shift example 0 on cpu, reference: n1: output differs from the reference"),
+    (Shift, {"reference": lambda module: lambda x: (x + 1, x + 1)},
+     "reference: n1: the module returns 1 tensors, the reference 2"),
+    (Shift, {"reference": lambda module: lambda x: 2 * x.detach() - x + 1},
+     "reference: n1: input gradient differs from the reference"),
+    (Shift, {"reference": lambda module: lambda x: x.detach() + 1},
+     "reference: n1: the module carries a gradient the reference does not"),
+    (Shift, {"examples": [Example("linear(8)", ("B", 4), ("B", 8))]}, "example does not use shift"),
+    (Shift, {"examples": []}, "shift needs at least one Example"),
+    (Shift, {"summary": "Add one:"}, "shift needs a one-sentence summary"),
+    (Undocumented, {}, "shift needs a class docstring"),
+    (Shift, {"shape": "x -> out", "relation": _rank_two}, "shift uses a relation function and needs shape_text"),
+    (NotFinite, {}, "shift example 0 on cpu in float32: shift: output is not finite"),
+    (NaNGradient, {}, "in float32: shift: the input gradient is missing or not finite"),
+    (Noisy, {}, "in float32: shift: a rebuild from the same seed differs"),
+    (HiddenParameter, {}, r"in float32: shift: parameter_counts \{'n0': 40, 'n1': 0\} disagrees with the built "
+                          r"modules \{'n0': 40, 'n1': 3\}"),
+    (HiddenBuffer, {}, "in float32: shift: the build receipt reports 160 state bytes, the module holds 172"),
+    (IntegerParameter, {}, "in float32: shift: float32 plan built parameters of dtype torch.int64"),
 ])
-def test_harness_reports_a_broken_operator(overrides, message):
+def test_harness_reports_a_broken_operator(module, overrides, message):
     with pytest.raises(AssertionError, match=message):
-        testing.check_operator(broken_registry(**overrides), "shift", devices=["cpu"])
+        testing.check_operator(broken_registry(module, **overrides), "shift", devices=["cpu"])
+
+
+def test_harness_passes_on_the_error_hndl_raises_for_a_wrong_output_shape():
+    with pytest.raises(HNDLError, match=r"E_RUNTIME.*shift 'n1' output 'out': expected shape \[B=2, 8\], got \[2, 4\]"):
+        testing.check_operator(broken_registry(WrongWidth), "shift", devices=["cpu"])
+
+
+def test_harness_checks_the_plan_and_the_model_hndl_produce(monkeypatch):
+    """The checks that guard HNDL itself rather than the operator, failed on purpose."""
+    import hndl.resolver
+    from hndl.torch import GraphModule
+
+    spec, example = REGISTRY.get("decimate"), REGISTRY.get("decimate").examples[0]
+    registry = broken_registry()
+    shift = registry.get("shift")
+    original_repr = GraphModule.__repr__
+    with monkeypatch.context() as patch:
+        patch.setattr(GraphModule, "__repr__", lambda self: (torch.rand(1), original_repr(self))[1])
+        with pytest.raises(AssertionError, match=r"shift: repr\(model\) consumed random numbers"):
+            testing.check_build_and_run(registry, shift, shift.examples[0])
+    with monkeypatch.context() as patch:
+        patch.setattr(GraphModule, "__repr__", lambda self: "GraphModule()")
+        with pytest.raises(AssertionError, match=r"shift: repr\(model\) does not name the operator"):
+            testing.check_build_and_run(registry, shift, shift.examples[0])
+    with monkeypatch.context() as patch:
+        patch.setattr(testing, "_replay", lambda graph, registry: lambda x: (registry.ops.linear(8, bias=False),
+                                                                           registry.ops.shift())[1])
+        with pytest.raises(AssertionError, match="shift: native Python replay resolves to a different plan"):
+            testing.check_round_trip(registry, shift, shift.examples[0])
+    with monkeypatch.context() as patch:
+        other = resolve("linear(8)", registry=registry, input_shape=("B", 4), output_shape=("B", 8))
+        patch.setattr(testing, "ResolvedPlan", type("Stale", (), {"from_json": staticmethod(lambda *a, **k: other)}))
+        with pytest.raises(AssertionError, match="shift: the plan changes when saved and restored"):
+            testing.check_round_trip(registry, shift, shift.examples[0])
+    with monkeypatch.context() as patch:
+        # A resolver that stops leaving Arg(since=...) defaults out of the plan.
+        patch.setattr(hndl.resolver, "_canonical_arguments", lambda spec, args, source: (args, source))
+        with pytest.raises(AssertionError, match="n1.offset keeps its post-release default in the plan"):
+            testing.check_round_trip(REGISTRY, spec, example)
 
 
 def test_harness_rejects_a_declaration_from_another_registry():
     with pytest.raises(AssertionError, match="different declaration"):
         testing.check_round_trip(REGISTRY, host_registry().get("decimate"), REGISTRY.get("decimate").examples[0])
+    with pytest.raises(AssertionError, match="host.decimate@1 is not registered in this registry"):
+        testing.check_operator(Registry.builtins(), REGISTRY.get("decimate"))
+
+
+def test_harness_takes_one_device_or_dtype_name():
+    testing.check_operator(REGISTRY, "decimate", devices="cpu", dtypes="float32")
+
+
+def test_readme_registration_example_passes_the_harness():
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    block = next(block for block in re.findall(r"```python\n(.*?)\n```", readme, re.S) if '"my_silu"' in block)
+    namespace = {}
+    exec(block, namespace)
+    testing.check_operator(namespace["registry"], "my_silu", devices="cpu")
+
+
+def test_capture_hint_does_not_suggest_an_alias_bound_to_another_operator():
+    registry = Registry()
+
+    @registry.operator("linear", identity="host.mylinear", summary="Not the built-in linear.",
+                       shape="x[B, ...] -> out[B, ...]")
+    class MyLinear(Shift):
+        """``out = x + 1``."""
+
+    with pytest.raises(HNDLError, match=r"binds linear@1, .* \(ops.linear in this capture binds "
+                                        r"host.mylinear@1, a different operator\)") as caught:
+        resolve_callable(lambda x: Registry.builtins().ops.linear(3), registry=registry,
+                         input_shape=("B", 3), output_shape=("B", 3))
+    assert "call ops.linear" not in str(caught.value)
+
+
+@pytest.mark.parametrize("helper", [conv_axis, conv_transpose_axis])
+def test_conv_axis_helpers_reject_a_port_without_the_axis(helper):
+    registry = Registry()
+
+    @registry.operator("bad", identity="host.bad", summary="Strides an axis the port lacks.", shape="x -> out",
+                       relation=lambda s: helper(s, 2, kernel=1, stride=2), shape_text="axis 2 strided by 2")
+    class Bad(Shift):
+        """``out = x + 1``."""
+
+    with pytest.raises(HNDLError, match="E_CONSTRAINT.*Port x has rank 2, which has no axis 2"):
+        resolve("bad()", registry=registry, input_shape=("B", 4), output_shape=("B", 2))
 
 
 def test_importing_hndl_and_its_harness_does_not_import_pytest():

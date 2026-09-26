@@ -16,14 +16,17 @@
   identity declared by a different class in the capture's registry is rejected
   the same way instead of being accepted. Built-in factories from any
   `Registry.builtins()` keep working in every built-in registry, which shares
-  their declarations.
+  their declarations. The message suggests `ops.<alias>` only when the
+  capture's registry binds that alias to the same identity, and otherwise
+  names the operator the alias binds there.
 - **`hndl.relations` is public.** The convolution arithmetic, the 2D
   convolution relation, elementwise joins and broadcasting that the built-ins
   use in `relation=` functions move from the private
   `hndl.operators._relations` to a documented module, joined by
   `conv_input_range`, `conv_transpose_input` and the per-axis relations
   `conv_axis` and `conv_transpose_axis` for operators with their own strided
-  axes. The old import path re-exports them.
+  axes. The old import path re-exports them. The per-axis relations fail with
+  `E_CONSTRAINT` when a port's rank has no such axis.
 - **`hndl.testing` is public.** The harness every built-in operator passes,
   `check_operator(registry, alias)`, runs on any registry: declaration
   completeness, then for every example on every available device the
@@ -33,6 +36,11 @@
   `check_reference` run one check each, and `example_params` and
   `operator_params` build pytest parameters for them. The built-in suite now
   runs through it. Importing `hndl` or `hndl.testing` does not import pytest.
+  A check fails with `AssertionError`, except where HNDL itself rejects the
+  example while resolving, building or running it, such as `E_RUNTIME` for a
+  module whose output shape differs from its declaration. `devices` and
+  `dtypes` take one name or a list, and the class must carry its own
+  docstring rather than inherit one.
 - `docs/ADDING_OPERATORS.md` covers operators declared outside the package:
   calling them through `ops`, reusing `hndl.relations` in a strided
   operator's relation, testing them with `hndl.testing`, and adding

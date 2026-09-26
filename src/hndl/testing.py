@@ -24,14 +24,17 @@ same coverage by pointing the harness at the registry that holds it:
         testing.check_build_and_run(registry, spec, example, device=device)
 
 The ``check_*`` functions raise ``AssertionError`` on the first failure, so
-they work under pytest, unittest or a plain script. Importing this module
+they work under pytest, unittest or a plain script. A failure HNDL itself
+detects while resolving, building or running an example, such as a module
+whose output shape differs from the declared one, surfaces as the
+``HNDLError`` HNDL raises for it. Importing this module
 imports torch but not pytest; only :func:`example_params` and
 :func:`operator_params`, which build ``pytest.param`` objects, need pytest.
 
 The checks, for every example of an operator:
 
-- :func:`check_declaration`: summary, class docstring, argument help text,
-  at least one example, and ``shape_text`` for a relation the shape string
+- :func:`check_declaration`: summary, a docstring on the class itself,
+  argument help text, at least one example, and ``shape_text`` for a relation the shape string
   does not show.
 - :func:`check_round_trip`: the example resolves, uses the operator, gives
   the same semantic digest when replayed through ``registry.ops`` in native
@@ -75,9 +78,17 @@ def _spec(registry, operator):
         return registry.get(operator)
     if type(operator) is not Operator:
         raise TypeError("expected an operator alias or a declaration from registry.operators")
-    if registry.by_identity(operator.key) is not operator:
+    registered = registry._identities.get(operator.key)
+    if registered is None:
+        _fail(f"{operator.key} is not registered in this registry")
+    if registered is not operator:
         _fail(f"{operator.key} is registered in this registry with a different declaration")
     return operator
+
+
+def _names(value):
+    """One device or dtype name, or an iterable of them, as a tuple."""
+    return (value,) if isinstance(value, (str, torch.device)) else tuple(value)
 
 
 def _torch_dtype(name):
@@ -203,7 +214,9 @@ def check_declaration(registry, operator):
     summary = spec.summary.strip()
     if not summary or summary.endswith(":"):
         _fail(f"{spec.alias} needs a one-sentence summary")
-    if not spec.doc.strip():
+    # inspect.getdoc falls back to a base class's docstring, such as
+    # nn.Module's; the operator's own class has to document it.
+    if not spec.doc.strip() or not (spec.module.__dict__.get("__doc__") or "").strip():
         _fail(f"{spec.alias} needs a class docstring")
     if not spec.examples:
         _fail(f"{spec.alias} needs at least one Example")
@@ -323,6 +336,8 @@ def check_reference(registry, operator, example, *, device="cpu"):
             if any(tensor.requires_grad for tensor in expected):
                 _fail(f"{node.id}: the reference carries a gradient the module does not")
             continue
+        if not any(tensor.requires_grad for tensor in expected):
+            _fail(f"{node.id}: the module carries a gradient the reference does not")
         sum(a.square().mean() for a in actual).backward()
         sum(e.square().mean() for e in expected).backward()
         for a, e in zip(inputs, mirrors):
@@ -341,14 +356,14 @@ def check_operator(registry, alias, *, devices=None, dtypes=None, network=False)
     ``devices`` defaults to :func:`available_devices`. ``dtypes`` defaults to
     float32 on every device plus :data:`REDUCED_PRECISION` on CUDA devices,
     which is what the built-in suite runs; an explicit list applies to every
-    device. Reference comparisons run in float32. Examples marked
+    device. Either takes one name (``devices="cpu"``) or a list of them. Reference comparisons run in float32. Examples marked
     ``network=True`` are skipped unless ``network=True``. Raises
     ``AssertionError`` on the first failure, naming the alias, example and
     device.
     """
     spec = _spec(registry, alias)
     check_declaration(registry, spec)
-    devices = available_devices() if devices is None else list(devices)
+    devices = available_devices() if devices is None else _names(devices)
     for index, example in enumerate(spec.examples):
         if example.network and not network:
             continue
@@ -359,7 +374,7 @@ def check_operator(registry, alias, *, devices=None, dtypes=None, network=False)
             raise AssertionError(f"{label}: {exc}") from exc
         for device in devices:
             if dtypes is not None:
-                selected = tuple(dtypes)
+                selected = _names(dtypes)
             else:
                 selected = ("float32",) + (REDUCED_PRECISION if str(device).startswith("cuda") else ())
             for dtype in selected:
