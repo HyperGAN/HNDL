@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-09-26)
+
+A minor release: configs repeat blocks with bounded `for _ in range(N):`
+loops, networks check their contracts once per input signature instead of on
+every call, config parsing runs in process, saved plans stay loadable as
+operators gain arguments, and new equalized-learning-rate and
+coordinate-rendering primitives join the catalog.
 
 - **Configs can repeat statements with `for _ in range(N):`.** `N` is a
   positive integer literal, loops nest, and the body takes any top-level
