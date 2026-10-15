@@ -22,7 +22,7 @@ x[B, ..., D] -> out[B, ..., D]
 | `experts` (positional) | int | required | >= 1; <= 2147483647 | Number of feed-forward experts. |
 | `hidden` (positional) | int | required | >= 1; <= 2147483647 | Inner width of every expert's feed-forward. |
 | `top_k` | int | `2` | >= 1 | Experts each token is routed to; must not exceed experts. |
-| `activation` | str | `"gelu"` | one of `gelu`, `gelu_tanh`, `relu`, `silu` | Nonlinearity inside each expert: "gelu", "gelu_tanh", "relu" or "silu". |
+| `activation` | str | `"gelu"` | one of `gelu`, `gelu_tanh`, `relu`, `silu`, `quick_gelu` | Nonlinearity inside each expert: "gelu", "gelu_tanh", "relu" or "silu". |
 
 ## Description
 

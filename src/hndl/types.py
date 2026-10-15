@@ -287,8 +287,8 @@ class Node(Immutable):
     inputs: Mapping[str, str] = field(default_factory=dict)
     outputs: tuple[str, ...] = ("out",)
     source: Mapping[str, Any] | None = None
-    initialization: Mapping[str, Any] = field(default=DEFAULT_INITIALIZATION, kw_only=True)
-    trainability: Mapping[str, Any] = field(default=DEFAULT_TRAINABILITY, kw_only=True)
+    initialization: Mapping[str, Any] = field(default_factory=lambda: DEFAULT_INITIALIZATION, kw_only=True)
+    trainability: Mapping[str, Any] = field(default_factory=lambda: DEFAULT_TRAINABILITY, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.args, Mapping):

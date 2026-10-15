@@ -9,4 +9,6 @@ build/
 dist/
 *.egg-info/
 .claude/
+.agents/
+uv.lock
 site/

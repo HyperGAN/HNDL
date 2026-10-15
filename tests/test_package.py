@@ -21,7 +21,7 @@ def test_pyproject_version_matches_module():
 
 def test_readme_status_names_the_current_version():
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert f"**Status: {__version__}.**" in readme or "**Status: 0.8.1.**" in readme
+    assert f"**Status: {__version__}.**" in readme or "**Status: 0.8.2.**" in readme
 
 
 def test_torch_is_a_required_dependency():
@@ -33,12 +33,12 @@ def test_torch_is_a_required_dependency():
 
 def test_spec_and_implementation_status_names_current_version():
     spec = (REPO_ROOT / "SPEC.md").read_text(encoding="utf-8")
-    assert any(f"**Status: the implemented {v} contract.**" in spec for v in (__version__, "0.8.1"))
-    assert any(f"records what {v} ships and what remains for v1." in spec for v in (__version__, "0.8.1"))
+    assert any(f"**Status: the implemented {v} contract.**" in spec for v in (__version__, "0.8.2"))
+    assert any(f"records what {v} ships and what remains for v1." in spec for v in (__version__, "0.8.2"))
     assert "0.1.2" not in spec
 
     impl = (REPO_ROOT / "IMPLEMENTATION.md").read_text(encoding="utf-8")
-    assert any(f"# Implementation notes: {v}" in impl for v in (__version__, "0.8.1"))
+    assert any(f"# Implementation notes: {v}" in impl for v in (__version__, "0.8.2"))
     assert "0.1.2" not in impl
 
 
