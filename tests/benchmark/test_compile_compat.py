@@ -30,10 +30,13 @@ pytestmark = pytest.mark.benchmark
 #: Eager and compiled kernels may pick different reduction orders.
 TOLERANCE = {"rtol": 1e-4, "atol": 1e-5}
 
+#: On CUDA, TorchInductor generates fused Triton kernels whose power-of-two reduction
+#: trees and fused accumulation order introduce minor single-precision rounding
+#: differences (~3.5e-5 to 4.3e-4) compared to eager cuDNN/cuBLAS kernels.
+CUDA_TOLERANCE = {"rtol": 1e-3, "atol": 1e-3}
+
 #: Dynamo errors are famously long; keep the skip reason readable.
 MAX_REASON = 400
-
-DEVICE = "cpu"
 
 
 def _random_inputs(plan, device="cpu"):
@@ -76,12 +79,13 @@ def test_torch_compile_matches_eager(name, benchmark_min_time, device):
         print(f"\n{name}: compiles: no ({type(exc).__name__})")
         pytest.skip(f"torch.compile unsupported for {name}: {_truncate(exc)}")
 
+    tol = CUDA_TOLERANCE if str(device).startswith("cuda") else TOLERANCE
     if isinstance(eager_output, dict):
         assert set(compiled_output) == set(eager_output)
         for key in eager_output:
-            torch.testing.assert_close(compiled_output[key], eager_output[key], **TOLERANCE)
+            torch.testing.assert_close(compiled_output[key], eager_output[key], **tol)
     else:
-        torch.testing.assert_close(compiled_output, eager_output, **TOLERANCE)
+        torch.testing.assert_close(compiled_output, eager_output, **tol)
 
     with torch.no_grad():
         eager = measure(lambda: model(**inputs), min_run_time=benchmark_min_time)
