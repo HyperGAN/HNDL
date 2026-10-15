@@ -36,6 +36,21 @@ def _explicit(x, out_h, out_w):
     return torch.stack(rows, dim=-2)
 
 
+def _pool_axis(x, axis, count):
+    extent = x.shape[axis]
+    if extent % count == 0:
+        shape = list(x.shape)
+        shape[axis] = count
+        shape.insert(axis + 1, extent // count)
+        return x.reshape(shape).mean(dim=axis + 1)
+    slices = []
+    for start, end in _windows(extent, count):
+        idx = [slice(None)] * x.ndim
+        idx[axis] = slice(start, end)
+        slices.append(x[tuple(idx)].mean(dim=axis))
+    return torch.stack(slices, dim=axis)
+
+
 def _reference(module):
     out_h, out_w = module.output_size
     return lambda x: _explicit(x, out_h, out_w)
@@ -132,7 +147,7 @@ class AdaptiveAvgPool2d(nn.Module):
             blocked = x.reshape(x.shape[0], x.shape[1], out_h, in_h // out_h, out_w, in_w // out_w)
             return blocked.mean(dim=(3, 5))
         if out_h * out_w <= MAX_EXPLICIT_WINDOWS:
-            return _explicit(x, out_h, out_w)
+            return _pool_axis(_pool_axis(x, 2, out_h), 3, out_w)
         return F.adaptive_avg_pool2d(x, self.output_size)
 
     def extra_repr(self):

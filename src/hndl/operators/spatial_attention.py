@@ -127,7 +127,7 @@ class SpatialAttention(nn.Module):
         energy = torch.bmm(f.transpose(1, 2), g)
         beta = energy.softmax(dim=-1)
         attended = torch.bmm(h, beta.transpose(1, 2))
-        return self.gamma * attended.reshape(batch, channels, height, width) + x
+        return torch.addcmul(x, attended.reshape(batch, channels, height, width), self.gamma)
 
     def extra_repr(self):
         return f"reduction={self.reduction}, query_channels={self.query_channels}"

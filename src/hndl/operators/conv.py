@@ -4,6 +4,7 @@ from torch.nn.utils import parametrizations
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, PAIR, Policy, operator
 from ..relations import spatial
+from ._equalized import eval_weight
 
 DOWN2 = "spatial.down2@1"
 _spatial = spatial("conv2d")
@@ -36,12 +37,7 @@ def _relation(s):
 
 def _reference(module):
     def apply(x):
-        training = module.training
-        module.eval()
-        try:
-            weight = module.weight
-        finally:
-            module.train(training)
+        weight = eval_weight(module)
         return F.conv2d(x, weight, module.bias, stride=module.stride, padding=module.padding,
                         dilation=module.dilation, groups=module.groups)
 

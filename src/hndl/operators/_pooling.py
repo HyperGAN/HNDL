@@ -8,6 +8,7 @@ whole window", so it normalizes to ``kernel_size`` on that axis.
 """
 
 from ..errors import HNDLError
+from ._relations import conv_axis, conv_output
 
 
 def normalize_stride(stride, kernel_size):
@@ -16,7 +17,7 @@ def normalize_stride(stride, kernel_size):
 
 
 def pool_output(extent, kernel, stride, padding):
-    return (extent + 2 * padding - kernel) // stride + 1
+    return conv_output(extent, kernel, stride, padding)
 
 
 def validate_padding(args):
@@ -33,25 +34,16 @@ def pooling(x="x", out="out"):
 
     def relation(s):
         args = s.args
-        a, b = s.shape(x), s.shape(out)
+        a = s.shape(x)
         for j in range(2):
             axis = j + 2
             kernel, padding = args["kernel_size"][j], args["padding"][j]
             stride = args["stride"][j] or kernel
             i = None if a is None else a[axis]
-            o = None if b is None else b[axis]
-            if i is not None:
-                if i + 2 * padding < kernel:
-                    s.error("E_CONSTRAINT", f"A {kernel}-wide window does not fit an extent of "
-                                            f"{i} padded by {padding}")
-                else:
-                    s.axis(out, axis, pool_output(i, kernel, stride, padding))
-            if o is not None:
-                lower = max(1, (o - 1) * stride - 2 * padding + kernel)
-                upper = o * stride - 2 * padding + kernel - 1
-                if lower > upper:
-                    s.error("E_CONSTRAINT", "Pooling inverse has no positive input extent")
-                else:
-                    s.interval(x, axis, lower, upper)
+            if i is not None and i + 2 * padding < kernel:
+                s.error("E_CONSTRAINT", f"A {kernel}-wide window does not fit an extent of "
+                                        f"{i} padded by {padding}")
+            else:
+                conv_axis(s, axis, kernel=kernel, stride=stride, padding=padding, dilation=1, x=x, out=out)
 
     return relation

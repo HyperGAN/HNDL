@@ -3,7 +3,8 @@ from torch.nn.utils import parametrizations
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
-from ._equalized import EqualLinear
+from ._equalized import EqualLinear, eval_weight
+from ._relations import non_image
 
 
 def _validate(args):
@@ -11,20 +12,9 @@ def _validate(args):
         raise HNDLError('E_ARGUMENT', 'linear equalized=True cannot be combined with spectral_norm=True')
 
 
-def _relation(s):
-    shape = s.shape("x") or s.shape("out")
-    if shape is not None and len(shape) == 4:
-        s.error("E_CONSTRAINT", "linear expects [B, D] or [B, T, D]; flatten or reshape image tensors first")
-
-
 def _reference(module):
     def apply(x):
-        training = module.training
-        module.eval()
-        try:
-            weight = module.weight
-        finally:
-            module.train(training)
+        weight = eval_weight(module)
         scale = (module.in_features ** -0.5) if getattr(module, "equalized", False) else 1
         return F.linear(x, weight * scale, module.bias)
 
@@ -35,7 +25,7 @@ def _reference(module):
     "linear",
     summary="Fully connected layer: a learned affine map on the last axis.",
     shape="x[B, ..., D_in] -> out[B, ..., D_out]",
-    relation=_relation,
+    relation=non_image,
     reference=_reference,
     validate=_validate,
     args={

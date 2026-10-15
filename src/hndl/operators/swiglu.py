@@ -2,12 +2,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
-
-
-def _relation(s):
-    shape = s.shape("x") or s.shape("out")
-    if shape is not None and len(shape) == 4:
-        s.error("E_CONSTRAINT", "swiglu expects [B, D] or [B, T, D]; flatten or reshape image tensors first")
+from ._relations import non_image
 
 
 def _reference(module):
@@ -24,7 +19,7 @@ def _reference(module):
     "swiglu",
     summary="SwiGLU feed-forward block: a SiLU-gated projection folded back to the input width.",
     shape="x[B, ..., D] -> out[B, ..., D]",
-    relation=_relation,
+    relation=non_image,
     reference=_reference,
     args={
         "hidden": Arg(int, min=1, max=MAX_DIMENSION_LITERAL,

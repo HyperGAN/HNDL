@@ -168,9 +168,9 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x):
         branch = self.attn(self.norm1(x))
-        x = x + (branch if self.gamma1 is None else branch * self.gamma1)
+        x = x + branch if self.gamma1 is None else torch.addcmul(x, branch, self.gamma1)
         branch = self.ffn(self.norm2(x))
-        return x + (branch if self.gamma2 is None else branch * self.gamma2)
+        return x + branch if self.gamma2 is None else torch.addcmul(x, branch, self.gamma2)
 
     def extra_repr(self):
         return f"norm={self.norm_kind!r}, layer_scale={self.gamma1 is not None}"

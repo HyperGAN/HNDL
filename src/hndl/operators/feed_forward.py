@@ -4,20 +4,15 @@ from torch.nn import functional as F
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ._equalized import EqualLinear
+from ._relations import non_image
 
 ACTIVATIONS = {
-    "gelu": lambda h: F.gelu(h),
+    "gelu": F.gelu,
     "gelu_tanh": lambda h: F.gelu(h, approximate="tanh"),
-    "relu": lambda h: F.relu(h),
-    "silu": lambda h: F.silu(h),
+    "relu": F.relu,
+    "silu": F.silu,
     "quick_gelu": lambda h: h * torch.sigmoid(1.702 * h),
 }
-
-
-def _relation(s):
-    shape = s.shape("x") or s.shape("out")
-    if shape is not None and len(shape) == 4:
-        s.error("E_CONSTRAINT", "feed_forward expects [B, D] or [B, T, D]; flatten or reshape image tensors first")
 
 
 def _reference(module):
@@ -39,7 +34,7 @@ def _reference(module):
     "feed_forward",
     summary="Transformer feed-forward block: widen, activate, project back.",
     shape="x[B, ..., D] -> out[B, ..., D]",
-    relation=_relation,
+    relation=non_image,
     reference=_reference,
     args={
         "hidden": Arg(int, min=1, max=MAX_DIMENSION_LITERAL,
@@ -110,13 +105,14 @@ class FeedForward(nn.Module):
     def __init__(self, hidden, activation, dropout, bias, *, D, equalized=False):
         super().__init__()
         self.activation = activation
+        self._activate = ACTIVATIONS[activation]
         linear = EqualLinear if equalized else nn.Linear
         self.up = linear(D, hidden, bias=bias)
         self.dropout = nn.Dropout(float(dropout))
         self.down = linear(hidden, D, bias=bias)
 
     def forward(self, x):
-        return self.down(self.dropout(ACTIVATIONS[self.activation](self.up(x))))
+        return self.down(self.dropout(self._activate(self.up(x))))
 
     def extra_repr(self):
         return f"activation={self.activation!r}"

@@ -13,6 +13,7 @@ class EqualLinear(nn.Linear):
 
     def __init__(self, in_features, out_features, bias=True, *, equalized=True):
         self.equalized = equalized
+        self._scale = in_features ** -0.5
         super().__init__(in_features, out_features, bias=bias)
 
     def reset_parameters(self):
@@ -25,8 +26,18 @@ class EqualLinear(nn.Linear):
     def forward(self, x):
         if not self.equalized:
             return super().forward(x)
-        return F.linear(x, self.weight * (self.in_features ** -0.5), self.bias)
+        return F.linear(x, self.weight * self._scale, self.bias)
 
     def extra_repr(self):
         base = super().extra_repr()
         return f"{base}, equalized={self.equalized}"
+
+
+def eval_weight(module):
+    """Read module.weight in evaluation mode to freeze spectral-norm power iteration."""
+    training = module.training
+    module.eval()
+    try:
+        return module.weight
+    finally:
+        module.train(training)

@@ -5,7 +5,7 @@ from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 
 
 def _relation(s):
-    shape = s.shape("x")
+    shape = s.shape("x") or s.shape("out")
     channels = shape[1] if shape is not None else None
     if channels is not None and channels % s.args["num_groups"]:
         s.error("E_CONSTRAINT", f"num_groups={s.args['num_groups']} must divide channels={channels}")

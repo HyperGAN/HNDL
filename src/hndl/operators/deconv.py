@@ -5,6 +5,7 @@ from torch.nn.utils import parametrizations
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, PAIR, Policy, operator
 from ..relations import spatial
+from ._equalized import eval_weight
 
 
 def _validate(args):
@@ -14,12 +15,7 @@ def _validate(args):
 
 def _reference(module):
     def apply(x):
-        training = module.training
-        module.eval()
-        try:
-            weight = module.weight
-        finally:
-            module.train(training)
+        weight = eval_weight(module)
         return F.conv_transpose2d(x, weight, module.bias, stride=module.stride, padding=module.padding,
                                   output_padding=module.output_padding, groups=module.groups,
                                   dilation=module.dilation)

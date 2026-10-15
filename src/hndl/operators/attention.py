@@ -72,7 +72,7 @@ def _rope_tables(positions, head_dim, device, dtype):
     # underflows in half precision) and float64 when double precision is requested.
     calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
     exponent = torch.arange(0, head_dim, 2, device=device, dtype=calc_dtype) / head_dim
-    inverse_frequency = torch.pow(torch.tensor(ROPE_BASE, device=device, dtype=calc_dtype), -exponent)
+    inverse_frequency = ROPE_BASE ** (-exponent)
     angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
     duplicated = torch.cat((angles, angles), dim=-1)
     return duplicated.cos().to(dtype)[None, None], duplicated.sin().to(dtype)[None, None]
@@ -92,8 +92,7 @@ def _relative_position_index(height, width):
 
 
 def _causal_bias(positions, device, dtype):
-    blocked = torch.ones(positions, positions, device=device, dtype=torch.bool).triu(1)
-    return torch.zeros(positions, positions, device=device, dtype=dtype).masked_fill(blocked, float("-inf"))
+    return torch.full((positions, positions), float("-inf"), device=device, dtype=dtype).triu(1)
 
 
 def _reference(module):
@@ -303,11 +302,19 @@ class Attention(nn.Module):
                                  persistent=False)
         else:
             self.positions = None
+        self._rope_cache = {}
 
     def position_bias(self):
         """The learned ``[heads, T, T]`` additive bias gathered from the table."""
-        gathered = self.relative_position_bias_table[self.relative_position_index.reshape(-1)]
-        return gathered.view(self.positions, self.positions, self.heads).permute(2, 0, 1).contiguous()
+        return self.relative_position_bias_table[self.relative_position_index].permute(2, 0, 1).contiguous()
+
+    def _get_rope_tables(self, positions, device, dtype):
+        key = (positions, device, dtype)
+        cached = self._rope_cache.get(key)
+        if cached is None:
+            cached = _rope_tables(positions, self.head_dim, device, dtype)
+            self._rope_cache[key] = cached
+        return cached
 
     def forward(self, x):
         batch, positions, width = x.shape
@@ -324,7 +331,7 @@ class Attention(nn.Module):
         k = _split_heads(self.k_proj(x), self.heads, self.head_dim)
         v = _split_heads(self.v_proj(x), self.heads, self.head_dim)
         if self.rope:
-            cos, sin = _rope_tables(positions, self.head_dim, x.device, x.dtype)
+            cos, sin = self._get_rope_tables(positions, x.device, x.dtype)
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
         attended = F.scaled_dot_product_attention(
             q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0,

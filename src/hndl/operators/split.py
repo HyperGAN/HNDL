@@ -16,9 +16,9 @@ def _relation(s):
         s.rank(port, len(known))
     for axis in range(1, len(known)):
         if axis != dim:
-            for target in ports:
-                for source in ports:
-                    s.axis(target, axis, s.shape(source)[axis])
+            extent = next((s.shape(port)[axis] for port in ports if s.shape(port)[axis] is not None), None)
+            for port in ports:
+                s.axis(port, axis, extent)
     s.axis("first", dim, s.args.get("size"))
     i, a, b = (s.shape(port)[dim] for port in ports)
     if a is not None and b is not None:

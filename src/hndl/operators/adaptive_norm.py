@@ -6,11 +6,17 @@ from ..operator import Arg, Example, operator
 
 
 def _reference(module):
+    """Explicit two-pass mean and variance calculation without fused kernels."""
+    eps = module.eps
+
     def adaptive_norm(x, params):
         c = x.shape[1]
+        mean = x.mean(dim=(2, 3), keepdim=True)
+        centered = x - mean
+        variance = centered.square().mean(dim=(2, 3), keepdim=True)
+        normalized = centered * torch.rsqrt(variance + eps)
         delta_gamma, beta = params[:, :c], params[:, c:]
-        norm = F.instance_norm(x, eps=module.eps)
-        return (1 + delta_gamma[:, :, None, None]) * norm + beta[:, :, None, None]
+        return (1 + delta_gamma[:, :, None, None]) * normalized + beta[:, :, None, None]
 
     return adaptive_norm
 
@@ -50,12 +56,10 @@ class AdaptiveNorm(nn.Module):
         self.eps = float(eps)
 
     def forward(self, x, params):
-        mean = x.mean(dim=(2, 3), keepdim=True)
-        centered = x - mean
-        variance = centered.square().mean(dim=(2, 3), keepdim=True)
-        normalized = centered * torch.rsqrt(variance + self.eps)
-        delta_gamma, beta = params.split(x.shape[1], dim=1)
-        return (1 + delta_gamma[:, :, None, None]) * normalized + beta[:, :, None, None]
+        c = x.shape[1]
+        normalized = F.instance_norm(x, eps=self.eps)
+        delta_gamma, beta = params[:, :c], params[:, c:]
+        return torch.addcmul(beta[:, :, None, None], normalized, 1 + delta_gamma[:, :, None, None])
 
     def extra_repr(self):
         return f"eps={self.eps}"

@@ -4,13 +4,8 @@ from torch.nn import functional as F
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
-
-ACTIVATIONS = {
-    "gelu": lambda: nn.GELU(approximate="none"),
-    "gelu_tanh": lambda: nn.GELU(approximate="tanh"),
-    "relu": lambda: nn.ReLU(),
-    "silu": lambda: nn.SiLU(),
-}
+from ._relations import non_image
+from .feed_forward import ACTIVATIONS
 
 
 def _validate(args):
@@ -18,20 +13,9 @@ def _validate(args):
         raise HNDLError("E_ARGUMENT", f"top_k={args['top_k']} must be <= experts={args['experts']}")
 
 
-def _relation(s):
-    shape = s.shape("x") or s.shape("out")
-    if shape is not None and len(shape) == 4:
-        s.error("E_CONSTRAINT", "moe expects [B, D] or [B, T, D]; flatten or reshape image tensors first")
-
-
 def _reference(module):
     """Dense reference oracle: evaluate router and all experts without sparse indexing."""
-    activation = {
-        "gelu": lambda h: F.gelu(h),
-        "gelu_tanh": lambda h: F.gelu(h, approximate="tanh"),
-        "relu": lambda h: F.relu(h),
-        "silu": lambda h: F.silu(h),
-    }[module.activation]
+    activation = ACTIVATIONS[module.activation]
 
     def expert_forward(expert, h):
         return F.linear(activation(F.linear(h, expert.up.weight, expert.up.bias)), expert.down.weight, expert.down.bias)
@@ -54,7 +38,7 @@ class Expert(nn.Module):
         super().__init__()
         self.up = nn.Linear(d_model, hidden)
         self.down = nn.Linear(hidden, d_model)
-        self.activation = ACTIVATIONS[activation]()
+        self.activation = ACTIVATIONS[activation]
 
     def forward(self, x):
         return self.down(self.activation(self.up(x)))
@@ -64,7 +48,7 @@ class Expert(nn.Module):
     "moe",
     summary="Sparse mixture of experts: route every token to its top-k feed-forward experts.",
     shape="x[B, ..., D] -> out[B, ..., D]",
-    relation=_relation,
+    relation=non_image,
     args={
         "experts": Arg(int, min=1, max=MAX_DIMENSION_LITERAL, help="Number of feed-forward experts."),
         "hidden": Arg(int, min=1, max=MAX_DIMENSION_LITERAL, help="Inner width of every expert's feed-forward."),
@@ -134,14 +118,20 @@ class MixtureOfExperts(nn.Module):
         logits = self.router(flat)
         values, indices = torch.topk(logits, self.top_k, dim=-1)
         weights = torch.softmax(values, dim=-1)
+
+        if torch.compiler.is_compiling():
+            gates = torch.zeros(flat.shape[0], len(self.experts),
+                                device=flat.device, dtype=weights.dtype).scatter(1, indices, weights)
+            out = sum(expert(flat) * gates[:, i : i + 1] for i, expert in enumerate(self.experts))
+            return out.reshape(x.shape)
+
         out = torch.zeros_like(flat)
         for index, expert in enumerate(self.experts):
-            mask = indices == index
-            rows = mask.any(dim=-1).nonzero(as_tuple=True)[0]
+            rows, cols = torch.where(indices == index)
             if rows.numel() == 0:
                 continue
-            gate = (weights * mask.to(weights.dtype)).sum(dim=-1).index_select(0, rows).unsqueeze(-1)
-            out = out.index_add(0, rows, expert(flat.index_select(0, rows)) * gate)
+            gate = weights[rows, cols].unsqueeze(-1)
+            out.index_add_(0, rows, expert(flat.index_select(0, rows)) * gate)
         return out.reshape(x.shape)
 
     def extra_repr(self):

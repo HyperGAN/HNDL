@@ -3,14 +3,9 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
+from ._relations import non_image
 
 EPS = 1e-5
-
-
-def _relation(s):
-    shape = s.shape("x") or s.shape("out")
-    if shape is not None and len(shape) == 4:
-        s.error("E_CONSTRAINT", "hopfield expects [B, D] or [B, T, D]; flatten or reshape image tensors first")
 
 
 def _reference(module):
@@ -35,7 +30,7 @@ def _reference(module):
     "hopfield",
     summary="Retrieve learned patterns by iterating the modern Hopfield update on the last axis.",
     shape="x[B, ..., D] -> out[B, ..., D]",
-    relation=_relation,
+    relation=non_image,
     args={
         "patterns": Arg(int, min=1, max=MAX_DIMENSION_LITERAL,
                         help="Number of stored patterns to learn; the rows of the memory matrix."),
@@ -119,15 +114,17 @@ class Hopfield(nn.Module):
         super().__init__()
         self.patterns = int(patterns)
         self.features = int(D)
+        self._normalized_shape = (self.features,)
         self.beta = float(beta)
         self.steps = int(steps)
         self.normalize = bool(normalize)
         self.stored = nn.Parameter(torch.randn(self.patterns, self.features) * self.features**-0.5)
 
     def forward(self, x):
-        xi = F.layer_norm(x, (self.features,), eps=EPS) if self.normalize else x
+        xi = F.layer_norm(x, self._normalized_shape, eps=EPS) if self.normalize else x
+        stored_t = self.stored.t()
         for _ in range(self.steps):
-            xi = torch.softmax(self.beta * (xi @ self.stored.transpose(0, 1)), dim=-1) @ self.stored
+            xi = torch.softmax(self.beta * (xi @ stored_t), dim=-1) @ self.stored
         return xi
 
     def extra_repr(self):

@@ -6,12 +6,15 @@ from ..operator import Arg, Example, operator
 
 
 def _reference(module):
-    """A handwritten ``F.rms_norm`` equivalent of the built module."""
-    normalized_shape, eps = module.normalized_shape, module.eps
+    """Explicit reciprocal-square-root mean square formula without fused kernel."""
+    eps = module.eps
     weight = module.weight
 
     def rms_norm(x):
-        return F.rms_norm(x, normalized_shape, weight, eps)
+        statistic = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+        scale = torch.rsqrt(statistic.square().mean(dim=-1, keepdim=True) + eps)
+        out = (statistic * scale).to(x.dtype)
+        return out if weight is None else out * weight
 
     return rms_norm
 
@@ -74,10 +77,7 @@ class RMSNorm(nn.Module):
             self.register_parameter("weight", None)
 
     def forward(self, x):
-        statistic = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
-        scale = torch.rsqrt(statistic.square().mean(dim=-1, keepdim=True) + self.eps)
-        out = (statistic * scale).to(x.dtype)
-        return out if self.weight is None else out * self.weight
+        return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
 
     def extra_repr(self):
         return f"{self.normalized_shape[0]}, eps={self.eps}, affine={self.weight is not None}"

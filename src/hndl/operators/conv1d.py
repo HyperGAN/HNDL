@@ -4,6 +4,7 @@ from torch.nn.utils import parametrizations
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ..relations import conv_axis
+from ._equalized import eval_weight
 
 
 def _relation(s):
@@ -30,12 +31,7 @@ def _reference(module):
     refreshed and therefore reproduces exactly the weight it applied.
     """
     def apply(x):
-        training = module.training
-        module.eval()
-        try:
-            weight = module.weight
-        finally:
-            module.train(training)
+        weight = eval_weight(module)
         return F.conv1d(x, weight, module.bias, stride=module.stride, padding=module.padding,
                         dilation=module.dilation, groups=module.groups)
     return apply

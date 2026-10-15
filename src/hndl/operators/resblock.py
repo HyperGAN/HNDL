@@ -3,6 +3,7 @@ from torch import nn
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
+from ._relations import conv_axis
 
 KERNEL = 3
 PADDING = 1
@@ -20,19 +21,12 @@ def _relation(s):
     """
     args = s.args
     stride = args["stride"]
-    x, out = s.rank("x", 4), s.rank("out", 4)
+    out = s.rank("out", 4)
+    s.rank("x", 4)
     if args["norm"] == "group_norm" and out[1] is not None and out[1] % args["groups"]:
         s.error("E_CONSTRAINT", f"groups={args['groups']} must divide out_channels={out[1]} for group_norm")
     for axis in (2, 3):
-        extent, target = x[axis], out[axis]
-        if extent is not None:
-            s.axis("out", axis, (extent + 2 * PADDING - KERNEL) // stride + 1)
-        if target is not None:
-            lower = max(1, (target - 1) * stride - 2 * PADDING + KERNEL - 1 + 1)
-            upper = target * stride - 2 * PADDING + KERNEL - 1
-            if lower > upper:
-                s.error("E_CONSTRAINT", "Residual block inverse has no positive input extent")
-            s.interval("x", axis, lower, upper)
+        conv_axis(s, axis, kernel=KERNEL, stride=stride, padding=PADDING, dilation=1)
 
 
 def _norm(kind, channels, groups):

@@ -5,14 +5,16 @@ from ..operator import Arg, Example, operator
 MODES = ("mean", "first", "last", "max")
 
 
+_POOLERS = {
+    "mean": lambda x: x.mean(dim=1),
+    "first": lambda x: x[:, 0],
+    "last": lambda x: x[:, -1],
+    "max": lambda x: x.max(dim=1).values,
+}
+
+
 def _pool(mode, x):
-    if mode == "mean":
-        return x.mean(dim=1)
-    if mode == "first":
-        return x[:, 0]
-    if mode == "last":
-        return x[:, -1]
-    return x.max(dim=1).values
+    return _POOLERS[mode](x)
 
 
 def _reference(module):
@@ -77,9 +79,10 @@ class PoolTokens(nn.Module):
     def __init__(self, mode):
         super().__init__()
         self.mode = mode
+        self._pool = _POOLERS[mode]
 
     def forward(self, x):
-        return _pool(self.mode, x)
+        return self._pool(x)
 
     def extra_repr(self):
         return f"mode={self.mode!r}"
