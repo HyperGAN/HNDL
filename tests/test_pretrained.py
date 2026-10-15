@@ -161,6 +161,75 @@ def test_directory_copies_share_a_revision_and_differ_by_path(text_checkpoint, t
     assert first.semantic_digest != second.semantic_digest
 
 
+def test_resolve_source_detects_inplace_config_mutation_without_cache_clear(text_checkpoint):
+    first = sources.resolve_source(str(text_checkpoint))
+    config_file = text_checkpoint / "config.json"
+    config = json.loads(config_file.read_text())
+    config["dummy_marker"] = 42
+    config_file.write_text(json.dumps(config))
+    second = sources.resolve_source(str(text_checkpoint))
+    assert first.revision != second.revision
+
+
+def test_resolve_source_detects_inplace_weight_mutation_without_cache_clear(text_checkpoint):
+    first = sources.resolve_source(str(text_checkpoint))
+    weights_file = text_checkpoint / "model.safetensors"
+    data = bytearray(weights_file.read_bytes())
+    data[-1] ^= 0xFF
+    weights_file.write_bytes(data)
+    second = sources.resolve_source(str(text_checkpoint))
+    assert first.revision != second.revision
+
+
+def test_bare_safetensors_revision_detects_weight_mutation(text_checkpoint):
+    weights = text_checkpoint / "model.safetensors"
+    config = text_checkpoint / "config.json"
+    first = sources.resolve_source(str(weights), str(config))
+    data = bytearray(weights.read_bytes())
+    data[-1] ^= 0xFF
+    weights.write_bytes(data)
+    second = sources.resolve_source(str(weights), str(config))
+    assert first.revision != second.revision
+
+
+def test_restore_rejects_inplace_weight_mutation_without_cache_clear(text_checkpoint):
+    plan = resolve(f'pretrained("{text_checkpoint}")', input_shape=("B", 5), output_shape=("B", 5, 8), input_dtype="int64")
+    encoded = plan.to_json()
+    weights_file = text_checkpoint / "model.safetensors"
+    data = bytearray(weights_file.read_bytes())
+    data[-1] ^= 0xFF
+    weights_file.write_bytes(data)
+    with pytest.raises(HNDLError, match="E_CONSTRAINT.*revision"):
+        ResolvedPlan.from_json(encoded)
+
+
+def test_pretrained_trainable_mode_syncs_wrapped_model(text_checkpoint):
+    plan_frozen = resolve(f'pretrained("{text_checkpoint}")', input_shape=("B", 5), output_shape=("B", 5, 8), input_dtype="int64")
+    model_frozen = build(plan_frozen, device=DEVICE)
+    assert not model_frozen["n0"].model.training
+    plan_trainable = resolve(f'pretrained("{text_checkpoint}", trainable=True)', input_shape=("B", 5), output_shape=("B", 5, 8), input_dtype="int64")
+    model_trainable = build(plan_trainable, device=DEVICE)
+    assert model_trainable["n0"].model.training
+
+
+def test_malformed_config_json_raises_e_pretrained(tmp_path):
+    bad_dir = tmp_path / "bad_checkpoint"
+    bad_dir.mkdir()
+    (bad_dir / "config.json").write_text("{malformed: json", encoding="utf-8")
+    with pytest.raises(HNDLError) as exc_info:
+        sources.resolve_source(str(bad_dir))
+    assert exc_info.value.code == "E_PRETRAINED"
+
+
+def test_invalid_utf8_config_json_raises_e_pretrained(tmp_path):
+    bad_dir = tmp_path / "bad_checkpoint_utf8"
+    bad_dir.mkdir()
+    (bad_dir / "config.json").write_bytes(b"\x80\x81\x82")
+    with pytest.raises(HNDLError) as exc_info:
+        sources.resolve_source(str(bad_dir))
+    assert exc_info.value.code == "E_PRETRAINED"
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="reduced precision is qualified on CUDA")
 def test_reduced_precision_build_casts_the_checkpoint(text_checkpoint):
     model = network(f'pretrained("{text_checkpoint}", output="logits")', input_shape=("B", 5), output_shape=("B", 5, 16),

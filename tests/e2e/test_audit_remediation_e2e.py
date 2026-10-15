@@ -773,7 +773,7 @@ class TestTier2BoundaryCases:
         model = network(
             f'pretrained("{text_checkpoint}", trainable=True)',
             input_shape=("B", 4),
-            output_shape=("B", 4, 16),
+            output_shape=("B", 4, 8),
             input_dtype="int64",
             device="cpu",
         )

@@ -202,7 +202,8 @@ def _is_chain(plan):
     previous = f"input:{next(iter(plan.inputs))}"
     for node in plan.nodes:
         if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
-                or tuple(node.outputs) != ("out",)):
+                or len(node.outputs) != 1
+                or (node.outputs[0].startswith("out") and node.outputs[0][3:].isdigit())):
             return False
         previous = f"node:{node.id}/{node.outputs[0]}"
     return plan.output_ref == previous

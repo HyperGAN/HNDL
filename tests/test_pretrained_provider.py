@@ -664,3 +664,41 @@ def test_a_plan_saved_before_layers_existed_loads_completed(trunk_checkpoint, tr
         restored = ResolvedPlan.from_json(older, registry=trunk_registry)
     assert restored.to_json() == plan.to_json()
     build(restored, device=DEVICE, registry=trunk_registry)
+
+
+def test_timm_provider_hf_hub_forwards_revision(monkeypatch):
+    import types
+    calls = []
+    fake_timm = types.SimpleNamespace(
+        create_model=lambda name, pretrained=False, **kwargs: calls.append((name, pretrained, kwargs))
+    )
+    orig_require = sources._require
+    monkeypatch.setattr(sources, "_require", lambda mod: fake_timm if mod == "timm" else orig_require(mod))
+    source = sources.Source("hf", "timm/resnet18.a1_in1k", "rev12345", {}, "", "timm")
+    provider = sources.TimmProvider(source, output="features")
+    provider.instantiate(weights=True)
+    assert calls == [("hf-hub:timm/resnet18.a1_in1k@rev12345", True, {})]
+
+
+def test_timm_provider_hf_hub_without_revision(monkeypatch):
+    import types
+    calls = []
+    fake_timm = types.SimpleNamespace(
+        create_model=lambda name, pretrained=False, **kwargs: calls.append((name, pretrained, kwargs))
+    )
+    orig_require = sources._require
+    monkeypatch.setattr(sources, "_require", lambda mod: fake_timm if mod == "timm" else orig_require(mod))
+    source = sources.Source("hf", "timm/resnet18.a1_in1k", "", {}, "", "timm")
+    provider = sources.TimmProvider(source, output="features")
+    provider.instantiate(weights=True)
+    assert calls == [("hf-hub:timm/resnet18.a1_in1k", True, {})]
+
+
+def test_timm_provider_guards_missing_safetensors(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "safetensors", None)
+    source = sources.Source("hf", "timm/resnet18.a1_in1k", "rev12345", {}, "", "timm")
+    provider = sources.TimmProvider(source, output="features")
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*safetensors"):
+        provider.instantiate(weights=True)
+

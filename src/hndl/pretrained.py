@@ -71,14 +71,21 @@ _file_digests = {}
 
 def file_sha256(path):
     """The full hex digest of a file, memoized while its size and mtime hold."""
-    stat = path.stat()
+    path = Path(path)
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        _fail(f"Cannot stat checkpoint file {path}: {exc}")
     key = (str(path), stat.st_size, stat.st_mtime_ns)
     digest = _file_digests.get(key)
     if digest is None:
         hasher = sha256()
-        with open(path, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                hasher.update(block)
+        try:
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    hasher.update(block)
+        except OSError as exc:
+            _fail(f"Cannot read checkpoint file {path}: {exc}")
         digest = _file_digests[key] = hasher.hexdigest()
     return digest
 
@@ -99,31 +106,100 @@ def _provider_for(config):
     _fail("config.json declares neither a transformers model_type nor a timm architecture")
 
 
+def _load_config_json(config_file):
+    """Read and parse config.json, wrapping any IO, decoding, or JSON errors in E_PRETRAINED."""
+    try:
+        content = config_file.read_bytes()
+        config = json.loads(content.decode("utf-8"))
+        return content, config
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fail(f"Cannot read config {config_file}: {exc}")
+
+
+def _local_checkpoint_meta(source, config_path, provider):
+    """Collect (st_mtime_ns, st_size) metadata for all files relevant to a local checkpoint."""
+    p = Path(source).expanduser()
+    if provider or p.suffix in _STATE_DICT_SUFFIXES:
+        if p.is_file():
+            try:
+                st = p.stat()
+                return (("file", st.st_mtime_ns, st.st_size),)
+            except OSError:
+                pass
+        return ()
+
+    if p.is_dir():
+        items = []
+        cfg = p / "config.json"
+        if cfg.is_file():
+            try:
+                st = cfg.stat()
+                items.append(("config", st.st_mtime_ns, st.st_size))
+            except OSError:
+                pass
+        idx = p / "model.safetensors.index.json"
+        if idx.is_file():
+            try:
+                st = idx.stat()
+                items.append((idx.name, st.st_mtime_ns, st.st_size))
+            except OSError:
+                pass
+        try:
+            safetensors_files = sorted(f for f in p.iterdir() if f.is_file() and f.suffix == ".safetensors")
+            for sf in safetensors_files:
+                st = sf.stat()
+                items.append((sf.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            pass
+        return tuple(items)
+
+    if p.is_file() and p.suffix == ".safetensors":
+        items = []
+        try:
+            st = p.stat()
+            items.append(("file", st.st_mtime_ns, st.st_size))
+        except OSError:
+            pass
+        if config_path:
+            cfg = Path(config_path).expanduser()
+            if cfg.is_file():
+                try:
+                    cst = cfg.stat()
+                    items.append(("config", cst.st_mtime_ns, cst.st_size))
+                except OSError:
+                    pass
+        return tuple(items)
+
+    return ()
+
+
 @lru_cache(maxsize=64)
-def resolve_source(source, config_path="", provider="", checksum=""):
-    """Locate a checkpoint and read its configuration without loading weights."""
-    if type(source) is not str or not source:
-        _fail("source must be a non-empty string: a local path or hf://repo[@revision]")
-    if provider or Path(source).expanduser().suffix in _STATE_DICT_SUFFIXES and not source.startswith(_HF_PREFIX):
+def _cached_resolve_hf(source, config_path, provider, checksum):
+    if config_path:
+        _fail("config= applies to local checkpoints; hf:// repositories carry their own config.json")
+    if checksum:
+        _fail("sha256= pins a local .pth checkpoint; transformers and timm checkpoints record a revision instead")
+    repo, _, revision = source[len(_HF_PREFIX):].partition("@")
+    if not repo or repo.count("/") != 1:
+        _fail(f"hf:// sources are written hf://owner/repo[@revision], got {source!r}")
+    hub = _require("huggingface_hub")
+    try:
+        path = hub.hf_hub_download(repo, "config.json", revision=revision or None)
+    except Exception as exc:  # network, auth, missing repo
+        _fail(f"Cannot fetch config.json for {repo!r}: {type(exc).__name__}: {exc}")
+    # Cache layout: .../snapshots/<commit>/config.json (a symlink into blobs/).
+    snapshot = Path(path)
+    content, config = _load_config_json(snapshot)
+    commit = snapshot.parent.name if snapshot.parent.parent.name == "snapshots" else _digest(content)
+    return Source("hf", repo, commit, config, str(snapshot), _provider_for(config))
+
+
+@lru_cache(maxsize=64)
+def _cached_resolve_local(source, config_path, provider, checksum, meta):
+    if provider or Path(source).expanduser().suffix in _STATE_DICT_SUFFIXES:
         return _resolve_state_dict(source, config_path, provider, checksum)
     if checksum:
         _fail("sha256= pins a local .pth checkpoint; transformers and timm checkpoints record a revision instead")
-    if source.startswith(_HF_PREFIX):
-        if config_path:
-            _fail("config= applies to local checkpoints; hf:// repositories carry their own config.json")
-        repo, _, revision = source[len(_HF_PREFIX):].partition("@")
-        if not repo or repo.count("/") != 1:
-            _fail(f"hf:// sources are written hf://owner/repo[@revision], got {source!r}")
-        hub = _require("huggingface_hub")
-        try:
-            path = hub.hf_hub_download(repo, "config.json", revision=revision or None)
-        except Exception as exc:  # network, auth, missing repo
-            _fail(f"Cannot fetch config.json for {repo!r}: {type(exc).__name__}: {exc}")
-        # Cache layout: .../snapshots/<commit>/config.json (a symlink into blobs/).
-        snapshot = Path(path)
-        commit = snapshot.parent.name if snapshot.parent.parent.name == "snapshots" else _digest(snapshot.read_bytes())
-        config = json.loads(snapshot.read_text(encoding="utf-8"))
-        return Source("hf", repo, commit, config, str(snapshot), _provider_for(config))
     path = Path(source).expanduser()
     if path.is_dir():
         if config_path:
@@ -131,18 +207,58 @@ def resolve_source(source, config_path="", provider="", checksum=""):
         config_file = path / "config.json"
         if not config_file.is_file():
             _fail(f"{path} has no config.json; pass a bare .safetensors file with config=")
-        config = json.loads(config_file.read_text(encoding="utf-8"))
-        return Source("directory", str(path), _digest(config_file.read_bytes()), config, str(config_file), _provider_for(config))
+        config_bytes, config = _load_config_json(config_file)
+        parts = [config_bytes]
+        idx_file = path / "model.safetensors.index.json"
+        if idx_file.is_file():
+            parts.append(idx_file.name)
+            try:
+                parts.append(idx_file.read_bytes())
+            except OSError as exc:
+                _fail(f"Cannot read index file {idx_file}: {exc}")
+        try:
+            safetensors_files = sorted(f for f in path.iterdir() if f.is_file() and f.suffix == ".safetensors")
+        except OSError as exc:
+            _fail(f"Cannot list directory {path}: {exc}")
+        for sf in safetensors_files:
+            parts.append(sf.name)
+            parts.append(file_sha256(sf))
+        revision = _digest(*parts)
+        return Source("directory", str(path), revision, config, str(config_file), _provider_for(config))
     if path.is_file() and path.suffix == ".safetensors":
         if not config_path:
             _fail("A bare .safetensors file needs config=<path to config.json>; tensors alone do not describe an architecture")
         config_file = Path(config_path).expanduser()
         if not config_file.is_file():
             _fail(f"config file {config_file} does not exist")
-        config = json.loads(config_file.read_text(encoding="utf-8"))
-        revision = _digest(config_file.read_bytes(), str(path.stat().st_size))
+        config_bytes, config = _load_config_json(config_file)
+        revision = _digest(config_bytes, file_sha256(path))
         return Source("file", str(path), revision, config, str(config_file), _provider_for(config))
     _fail(f"{source!r} is not an hf:// repository, a checkpoint directory, or a .safetensors file")
+
+
+def resolve_source(source, config_path="", provider="", checksum=""):
+    """Locate a checkpoint and read its configuration without loading weights."""
+    if type(source) is not str or not source:
+        _fail("source must be a non-empty string: a local path or hf://repo[@revision]")
+    if source.startswith(_HF_PREFIX):
+        return _cached_resolve_hf(source, config_path, provider, checksum)
+    meta = _local_checkpoint_meta(source, config_path, provider)
+    return _cached_resolve_local(source, config_path, provider, checksum, meta)
+
+
+def _resolve_source_cache_clear():
+    _cached_resolve_hf.cache_clear()
+    _cached_resolve_local.cache_clear()
+    _file_digests.clear()
+
+
+def _resolve_source_cache_info():
+    return _cached_resolve_local.cache_info()
+
+
+resolve_source.cache_clear = _resolve_source_cache_clear
+resolve_source.cache_info = _resolve_source_cache_info
 
 
 def _resolve_state_dict(source, config_path, provider, checksum):
@@ -287,7 +403,10 @@ class TransformersProvider(Immutable):
     def _load_safetensors(self, model):
         _require("safetensors")
         from safetensors.torch import load_file
-        state = load_file(self.source.location)
+        try:
+            state = load_file(self.source.location)
+        except Exception as exc:
+            _fail(f"Cannot load weights from {self.source.location}: {exc}")
         missing, unexpected = model.load_state_dict(state, strict=False)
         # Tied parameters (e.g. GPT-2's lm_head) are not stored; retie them.
         tied = getattr(model, "_tied_weights_keys", None) or ()
@@ -315,14 +434,14 @@ class TransformersProvider(Immutable):
 class TimmProvider(Immutable):
     name = "timm"
 
-    def __init__(self, source, output, component):
+    def __init__(self, source, output, component=""):
         self.source, self.output = source, output
         if component:
             _fail("component= applies to multi-tower transformers checkpoints, not timm models")
         if output not in ("features", "pooled", "logits"):
             _fail(f"timm checkpoints support output features, pooled, or logits, got {output!r}")
         self.timm = _require("timm")
-        self.architecture = source.config["architecture"]
+        self.architecture = source.config.get("architecture", "")
         pretrained_cfg = source.config.get("pretrained_cfg", {})
         self.input_size = tuple(pretrained_cfg.get("input_size", (3, 224, 224)))
         self.num_classes = source.config.get("num_classes", pretrained_cfg.get("num_classes"))
@@ -335,14 +454,23 @@ class TimmProvider(Immutable):
         if not weights or self.source.kind == "file":
             model = self.timm.create_model(self.architecture, pretrained=False, **kwargs)
             if weights:
+                _require("safetensors")
                 from safetensors.torch import load_file
-                missing, unexpected = model.load_state_dict(load_file(self.source.location), strict=False)
+                try:
+                    state = load_file(self.source.location)
+                except Exception as exc:
+                    _fail(f"Cannot load weights from {self.source.location}: {exc}")
+                missing, unexpected = model.load_state_dict(state, strict=False)
                 if missing or unexpected:
                     _fail(f"{self.source.location}: missing keys {sorted(missing)[:5]}, unexpected keys {sorted(unexpected)[:5]}")
             return model
         with torch.device("cpu"):
+            _require("safetensors")
             if self.source.kind == "hf":
-                return self.timm.create_model(f"hf-hub:{self.source.location}", pretrained=True, **kwargs)
+                model_name = f"hf-hub:{self.source.location}"
+                if self.source.revision:
+                    model_name = f"{model_name}@{self.source.revision}"
+                return self.timm.create_model(model_name, pretrained=True, **kwargs)
             return self.timm.create_model(self.architecture, pretrained=True, **kwargs,
                                           pretrained_cfg_overlay={"file": str(Path(self.source.location) / "model.safetensors")})
 
@@ -496,7 +624,10 @@ class LocalProvider:
             path = Path(self.source.location)
             _verify_digest(path, self.source.config["sha256"])
             # weights_only=True: tensors and plain containers, never arbitrary pickled objects.
-            state = torch.load(path, map_location="cpu", weights_only=True)
+            try:
+                state = torch.load(path, map_location="cpu", weights_only=True)
+            except Exception as exc:
+                _fail(f"Cannot load weights from {path}: {exc}")
             if not isinstance(state, dict):
                 _fail(f"{path} holds {type(state).__name__}, not a state_dict mapping names to tensors")
             try:
@@ -552,13 +683,14 @@ def _traced(source_key, config_path, output, component, input_shape, provider, c
     # The builder and readout are part of the cache key: two registries may bind the same names.
     build = provider_build(provider) if provider else None
     read = provider_readout(provider, readout) if provider and readout else None
+    source = resolve_source(source_key, config_path, provider, checksum)
     return _traced_output_shapes(source_key, config_path, output, component, input_shape, provider, checksum, layer,
-                                 readout, layers, build, read)
+                                 readout, layers, build, read, source.revision)
 
 
 @lru_cache(maxsize=256)
 def _traced_output_shapes(source_key, config_path, output, component, input_shape, provider_name, checksum, layer,
-                          readout, layers, build, read):
+                          readout, layers, build, read, revision=""):
     source = resolve_source(source_key, config_path, provider_name, checksum)
     provider = provider_for(source, output, component, layer, readout, layers)
     kind = provider.contract().kind
