@@ -79,10 +79,10 @@ Input `['B', 128, 4, 4]` → output `['B', 3, 16, 16]`.
 
 ```text
 Network: [B, 128, 4, 4] -> [B, 3, 16, 16]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    deconv     x=[B, 128, 4, 4]  out=[B, 64, 8, 8]
-1      n1    relu       x=[B, 64, 8, 8]   out=[B, 64, 8, 8]
-2      n2    deconv     x=[B, 64, 8, 8]   out=[B, 3, 16, 16]
+index  name  operation  input shape     output shape
+0      n0    deconv     [B, 128, 4, 4]  [B, 64, 8, 8]
+1      n1    relu       [B, 64, 8, 8]   [B, 64, 8, 8]
+2      n2    deconv     [B, 64, 8, 8]   [B, 3, 16, 16]
 ```
 
 Parameters: 134,211
@@ -101,10 +101,10 @@ Input `['B', 16]` → output `['B', 3, 8, 8]`.
 
 ```text
 Network: [B, 16] -> [B, 3, 8, 8]  dtype=float32
-index  name  operation  input shapes     output shapes
-0      n0    linear     x=[B, 16]        out=[B, 512]
-1      n1    reshape    x=[B, 512]       out=[B, 32, 4, 4]
-2      n2    deconv     x=[B, 32, 4, 4]  out=[B, 3, 8, 8]
+index  name  operation  input shape    output shape
+0      n0    linear     [B, 16]        [B, 512]
+1      n1    reshape    [B, 512]       [B, 32, 4, 4]
+2      n2    deconv     [B, 32, 4, 4]  [B, 3, 8, 8]
 ```
 
 Parameters: 10,243
@@ -123,10 +123,10 @@ Input `['B', 128, 8, 8]` → output `['B', 3, 32, 32]`.
 
 ```text
 Network: [B, 128, 8, 8] -> [B, 3, 32, 32]  dtype=float32
-index  name  operation  input shapes       output shapes
-0      n0    deconv     x=[B, 128, 8, 8]   out=[B, 64, 16, 16]
-1      n1    relu       x=[B, 64, 16, 16]  out=[B, 64, 16, 16]
-2      n2    deconv     x=[B, 64, 16, 16]  out=[B, 3, 32, 32]
+index  name  operation  input shape      output shape
+0      n0    deconv     [B, 128, 8, 8]   [B, 64, 16, 16]
+1      n1    relu       [B, 64, 16, 16]  [B, 64, 16, 16]
+2      n2    deconv     [B, 64, 16, 16]  [B, 3, 32, 32]
 ```
 
 Parameters: 134,211

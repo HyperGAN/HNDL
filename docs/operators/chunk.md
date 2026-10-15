@@ -67,9 +67,9 @@ Input `['B', 8]` → output `['B', 8]`.
 
 ```text
 Network: [B, 8] -> [B, 8]  dtype=float32
-index  name  operation  input shapes          output shapes
-0      n0    chunk      x=[B, 8]              out0=[B, 4], out1=[B, 4]
-1      n1    concat     x0=[B, 4], x1=[B, 4]  out=[B, 8]
+name  operation  input shapes                                    output shapes
+n0    chunk      x=input:x:[B, 8]                                out0=[B, 4], out1=[B, 4]
+n1    concat     x0=node:n0/out1:[B, 4], x1=node:n0/out0:[B, 4]  out=[B, 8]
 ```
 
 Parameters: 0
@@ -89,11 +89,11 @@ Input `['B', 4]` → output `['B', 12]`.
 
 ```text
 Network: [B, 4] -> [B, 12]  dtype=float32
-index  name  operation  input shapes          output shapes
-0      n0    concat     x0=[B, 4], x1=[B, 4]  out=[2*B, 4]
-1      n1    linear     x=[2*B, 4]            out=[2*B, 6]
-2      n2    chunk      x=[2*B, 6]            out0=[B, 6], out1=[B, 6]
-3      n3    concat     x0=[B, 6], x1=[B, 6]  out=[B, 12]
+name  operation  input shapes                                    output shapes
+n0    concat     x0=input:x:[B, 4], x1=input:x:[B, 4]            out=[2*B, 4]
+n1    linear     x=node:n0/out:[2*B, 4]                          out=[2*B, 6]
+n2    chunk      x=node:n1/out:[2*B, 6]                          out0=[B, 6], out1=[B, 6]
+n3    concat     x0=node:n2/out0:[B, 6], x1=node:n2/out1:[B, 6]  out=[B, 12]
 ```
 
 Parameters: 30
@@ -111,9 +111,9 @@ Input `['B', 4, 9]` → output `['B', 4, 9]`.
 
 ```text
 Network: [B, 4, 9] -> [B, 4, 9]  dtype=float32
-index  name  operation  input shapes                              output shapes
-0      n0    chunk      x=[B, 4, 9]                               out0=[B, 4, 3], out1=[B, 4, 3], out2=[B, 4, 3]
-1      n1    concat     x0=[B, 4, 3], x1=[B, 4, 3], x2=[B, 4, 3]  out=[B, 4, 9]
+name  operation  input shapes                                                                     output shapes
+n0    chunk      x=input:x:[B, 4, 9]                                                              out0=[B, 4, 3], out1=[B, 4, 3], out2=[B, 4, 3]
+n1    concat     x0=node:n0/out0:[B, 4, 3], x1=node:n0/out2:[B, 4, 3], x2=node:n0/out1:[B, 4, 3]  out=[B, 4, 9]
 ```
 
 Parameters: 0

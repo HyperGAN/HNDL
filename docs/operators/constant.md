@@ -69,10 +69,10 @@ Input `['B', 4]` → output `['B', 8]`.
 
 ```text
 Network: [B, 4] -> [B, 8]  dtype=float32
-index  name  operation  input shapes           output shapes
-0      n0    constant   x=[B, 4]               out=[B, 16]
-1      n1    concat     x0=[B, 4], x1=[B, 16]  out=[B, 20]
-2      n2    linear     x=[B, 20]              out=[B, 8]
+name  operation  input shapes                               output shapes
+n0    constant   x=input:x:[B, 4]                           out=[B, 16]
+n1    concat     x0=input:x:[B, 4], x1=node:n0/out:[B, 16]  out=[B, 20]
+n2    linear     x=node:n1/out:[B, 20]                      out=[B, 8]
 ```
 
 Parameters: 168
@@ -91,10 +91,10 @@ Input `['B', 3, 8, 8]` → output `['B', 4, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 4, 8, 8]  dtype=float32
-index  name  operation  input shapes                    output shapes
-0      n0    constant   x=[B, 3, 8, 8]                  out=[B, 3, 8, 8]
-1      n1    sub        a=[B, 3, 8, 8], b=[B, 3, 8, 8]  out=[B, 3, 8, 8]
-2      n2    conv       x=[B, 3, 8, 8]                  out=[B, 4, 8, 8]
+name  operation  input shapes                                        output shapes
+n0    constant   x=input:x:[B, 3, 8, 8]                              out=[B, 3, 8, 8]
+n1    sub        a=input:x:[B, 3, 8, 8], b=node:n0/out:[B, 3, 8, 8]  out=[B, 3, 8, 8]
+n2    conv       x=node:n1/out:[B, 3, 8, 8]                          out=[B, 4, 8, 8]
 ```
 
 Parameters: 112
@@ -113,10 +113,10 @@ Input `['B', 4]` → output `['B', 8]`.
 
 ```text
 Network: [B, 4] -> [B, 8]  dtype=float32
-index  name  operation  input shapes        output shapes
-0      n0    linear     x=[B, 4]            out=[B, 8]
-1      n1    constant   x=[B, 8]            out=[B, 8]
-2      n2    add        a=[B, 8], b=[B, 8]  out=[B, 8]
+name  operation  input shapes                                output shapes
+n0    linear     x=input:x:[B, 4]                            out=[B, 8]
+n1    constant   x=node:n0/out:[B, 8]                        out=[B, 8]
+n2    add        a=node:n0/out:[B, 8], b=node:n1/out:[B, 8]  out=[B, 8]
 ```
 
 Parameters: 40

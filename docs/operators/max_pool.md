@@ -58,10 +58,10 @@ Input `['B', 3, 16, 16]` → output `['B', 8, 8, 8]`.
 
 ```text
 Network: [B, 3, 16, 16] -> [B, 8, 8, 8]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    conv       x=[B, 3, 16, 16]  out=[B, 8, 16, 16]
-1      n1    relu       x=[B, 8, 16, 16]  out=[B, 8, 16, 16]
-2      n2    max_pool   x=[B, 8, 16, 16]  out=[B, 8, 8, 8]
+index  name  operation  input shape     output shape
+0      n0    conv       [B, 3, 16, 16]  [B, 8, 16, 16]
+1      n1    relu       [B, 8, 16, 16]  [B, 8, 16, 16]
+2      n2    max_pool   [B, 8, 16, 16]  [B, 8, 8, 8]
 ```
 
 Parameters: 224
@@ -80,10 +80,10 @@ Input `['B', 4, 8, 8]` → output `['B', 10]`.
 
 ```text
 Network: [B, 4, 8, 8] -> [B, 10]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    max_pool   x=[B, 4, 8, 8]  out=[B, 4, 4, 4]
-1      n1    flatten    x=[B, 4, 4, 4]  out=[B, 64]
-2      n2    linear     x=[B, 64]       out=[B, 10]
+index  name  operation  input shape   output shape
+0      n0    max_pool   [B, 4, 8, 8]  [B, 4, 4, 4]
+1      n1    flatten    [B, 4, 4, 4]  [B, 64]
+2      n2    linear     [B, 64]       [B, 10]
 ```
 
 Parameters: 650
@@ -100,8 +100,8 @@ Input `['B', 3, 15, 15]` → output `['B', 3, 8, 8]`.
 
 ```text
 Network: [B, 3, 15, 15] -> [B, 3, 8, 8]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    max_pool   x=[B, 3, 15, 15]  out=[B, 3, 8, 8]
+index  name  operation  input shape     output shape
+0      n0    max_pool   [B, 3, 15, 15]  [B, 3, 8, 8]
 ```
 
 Parameters: 0

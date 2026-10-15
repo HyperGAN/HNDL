@@ -50,9 +50,9 @@ Input `['B', 32]` → output `['B', 1]`.
 
 ```text
 Network: [B, 32] -> [B, 1]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 32]     out=[B, 1]
-1      n1    sigmoid    x=[B, 1]      out=[B, 1]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 32]      [B, 1]
+1      n1    sigmoid    [B, 1]       [B, 1]
 ```
 
 Parameters: 33
@@ -71,10 +71,10 @@ Input `['B', 6, 16]` → output `['B', 6, 8]`.
 
 ```text
 Network: [B, 6, 16] -> [B, 6, 8]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 6, 16]  out=[B, 6, 32]
-1      n1    sigmoid    x=[B, 6, 32]  out=[B, 6, 32]
-2      n2    linear     x=[B, 6, 32]  out=[B, 6, 8]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 6, 16]   [B, 6, 32]
+1      n1    sigmoid    [B, 6, 32]   [B, 6, 32]
+2      n2    linear     [B, 6, 32]   [B, 6, 8]
 ```
 
 Parameters: 808
@@ -92,9 +92,9 @@ Input `['B', 8, 16, 16]` → output `['B', 3, 16, 16]`.
 
 ```text
 Network: [B, 8, 16, 16] -> [B, 3, 16, 16]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    conv       x=[B, 8, 16, 16]  out=[B, 3, 16, 16]
-1      n1    sigmoid    x=[B, 3, 16, 16]  out=[B, 3, 16, 16]
+index  name  operation  input shape     output shape
+0      n0    conv       [B, 8, 16, 16]  [B, 3, 16, 16]
+1      n1    sigmoid    [B, 3, 16, 16]  [B, 3, 16, 16]
 ```
 
 Parameters: 219

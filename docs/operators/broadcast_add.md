@@ -77,11 +77,11 @@ Input `['B', 3, 8, 8]` → output `['B', 3, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 3, 8, 8]  dtype=float32
-index  name  operation        input shapes                    output shapes
-0      n0    global_avg_pool  x=[B, 3, 8, 8]                  out=[B, 3]
-1      n1    linear           x=[B, 3]                        out=[B, 3]
-2      n2    reshape          x=[B, 3]                        out=[B, 3, 1, 1]
-3      n3    broadcast_add    a=[B, 3, 8, 8], b=[B, 3, 1, 1]  out=[B, 3, 8, 8]
+name  operation        input shapes                                        output shapes
+n0    global_avg_pool  x=input:x:[B, 3, 8, 8]                              out=[B, 3]
+n1    linear           x=node:n0/out:[B, 3]                                out=[B, 3]
+n2    reshape          x=node:n1/out:[B, 3]                                out=[B, 3, 1, 1]
+n3    broadcast_add    a=input:x:[B, 3, 8, 8], b=node:n2/out:[B, 3, 1, 1]  out=[B, 3, 8, 8]
 ```
 
 Parameters: 12
@@ -100,10 +100,10 @@ Input `['B', 3, 8, 8]` → output `['B', 8, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 8, 8, 8]  dtype=float32
-index  name  operation          input shapes                    output shapes
-0      n0    conv               x=[B, 3, 8, 8]                  out=[B, 8, 8, 8]
-1      n1    adaptive_avg_pool  x=[B, 8, 8, 8]                  out=[B, 8, 1, 1]
-2      n2    broadcast_add      a=[B, 8, 8, 8], b=[B, 8, 1, 1]  out=[B, 8, 8, 8]
+name  operation          input shapes                                            output shapes
+n0    conv               x=input:x:[B, 3, 8, 8]                                  out=[B, 8, 8, 8]
+n1    adaptive_avg_pool  x=node:n0/out:[B, 8, 8, 8]                              out=[B, 8, 1, 1]
+n2    broadcast_add      a=node:n0/out:[B, 8, 8, 8], b=node:n1/out:[B, 8, 1, 1]  out=[B, 8, 8, 8]
 ```
 
 Parameters: 224
@@ -122,10 +122,10 @@ Input `['B', 6, 4]` → output `['B', 6, 8]`.
 
 ```text
 Network: [B, 6, 4] -> [B, 6, 8]  dtype=float32
-index  name  operation      input shapes              output shapes
-0      n0    linear         x=[B, 6, 4]               out=[B, 6, 8]
-1      n1    mean           x=[B, 6, 8]               out=[B, 1, 8]
-2      n2    broadcast_add  a=[B, 6, 8], b=[B, 1, 8]  out=[B, 6, 8]
+name  operation      input shapes                                      output shapes
+n0    linear         x=input:x:[B, 6, 4]                               out=[B, 6, 8]
+n1    mean           x=node:n0/out:[B, 6, 8]                           out=[B, 1, 8]
+n2    broadcast_add  a=node:n0/out:[B, 6, 8], b=node:n1/out:[B, 1, 8]  out=[B, 6, 8]
 ```
 
 Parameters: 40

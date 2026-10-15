@@ -96,10 +96,10 @@ Input `['B', 3, 32, 32]` → output `['B', 3, 32, 32]`.
 
 ```text
 Network: [B, 3, 32, 32] -> [B, 3, 32, 32]  dtype=float32
-index  name  operation  input shapes       output shapes
-0      n0    conv       x=[B, 3, 32, 32]   out=[B, 16, 32, 32]
-1      n1    relu       x=[B, 16, 32, 32]  out=[B, 16, 32, 32]
-2      n2    conv       x=[B, 16, 32, 32]  out=[B, 3, 32, 32]
+index  name  operation  input shape      output shape
+0      n0    conv       [B, 3, 32, 32]   [B, 16, 32, 32]
+1      n1    relu       [B, 16, 32, 32]  [B, 16, 32, 32]
+2      n2    conv       [B, 16, 32, 32]  [B, 3, 32, 32]
 ```
 
 Parameters: 883
@@ -116,8 +116,8 @@ Input `['B', 3, 16, 16]` → output `['B', 8, 8, 8]`.
 
 ```text
 Network: [B, 3, 16, 16] -> [B, 8, 8, 8]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    conv       x=[B, 3, 16, 16]  out=[B, 8, 8, 8]
+index  name  operation  input shape     output shape
+0      n0    conv       [B, 3, 16, 16]  [B, 8, 8, 8]
 ```
 
 Parameters: 392
@@ -138,12 +138,12 @@ Input `['B', 3, 32, 32]` → output `['B', 1]`.
 
 ```text
 Network: [B, 3, 32, 32] -> [B, 1]  dtype=float32
-index  name  operation   input shapes       output shapes
-0      n0    conv        x=[B, 3, 32, 32]   out=[B, 64, 16, 16]
-1      n1    leaky_relu  x=[B, 64, 16, 16]  out=[B, 64, 16, 16]
-2      n2    conv        x=[B, 64, 16, 16]  out=[B, 128, 8, 8]
-3      n3    flatten     x=[B, 128, 8, 8]   out=[B, 8192]
-4      n4    linear      x=[B, 8192]        out=[B, 1]
+index  name  operation   input shape      output shape
+0      n0    conv        [B, 3, 32, 32]   [B, 64, 16, 16]
+1      n1    leaky_relu  [B, 64, 16, 16]  [B, 64, 16, 16]
+2      n2    conv        [B, 64, 16, 16]  [B, 128, 8, 8]
+3      n3    flatten     [B, 128, 8, 8]   [B, 8192]
+4      n4    linear      [B, 8192]        [B, 1]
 ```
 
 Parameters: 142,529
@@ -165,13 +165,13 @@ Input `['B', 3, 32, 32]` → output `['B', 1]`.
 
 ```text
 Network: [B, 3, 32, 32] -> [B, 1]  dtype=float32
-index  name  operation   input shapes       output shapes
-0      n0    conv        x=[B, 3, 32, 32]   out=[B, 64, 16, 16]
-1      n1    leaky_relu  x=[B, 64, 16, 16]  out=[B, 64, 16, 16]
-2      n2    conv        x=[B, 64, 16, 16]  out=[B, 128, 8, 8]
-3      n3    leaky_relu  x=[B, 128, 8, 8]   out=[B, 128, 8, 8]
-4      n4    flatten     x=[B, 128, 8, 8]   out=[B, 8192]
-5      n5    linear      x=[B, 8192]        out=[B, 1]
+index  name  operation   input shape      output shape
+0      n0    conv        [B, 3, 32, 32]   [B, 64, 16, 16]
+1      n1    leaky_relu  [B, 64, 16, 16]  [B, 64, 16, 16]
+2      n2    conv        [B, 64, 16, 16]  [B, 128, 8, 8]
+3      n3    leaky_relu  [B, 128, 8, 8]   [B, 128, 8, 8]
+4      n4    flatten     [B, 128, 8, 8]   [B, 8192]
+5      n5    linear      [B, 8192]        [B, 1]
 ```
 
 Parameters: 142,529

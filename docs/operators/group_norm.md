@@ -45,10 +45,10 @@ Input `['B', 3, 8, 8]` → output `['B', 16, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 16, 8, 8]  dtype=float32
-index  name  operation   input shapes     output shapes
-0      n0    conv        x=[B, 3, 8, 8]   out=[B, 16, 8, 8]
-1      n1    group_norm  x=[B, 16, 8, 8]  out=[B, 16, 8, 8]
-2      n2    relu        x=[B, 16, 8, 8]  out=[B, 16, 8, 8]
+index  name  operation   input shape    output shape
+0      n0    conv        [B, 3, 8, 8]   [B, 16, 8, 8]
+1      n1    group_norm  [B, 16, 8, 8]  [B, 16, 8, 8]
+2      n2    relu        [B, 16, 8, 8]  [B, 16, 8, 8]
 ```
 
 Parameters: 480

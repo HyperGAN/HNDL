@@ -36,15 +36,15 @@ MAX_REASON = 400
 DEVICE = "cpu"
 
 
-def _random_inputs(plan):
+def _random_inputs(plan, device="cpu"):
     """One batch of random inputs matching ``plan.inputs``, batch size 2."""
     inputs = {}
     for name, entry in plan.inputs.items():
         shape = (2, *entry["shape"][1:])
         if entry["dtype"] in ("int64", "int32"):
-            inputs[name] = torch.randint(0, 8, shape, device=DEVICE, dtype=getattr(torch, entry["dtype"]))
+            inputs[name] = torch.randint(0, 8, shape, device=device, dtype=getattr(torch, entry["dtype"]))
         else:
-            inputs[name] = torch.randn(shape, device=DEVICE, dtype=DTYPES[plan.dtype])
+            inputs[name] = torch.randn(shape, device=device, dtype=DTYPES[plan.dtype])
     return inputs
 
 
@@ -54,15 +54,16 @@ def _truncate(text):
 
 
 @pytest.mark.parametrize("name", names())
-def test_torch_compile_matches_eager(name, benchmark_min_time):
+def test_torch_compile_matches_eager(name, benchmark_min_time, device):
     # Guards and compiled artifacts are cached per process; clear them so one
     # network's compilation cannot influence the next parametrized case.
     torch._dynamo.reset()
 
     source, _meta, kwargs = load(name)
     plan = resolve(source, **kwargs)
-    model = build(plan, device=DEVICE, initialization_seed=1).eval()
-    inputs = _random_inputs(plan)
+    model = build(plan, device=device, initialization_seed=1).eval()
+    inputs = _random_inputs(plan, device=device)
+
 
     with torch.no_grad():
         eager_output = model(**inputs)

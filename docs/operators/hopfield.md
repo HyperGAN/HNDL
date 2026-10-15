@@ -96,10 +96,10 @@ Input `['B', 8]` → output `['B', 4]`.
 
 ```text
 Network: [B, 8] -> [B, 4]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 8]      out=[B, 32]
-1      n1    hopfield   x=[B, 32]     out=[B, 32]
-2      n2    linear     x=[B, 32]     out=[B, 4]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 8]       [B, 32]
+1      n1    hopfield   [B, 32]      [B, 32]
+2      n2    linear     [B, 32]      [B, 4]
 ```
 
 Parameters: 932
@@ -116,8 +116,8 @@ Input `['B', 12]` → output `['B', 12]`.
 
 ```text
 Network: [B, 12] -> [B, 12]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    hopfield   x=[B, 12]     out=[B, 12]
+index  name  operation  input shape  output shape
+0      n0    hopfield   [B, 12]      [B, 12]
 ```
 
 Parameters: 96
@@ -136,10 +136,10 @@ Input `['B', 6, 10]` → output `['B', 6, 5]`.
 
 ```text
 Network: [B, 6, 10] -> [B, 6, 5]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 6, 10]  out=[B, 6, 24]
-1      n1    hopfield   x=[B, 6, 24]  out=[B, 6, 24]
-2      n2    linear     x=[B, 6, 24]  out=[B, 6, 5]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 6, 10]   [B, 6, 24]
+1      n1    hopfield   [B, 6, 24]   [B, 6, 24]
+2      n2    linear     [B, 6, 24]   [B, 6, 5]
 ```
 
 Parameters: 677
@@ -159,11 +159,11 @@ Input `['B', 20]` → output `['B', 3]`.
 
 ```text
 Network: [B, 20] -> [B, 3]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 20]     out=[B, 16]
-1      n1    hopfield   x=[B, 16]     out=[B, 16]
-2      n2    tanh       x=[B, 16]     out=[B, 16]
-3      n3    linear     x=[B, 16]     out=[B, 3]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 20]      [B, 16]
+1      n1    hopfield   [B, 16]      [B, 16]
+2      n2    tanh       [B, 16]      [B, 16]
+3      n3    linear     [B, 16]      [B, 3]
 ```
 
 Parameters: 451

@@ -48,10 +48,10 @@ Input `['B', 6, 4]` → output `['B', 6, 8]`.
 
 ```text
 Network: [B, 6, 4] -> [B, 6, 8]  dtype=float32
-index  name  operation      input shapes              output shapes
-0      n0    linear         x=[B, 6, 4]               out=[B, 6, 8]
-1      n1    mean           x=[B, 6, 8]               out=[B, 1, 8]
-2      n2    broadcast_mul  a=[B, 6, 8], b=[B, 1, 8]  out=[B, 6, 8]
+name  operation      input shapes                                      output shapes
+n0    linear         x=input:x:[B, 6, 4]                               out=[B, 6, 8]
+n1    mean           x=node:n0/out:[B, 6, 8]                           out=[B, 1, 8]
+n2    broadcast_mul  a=node:n0/out:[B, 6, 8], b=node:n1/out:[B, 1, 8]  out=[B, 6, 8]
 ```
 
 Parameters: 40

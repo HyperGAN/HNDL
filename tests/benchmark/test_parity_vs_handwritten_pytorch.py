@@ -70,6 +70,7 @@ Run with ``-s`` to see each case's two timings and their ratio.
 import pytest
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 import hndl.torch
 
@@ -135,19 +136,19 @@ linear(10)
 """
 
 
-def test_mlp_matches_handwritten_sequential(benchmark_min_time):
+def test_mlp_matches_handwritten_sequential(benchmark_min_time, device):
     """Three linear layers with ReLUs, the plainest thing hndl can build."""
-    built = hndl.torch.network(MLP_SOURCE, input_shape=("B", 64), output_shape=("B", 10), device=DEVICE)
+    built = hndl.torch.network(MLP_SOURCE, input_shape=("B", 64), output_shape=("B", 10), device=device)
     handwritten = nn.Sequential(
         nn.Linear(64, 128),
         nn.ReLU(),
         nn.Linear(128, 128),
         nn.ReLU(),
         nn.Linear(128, 10),
-    ).to(DEVICE)
+    ).to(device)
     # Batch 256: large enough that the fixed per-call validation cost is
     # amortized rather than being the whole measurement (see the module docstring).
-    x = torch.randn(256, 64, device=DEVICE)
+    x = torch.randn(256, 64, device=device)
     _compare("mlp", built, handwritten, (x,), benchmark_min_time)
 
 
@@ -187,12 +188,12 @@ class HandwrittenConvStack(nn.Module):
         return self.head(self.features(x).mean(dim=(2, 3)))
 
 
-def test_conv_stack_matches_handwritten_module(benchmark_min_time):
+def test_conv_stack_matches_handwritten_module(benchmark_min_time, device):
     """A GAN-discriminator-shaped trunk: strided convolutions into a pooled head."""
     built = hndl.torch.network(CONV_SOURCE, input_shape=("B", 3, 32, 32),
-                               output_shape=("B", 10), device=DEVICE)
-    handwritten = HandwrittenConvStack().to(DEVICE)
-    x = torch.randn(16, 3, 32, 32, device=DEVICE)
+                               output_shape=("B", 10), device=device)
+    handwritten = HandwrittenConvStack().to(device)
+    x = torch.randn(16, 3, 32, 32, device=device)
     _compare("conv_stack", built, handwritten, (x,), benchmark_min_time, tolerance=ARITHMETIC_TOLERANCE)
 
 
@@ -210,16 +211,20 @@ class HandwrittenTransformerBlock(nn.Module):
 
     ``x = x + attn(norm1(x))`` then ``out = x + ffn(norm2(x))``, matching the
     structure ``transformer_block``'s ``_reference`` spells out. The attention
-    sub-layer is ``nn.MultiheadAttention``, which ``tests/operators/test_attention.py``
-    already establishes is numerically equivalent to hndl's ``attention`` when
-    weights are copied; nothing is copied here, only the work is the same.
+    sub-layer uses 3 separate Linear projections (q_proj, k_proj, v_proj) and
+    scaled_dot_product_attention, matching hndl's Attention structure.
     """
 
     def __init__(self, width=TRANSFORMER_WIDTH, heads=TRANSFORMER_HEADS,
                  mlp_ratio=TRANSFORMER_MLP_RATIO, eps=TRANSFORMER_EPS):
         super().__init__()
         self.norm1 = nn.LayerNorm(width, eps=eps)
-        self.attn = nn.MultiheadAttention(width, heads, batch_first=True)
+        self.heads = heads
+        self.head_dim = width // heads
+        self.q_proj = nn.Linear(width, width)
+        self.k_proj = nn.Linear(width, width)
+        self.v_proj = nn.Linear(width, width)
+        self.o_proj = nn.Linear(width, width)
         self.norm2 = nn.LayerNorm(width, eps=eps)
         self.ffn = nn.Sequential(
             nn.Linear(width, mlp_ratio * width),
@@ -229,14 +234,21 @@ class HandwrittenTransformerBlock(nn.Module):
 
     def forward(self, x):
         normed = self.norm1(x)
-        x = x + self.attn(normed, normed, normed, need_weights=False)[0]
+        batch, positions, width = normed.shape
+        q = self.q_proj(normed).view(batch, positions, self.heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(normed).view(batch, positions, self.heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(normed).view(batch, positions, self.heads, self.head_dim).transpose(1, 2)
+        attended = F.scaled_dot_product_attention(q, k, v)
+        merged = attended.transpose(1, 2).reshape(batch, positions, width)
+        x = x + self.o_proj(merged)
         return x + self.ffn(self.norm2(x))
 
 
-def test_transformer_block_matches_handwritten_block(benchmark_min_time):
+def test_transformer_block_matches_handwritten_block(benchmark_min_time, device):
     """One pre-norm block: multi-head attention and a 4x feed-forward, both residual."""
     shape = ("B", 16, TRANSFORMER_WIDTH)
-    built = hndl.torch.network(TRANSFORMER_SOURCE, input_shape=shape, output_shape=shape, device=DEVICE)
-    handwritten = HandwrittenTransformerBlock().to(DEVICE)
-    x = torch.randn(8, 16, TRANSFORMER_WIDTH, device=DEVICE)
+    built = hndl.torch.network(TRANSFORMER_SOURCE, input_shape=shape, output_shape=shape, device=device)
+    handwritten = HandwrittenTransformerBlock().to(device)
+    x = torch.randn(8, 16, TRANSFORMER_WIDTH, device=device)
     _compare("transformer_block", built, handwritten, (x,), benchmark_min_time)
+

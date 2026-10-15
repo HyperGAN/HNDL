@@ -47,8 +47,8 @@ Input `['B', 8]` (`input_dtype="int64"`) → output `['B', 4, 6, 2]`.
 
 ```text
 Network: [B, 8] -> [B, 4, 6, 2]  dtype=float32  input_dtype=int64
-index  name  operation        input shapes  output shapes
-0      n0    coordinate_grid  x=[B, 8]      out=[B, 4, 6, 2]
+index  name  operation        input shape  output shape
+0      n0    coordinate_grid  [B, 8]       [B, 4, 6, 2]
 ```
 
 Parameters: 0

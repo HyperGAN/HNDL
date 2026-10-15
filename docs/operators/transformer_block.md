@@ -118,8 +118,8 @@ Input `['B', 8, 32]` → output `['B', 8, 32]`.
 
 ```text
 Network: [B, 8, 32] -> [B, 8, 32]  dtype=float32
-index  name  operation          input shapes  output shapes
-0      n0    transformer_block  x=[B, 8, 32]  out=[B, 8, 32]
+index  name  operation          input shape  output shape
+0      n0    transformer_block  [B, 8, 32]   [B, 8, 32]
 ```
 
 Parameters: 12,704
@@ -137,9 +137,9 @@ Input `['B', 6, 16]` → output `['B', 6, 16]`.
 
 ```text
 Network: [B, 6, 16] -> [B, 6, 16]  dtype=float32
-index  name  operation          input shapes  output shapes
-0      n0    transformer_block  x=[B, 6, 16]  out=[B, 6, 16]
-1      n1    transformer_block  x=[B, 6, 16]  out=[B, 6, 16]
+index  name  operation          input shape  output shape
+0      n0    transformer_block  [B, 6, 16]   [B, 6, 16]
+1      n1    transformer_block  [B, 6, 16]   [B, 6, 16]
 ```
 
 Parameters: 6,496
@@ -158,10 +158,10 @@ Input `['B', 6, 8]` → output `['B', 6, 8]`.
 
 ```text
 Network: [B, 6, 8] -> [B, 6, 8]  dtype=float32
-index  name  operation          input shapes  output shapes
-0      n0    linear             x=[B, 6, 8]   out=[B, 6, 16]
-1      n1    transformer_block  x=[B, 6, 16]  out=[B, 6, 16]
-2      n2    linear             x=[B, 6, 16]  out=[B, 6, 8]
+index  name  operation          input shape  output shape
+0      n0    linear             [B, 6, 8]    [B, 6, 16]
+1      n1    transformer_block  [B, 6, 16]   [B, 6, 16]
+2      n2    linear             [B, 6, 16]   [B, 6, 8]
 ```
 
 Parameters: 2,536

@@ -56,11 +56,11 @@ Input `['B', 3, 16, 16]` → output `['B', 10]`.
 
 ```text
 Network: [B, 3, 16, 16] -> [B, 10]  dtype=float32
-index  name  operation        input shapes       output shapes
-0      n0    conv             x=[B, 3, 16, 16]   out=[B, 16, 16, 16]
-1      n1    relu             x=[B, 16, 16, 16]  out=[B, 16, 16, 16]
-2      n2    global_avg_pool  x=[B, 16, 16, 16]  out=[B, 16]
-3      n3    linear           x=[B, 16]          out=[B, 10]
+index  name  operation        input shape      output shape
+0      n0    conv             [B, 3, 16, 16]   [B, 16, 16, 16]
+1      n1    relu             [B, 16, 16, 16]  [B, 16, 16, 16]
+2      n2    global_avg_pool  [B, 16, 16, 16]  [B, 16]
+3      n3    linear           [B, 16]          [B, 10]
 ```
 
 Parameters: 618
@@ -77,8 +77,8 @@ Input `['B', 32, 7, 7]` → output `['B', 32]`.
 
 ```text
 Network: [B, 32, 7, 7] -> [B, 32]  dtype=float32
-index  name  operation        input shapes     output shapes
-0      n0    global_avg_pool  x=[B, 32, 7, 7]  out=[B, 32]
+index  name  operation        input shape    output shape
+0      n0    global_avg_pool  [B, 32, 7, 7]  [B, 32]
 ```
 
 Parameters: 0
@@ -99,12 +99,12 @@ Input `['B', 3, 32, 32]` → output `['B', 4]`.
 
 ```text
 Network: [B, 3, 32, 32] -> [B, 4]  dtype=float32
-index  name  operation        input shapes      output shapes
-0      n0    conv             x=[B, 3, 32, 32]  out=[B, 8, 16, 16]
-1      n1    group_norm       x=[B, 8, 16, 16]  out=[B, 8, 16, 16]
-2      n2    relu             x=[B, 8, 16, 16]  out=[B, 8, 16, 16]
-3      n3    global_avg_pool  x=[B, 8, 16, 16]  out=[B, 8]
-4      n4    linear           x=[B, 8]          out=[B, 4]
+index  name  operation        input shape     output shape
+0      n0    conv             [B, 3, 32, 32]  [B, 8, 16, 16]
+1      n1    group_norm       [B, 8, 16, 16]  [B, 8, 16, 16]
+2      n2    relu             [B, 8, 16, 16]  [B, 8, 16, 16]
+3      n3    global_avg_pool  [B, 8, 16, 16]  [B, 8]
+4      n4    linear           [B, 8]          [B, 4]
 ```
 
 Parameters: 444

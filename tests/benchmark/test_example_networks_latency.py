@@ -29,34 +29,34 @@ DEVICE = "cpu"
 BATCH = 2
 
 
-def _build_eval_model(name):
-    """Resolve and build ``name`` on the CPU, in eval mode, with fixed init."""
+def _build_eval_model(name, device="cpu"):
+    """Resolve and build ``name`` on the device, in eval mode, with fixed init."""
     source, _meta, kwargs = load(name)
     plan = resolve(source, **kwargs)
-    model = build(plan, device=DEVICE, initialization_seed=1)
+    model = build(plan, device=device, initialization_seed=1)
     model.eval()
     return plan, model
 
 
-def _random_inputs(plan, generator):
+def _random_inputs(plan, generator, device="cpu"):
     """Random tensors matching ``plan.inputs``, mirroring test_network_examples."""
     inputs = {}
     for port, entry in plan.inputs.items():
         shape = (BATCH, *entry["shape"][1:])
         if entry["dtype"] in ("int64", "int32"):
-            inputs[port] = torch.randint(0, 8, shape, device=DEVICE, generator=generator,
+            inputs[port] = torch.randint(0, 8, shape, device=device, generator=generator,
                                          dtype=getattr(torch, entry["dtype"]))
         else:
-            inputs[port] = torch.randn(shape, device=DEVICE, generator=generator,
+            inputs[port] = torch.randn(shape, device=device, generator=generator,
                                        dtype=DTYPES[plan.dtype])
     return inputs
 
 
 @pytest.mark.parametrize("name", names())
-def test_example_network_inference_latency(name, benchmark_min_time):
-    plan, model = _build_eval_model(name)
-    generator = torch.Generator(device=DEVICE).manual_seed(1)
-    inputs = _random_inputs(plan, generator)
+def test_example_network_inference_latency(name, benchmark_min_time, device):
+    plan, model = _build_eval_model(name, device=device)
+    generator = torch.Generator(device=device).manual_seed(1)
+    inputs = _random_inputs(plan, generator, device=device)
     outputs = {}
 
     def forward():
@@ -73,4 +73,5 @@ def test_example_network_inference_latency(name, benchmark_min_time):
     for port, tensor in outputs.items():
         assert tensor.isfinite().all(), f"{name}: output {port!r} went non-finite while timing"
 
-    print(format_measurement(f"{name} [{DEVICE}]", measurement))
+    print(format_measurement(f"{name} [{device}]", measurement))
+

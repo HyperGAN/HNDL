@@ -39,9 +39,9 @@ Input `['B', 3, 8, 8]` → output `['B', 2]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 2]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    flatten    x=[B, 3, 8, 8]  out=[B, 192]
-1      n1    linear     x=[B, 192]      out=[B, 2]
+index  name  operation  input shape   output shape
+0      n0    flatten    [B, 3, 8, 8]  [B, 192]
+1      n1    linear     [B, 192]      [B, 2]
 ```
 
 Parameters: 386

@@ -60,9 +60,9 @@ Input `['B', 6, 4]` → output `['B', 6, 8]`.
 
 ```text
 Network: [B, 6, 4] -> [B, 6, 8]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    pos_embed  x=[B, 6, 4]   out=[B, 6, 4]
-1      n1    linear     x=[B, 6, 4]   out=[B, 6, 8]
+index  name  operation  input shape  output shape
+0      n0    pos_embed  [B, 6, 4]    [B, 6, 4]
+1      n1    linear     [B, 6, 4]    [B, 6, 8]
 ```
 
 Parameters: 296
@@ -81,10 +81,10 @@ Input `['B', 12]` (`input_dtype="int64"`) → output `['B', 12, 4]`.
 
 ```text
 Network: [B, 12] -> [B, 12, 4]  dtype=float32  input_dtype=int64
-index  name  operation  input shapes   output shapes
-0      n0    embedding  ids=[B, 12]    out=[B, 12, 16]
-1      n1    pos_embed  x=[B, 12, 16]  out=[B, 12, 16]
-2      n2    linear     x=[B, 12, 16]  out=[B, 12, 4]
+index  name  operation  input shape  output shape
+0      n0    embedding  [B, 12]      [B, 12, 16]
+1      n1    pos_embed  [B, 12, 16]  [B, 12, 16]
+2      n2    linear     [B, 12, 16]  [B, 12, 4]
 ```
 
 Parameters: 8,580

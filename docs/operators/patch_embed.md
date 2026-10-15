@@ -73,8 +73,8 @@ Input `['B', 3, 16, 16]` → output `['B', 16, 32]`.
 
 ```text
 Network: [B, 3, 16, 16] -> [B, 16, 32]  dtype=float32
-index  name  operation    input shapes      output shapes
-0      n0    patch_embed  x=[B, 3, 16, 16]  out=[B, 16, 32]
+index  name  operation    input shape     output shape
+0      n0    patch_embed  [B, 3, 16, 16]  [B, 16, 32]
 ```
 
 Parameters: 1,568
@@ -92,9 +92,9 @@ Input `['B', 3, 16, 16]` → output `['B', 4, 8]`.
 
 ```text
 Network: [B, 3, 16, 16] -> [B, 4, 8]  dtype=float32
-index  name  operation    input shapes      output shapes
-0      n0    patch_embed  x=[B, 3, 16, 16]  out=[B, 4, 16]
-1      n1    linear       x=[B, 4, 16]      out=[B, 4, 8]
+index  name  operation    input shape     output shape
+0      n0    patch_embed  [B, 3, 16, 16]  [B, 4, 16]
+1      n1    linear       [B, 4, 16]      [B, 4, 8]
 ```
 
 Parameters: 3,224
@@ -112,9 +112,9 @@ Input `['B', 3, 8, 8]` → output `['B', 16, 64]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 16, 64]  dtype=float32
-index  name  operation    input shapes    output shapes
-0      n0    patch_embed  x=[B, 3, 8, 8]  out=[B, 16, 64]
-1      n1    relu         x=[B, 16, 64]   out=[B, 16, 64]
+index  name  operation    input shape   output shape
+0      n0    patch_embed  [B, 3, 8, 8]  [B, 16, 64]
+1      n1    relu         [B, 16, 64]   [B, 16, 64]
 ```
 
 Parameters: 832

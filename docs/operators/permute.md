@@ -61,8 +61,8 @@ Input `['B', 16, 32]` → output `['B', 32, 16]`.
 
 ```text
 Network: [B, 16, 32] -> [B, 32, 16]  dtype=float32
-index  name  operation  input shapes   output shapes
-0      n0    permute    x=[B, 16, 32]  out=[B, 32, 16]
+index  name  operation  input shape  output shape
+0      n0    permute    [B, 16, 32]  [B, 32, 16]
 ```
 
 Parameters: 0
@@ -79,8 +79,8 @@ Input `['B', 3, 8, 16]` → output `['B', 16, 3, 8]`.
 
 ```text
 Network: [B, 3, 8, 16] -> [B, 16, 3, 8]  dtype=float32
-index  name  operation  input shapes     output shapes
-0      n0    permute    x=[B, 3, 8, 16]  out=[B, 16, 3, 8]
+index  name  operation  input shape    output shape
+0      n0    permute    [B, 3, 8, 16]  [B, 16, 3, 8]
 ```
 
 Parameters: 0
@@ -98,9 +98,9 @@ Input `['B', 3, 8, 8]` → output `['B', 8, 8, 4]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 8, 8, 4]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    conv       x=[B, 3, 8, 8]  out=[B, 4, 8, 8]
-1      n1    permute    x=[B, 4, 8, 8]  out=[B, 8, 8, 4]
+index  name  operation  input shape   output shape
+0      n0    conv       [B, 3, 8, 8]  [B, 4, 8, 8]
+1      n1    permute    [B, 4, 8, 8]  [B, 8, 8, 4]
 ```
 
 Parameters: 112
@@ -118,9 +118,9 @@ Input `['B', 4, 6]` → output `['B', 10, 4]`.
 
 ```text
 Network: [B, 4, 6] -> [B, 10, 4]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 4, 6]   out=[B, 4, 10]
-1      n1    permute    x=[B, 4, 10]  out=[B, 10, 4]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 4, 6]    [B, 4, 10]
+1      n1    permute    [B, 4, 10]   [B, 10, 4]
 ```
 
 Parameters: 70

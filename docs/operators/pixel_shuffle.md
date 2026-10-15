@@ -61,9 +61,9 @@ Input `['B', 16, 8, 8]` → output `['B', 3, 32, 32]`.
 
 ```text
 Network: [B, 16, 8, 8] -> [B, 3, 32, 32]  dtype=float32
-index  name  operation      input shapes     output shapes
-0      n0    conv           x=[B, 16, 8, 8]  out=[B, 48, 8, 8]
-1      n1    pixel_shuffle  x=[B, 48, 8, 8]  out=[B, 3, 32, 32]
+index  name  operation      input shape    output shape
+0      n0    conv           [B, 16, 8, 8]  [B, 48, 8, 8]
+1      n1    pixel_shuffle  [B, 48, 8, 8]  [B, 3, 32, 32]
 ```
 
 Parameters: 6,960
@@ -80,8 +80,8 @@ Input `['B', 12, 4, 4]` → output `['B', 3, 8, 8]`.
 
 ```text
 Network: [B, 12, 4, 4] -> [B, 3, 8, 8]  dtype=float32
-index  name  operation      input shapes     output shapes
-0      n0    pixel_shuffle  x=[B, 12, 4, 4]  out=[B, 3, 8, 8]
+index  name  operation      input shape    output shape
+0      n0    pixel_shuffle  [B, 12, 4, 4]  [B, 3, 8, 8]
 ```
 
 Parameters: 0
@@ -99,9 +99,9 @@ Input `['B', 3, 8, 8]` → output `['B', 5, 16, 16]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 5, 16, 16]  dtype=float32
-index  name  operation      input shapes     output shapes
-0      n0    conv           x=[B, 3, 8, 8]   out=[B, 20, 8, 8]
-1      n1    pixel_shuffle  x=[B, 20, 8, 8]  out=[B, 5, 16, 16]
+index  name  operation      input shape    output shape
+0      n0    conv           [B, 3, 8, 8]   [B, 20, 8, 8]
+1      n1    pixel_shuffle  [B, 20, 8, 8]  [B, 5, 16, 16]
 ```
 
 Parameters: 560

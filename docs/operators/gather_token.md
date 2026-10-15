@@ -86,10 +86,10 @@ Input `['B', 6]` (`input_dtype="int64"`) → output `['B', 8]`.
 
 ```text
 Network: [B, 6] -> [B, 8]  dtype=float32  input_dtype=int64
-index  name  operation     input shapes             output shapes
-0      n0    embedding     ids=[B, 6]               out=[B, 6, 8]
-1      n1    linear        x=[B, 6, 8]              out=[B, 6, 8]
-2      n2    gather_token  x=[B, 6, 8], ids=[B, 6]  out=[B, 8]
+name  operation     input shapes                                 output shapes
+n0    embedding     ids=input:x:[B, 6]                           out=[B, 6, 8]
+n1    linear        x=node:n0/out:[B, 6, 8]                      out=[B, 6, 8]
+n2    gather_token  x=node:n1/out:[B, 6, 8], ids=input:x:[B, 6]  out=[B, 8]
 ```
 
 Parameters: 328
@@ -110,12 +110,12 @@ Input `['B', 10]` (`input_dtype="int64"`) → output `['B', 12]`.
 
 ```text
 Network: [B, 10] -> [B, 12]  dtype=float32  input_dtype=int64
-index  name  operation          input shapes                output shapes
-0      n0    embedding          ids=[B, 10]                 out=[B, 10, 16]
-1      n1    pos_embed          x=[B, 10, 16]               out=[B, 10, 16]
-2      n2    transformer_block  x=[B, 10, 16]               out=[B, 10, 16]
-3      n3    gather_token       x=[B, 10, 16], ids=[B, 10]  out=[B, 16]
-4      n4    linear             x=[B, 16]                   out=[B, 12]
+name  operation          input shapes                                    output shapes
+n0    embedding          ids=input:x:[B, 10]                             out=[B, 10, 16]
+n1    pos_embed          x=node:n0/out:[B, 10, 16]                       out=[B, 10, 16]
+n2    transformer_block  x=node:n1/out:[B, 10, 16]                       out=[B, 10, 16]
+n3    gather_token       x=node:n2/out:[B, 10, 16], ids=input:x:[B, 10]  out=[B, 16]
+n4    linear             x=node:n3/out:[B, 16]                           out=[B, 12]
 ```
 
 Parameters: 5,020

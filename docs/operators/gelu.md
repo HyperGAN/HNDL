@@ -64,10 +64,10 @@ Input `['B', 128]` → output `['B', 10]`.
 
 ```text
 Network: [B, 128] -> [B, 10]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 128]    out=[B, 64]
-1      n1    gelu       x=[B, 64]     out=[B, 64]
-2      n2    linear     x=[B, 64]     out=[B, 10]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 128]     [B, 64]
+1      n1    gelu       [B, 64]      [B, 64]
+2      n2    linear     [B, 64]      [B, 10]
 ```
 
 Parameters: 8,906
@@ -86,10 +86,10 @@ Input `['B', 6, 16]` → output `['B', 6, 8]`.
 
 ```text
 Network: [B, 6, 16] -> [B, 6, 8]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 6, 16]  out=[B, 6, 32]
-1      n1    gelu       x=[B, 6, 32]  out=[B, 6, 32]
-2      n2    linear     x=[B, 6, 32]  out=[B, 6, 8]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 6, 16]   [B, 6, 32]
+1      n1    gelu       [B, 6, 32]   [B, 6, 32]
+2      n2    linear     [B, 6, 32]   [B, 6, 8]
 ```
 
 Parameters: 808
@@ -107,9 +107,9 @@ Input `['B', 3, 8, 8]` → output `['B', 8, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 8, 8, 8]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    conv       x=[B, 3, 8, 8]  out=[B, 8, 8, 8]
-1      n1    gelu       x=[B, 8, 8, 8]  out=[B, 8, 8, 8]
+index  name  operation  input shape   output shape
+0      n0    conv       [B, 3, 8, 8]  [B, 8, 8, 8]
+1      n1    gelu       [B, 8, 8, 8]  [B, 8, 8, 8]
 ```
 
 Parameters: 224

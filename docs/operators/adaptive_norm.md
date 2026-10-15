@@ -53,11 +53,11 @@ Input `['B', 128]` → output `['B', 32, 4, 4]`.
 
 ```text
 Network: [B, 128] -> [B, 32, 4, 4]  dtype=float32
-index  name  operation      input shapes                     output shapes
-0      n0    split          x=[B, 128]                       first=[B, 64], rest=[B, 64]
-1      n1    linear         x=[B, 64]                        out=[B, 512]
-2      n2    reshape        x=[B, 512]                       out=[B, 32, 4, 4]
-3      n3    adaptive_norm  x=[B, 32, 4, 4], params=[B, 64]  out=[B, 32, 4, 4]
+name  operation      input shapes                                              output shapes
+n0    split          x=input:x:[B, 128]                                        first=[B, 64], rest=[B, 64]
+n1    linear         x=node:n0/first:[B, 64]                                   out=[B, 512]
+n2    reshape        x=node:n1/out:[B, 512]                                    out=[B, 32, 4, 4]
+n3    adaptive_norm  x=node:n2/out:[B, 32, 4, 4], params=node:n0/rest:[B, 64]  out=[B, 32, 4, 4]
 ```
 
 Parameters: 33,280
@@ -79,13 +79,13 @@ Input `['B', 128]` → output `['B', 64, 4, 4]`.
 
 ```text
 Network: [B, 128] -> [B, 64, 4, 4]  dtype=float32
-index  name     operation      input shapes                      output shapes
-0      mapping  linear         x=[B, 128]                        out=[B, 256]
-1      w        relu           x=[B, 256]                        out=[B, 256]
-2      project  linear         x=[B, 256]                        out=[B, 1024]
-3      seed     reshape        x=[B, 1024]                       out=[B, 64, 4, 4]
-4      style    linear         x=[B, 256]                        out=[B, 128]
-5      norm     adaptive_norm  x=[B, 64, 4, 4], params=[B, 128]  out=[B, 64, 4, 4]
+name     operation      input shapes                                                   output shapes
+mapping  linear         x=input:x:[B, 128]                                             out=[B, 256]
+w        relu           x=node:mapping/out:[B, 256]                                    out=[B, 256]
+project  linear         x=node:w/out:[B, 256]                                          out=[B, 1024]
+seed     reshape        x=node:project/out:[B, 1024]                                   out=[B, 64, 4, 4]
+style    linear         x=node:w/out:[B, 256]                                          out=[B, 128]
+norm     adaptive_norm  x=node:seed/out:[B, 64, 4, 4], params=node:style/out:[B, 128]  out=[B, 64, 4, 4]
 ```
 
 Parameters: 329,088

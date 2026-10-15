@@ -75,10 +75,10 @@ Input `['B', 8]` → output `['B', 4]`.
 
 ```text
 Network: [B, 8] -> [B, 4]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 8]      out=[B, 16]
-1      n1    moe        x=[B, 16]     out=[B, 16]
-2      n2    linear     x=[B, 16]     out=[B, 4]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 8]       [B, 16]
+1      n1    moe        [B, 16]      [B, 16]
+2      n2    linear     [B, 16]      [B, 4]
 ```
 
 Parameters: 4,564
@@ -96,9 +96,9 @@ Input `['B', 4, 8]` → output `['B', 4, 3]`.
 
 ```text
 Network: [B, 4, 8] -> [B, 4, 3]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    moe        x=[B, 4, 8]   out=[B, 4, 8]
-1      n1    linear     x=[B, 4, 8]   out=[B, 4, 3]
+index  name  operation  input shape  output shape
+0      n0    moe        [B, 4, 8]    [B, 4, 8]
+1      n1    linear     [B, 4, 8]    [B, 4, 3]
 ```
 
 Parameters: 603
@@ -115,8 +115,8 @@ Input `['B', 6, 12]` → output `['B', 6, 12]`.
 
 ```text
 Network: [B, 6, 12] -> [B, 6, 12]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    moe        x=[B, 6, 12]  out=[B, 6, 12]
+index  name  operation  input shape  output shape
+0      n0    moe        [B, 6, 12]   [B, 6, 12]
 ```
 
 Parameters: 1,872

@@ -81,11 +81,11 @@ Input `['B', 3, 8, 8]` → output `['B', 10]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 10]  dtype=float32
-index  name  operation  input shapes     output shapes
-0      n0    resblock   x=[B, 3, 8, 8]   out=[B, 16, 8, 8]
-1      n1    resblock   x=[B, 16, 8, 8]  out=[B, 32, 4, 4]
-2      n2    flatten    x=[B, 32, 4, 4]  out=[B, 512]
-3      n3    linear     x=[B, 512]       out=[B, 10]
+index  name  operation  input shape    output shape
+0      n0    resblock   [B, 3, 8, 8]   [B, 16, 8, 8]
+1      n1    resblock   [B, 16, 8, 8]  [B, 32, 4, 4]
+2      n2    flatten    [B, 32, 4, 4]  [B, 512]
+3      n3    linear     [B, 512]       [B, 10]
 ```
 
 Parameters: 22,538
@@ -102,8 +102,8 @@ Input `['B', 3, 8, 8]` → output `['B', 8, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 8, 8, 8]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    resblock   x=[B, 3, 8, 8]  out=[B, 8, 8, 8]
+index  name  operation  input shape   output shape
+0      n0    resblock   [B, 3, 8, 8]  [B, 8, 8, 8]
 ```
 
 Parameters: 864
@@ -120,8 +120,8 @@ Input `['B', 8, 16, 16]` → output `['B', 16, 16, 16]`.
 
 ```text
 Network: [B, 8, 16, 16] -> [B, 16, 16, 16]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    resblock   x=[B, 8, 16, 16]  out=[B, 16, 16, 16]
+index  name  operation  input shape     output shape
+0      n0    resblock   [B, 8, 16, 16]  [B, 16, 16, 16]
 ```
 
 Parameters: 3,632

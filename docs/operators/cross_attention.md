@@ -69,9 +69,9 @@ Input `['B', 12, 8]` → output `['B', 4, 8]`.
 
 ```text
 Network: [B, 12, 8] -> [B, 4, 8]  dtype=float32
-index  name  operation        input shapes                    output shapes
-0      n0    split            x=[B, 12, 8]                    first=[B, 4, 8], rest=[B, 8, 8]
-1      n1    cross_attention  x=[B, 4, 8], context=[B, 8, 8]  out=[B, 4, 8]
+name  operation        input shapes                                               output shapes
+n0    split            x=input:x:[B, 12, 8]                                       first=[B, 4, 8], rest=[B, 8, 8]
+n1    cross_attention  x=node:n0/first:[B, 4, 8], context=node:n0/rest:[B, 8, 8]  out=[B, 4, 8]
 ```
 
 Parameters: 288
@@ -90,10 +90,10 @@ Input `['B', 12, 8]` → output `['B', 4, 8]`.
 
 ```text
 Network: [B, 12, 8] -> [B, 4, 8]  dtype=float32
-index  name  operation        input shapes                     output shapes
-0      n0    split            x=[B, 12, 8]                     first=[B, 4, 8], rest=[B, 8, 8]
-1      n1    linear           x=[B, 8, 8]                      out=[B, 8, 16]
-2      n2    cross_attention  x=[B, 4, 8], context=[B, 8, 16]  out=[B, 4, 8]
+name  operation        input shapes                                               output shapes
+n0    split            x=input:x:[B, 12, 8]                                       first=[B, 4, 8], rest=[B, 8, 8]
+n1    linear           x=node:n0/rest:[B, 8, 8]                                   out=[B, 8, 16]
+n2    cross_attention  x=node:n0/first:[B, 4, 8], context=node:n1/out:[B, 8, 16]  out=[B, 4, 8]
 ```
 
 Parameters: 560
@@ -112,10 +112,10 @@ Input `['B', 10, 16]` → output `['B', 6, 4]`.
 
 ```text
 Network: [B, 10, 16] -> [B, 6, 4]  dtype=float32
-index  name  operation        input shapes                      output shapes
-0      n0    split            x=[B, 10, 16]                     first=[B, 6, 16], rest=[B, 4, 16]
-1      n1    cross_attention  x=[B, 6, 16], context=[B, 4, 16]  out=[B, 6, 16]
-2      n2    linear           x=[B, 6, 16]                      out=[B, 6, 4]
+name  operation        input shapes                                                 output shapes
+n0    split            x=input:x:[B, 10, 16]                                        first=[B, 6, 16], rest=[B, 4, 16]
+n1    cross_attention  x=node:n0/first:[B, 6, 16], context=node:n0/rest:[B, 4, 16]  out=[B, 6, 16]
+n2    linear           x=node:n1/out:[B, 6, 16]                                     out=[B, 6, 4]
 ```
 
 Parameters: 1,092

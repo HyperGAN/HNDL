@@ -62,11 +62,11 @@ Input `['B', 32]` → output `['B', 10]`.
 
 ```text
 Network: [B, 32] -> [B, 10]  dtype=float32
-index  name  operation   input shapes  output shapes
-0      n0    linear      x=[B, 32]     out=[B, 64]
-1      n1    layer_norm  x=[B, 64]     out=[B, 64]
-2      n2    relu        x=[B, 64]     out=[B, 64]
-3      n3    linear      x=[B, 64]     out=[B, 10]
+index  name  operation   input shape  output shape
+0      n0    linear      [B, 32]      [B, 64]
+1      n1    layer_norm  [B, 64]      [B, 64]
+2      n2    relu        [B, 64]      [B, 64]
+3      n3    linear      [B, 64]      [B, 10]
 ```
 
 Parameters: 2,890
@@ -85,10 +85,10 @@ Input `['B', 12, 32]` → output `['B', 12, 10]`.
 
 ```text
 Network: [B, 12, 32] -> [B, 12, 10]  dtype=float32
-index  name  operation   input shapes   output shapes
-0      n0    linear      x=[B, 12, 32]  out=[B, 12, 64]
-1      n1    layer_norm  x=[B, 12, 64]  out=[B, 12, 64]
-2      n2    linear      x=[B, 12, 64]  out=[B, 12, 10]
+index  name  operation   input shape  output shape
+0      n0    linear      [B, 12, 32]  [B, 12, 64]
+1      n1    layer_norm  [B, 12, 64]  [B, 12, 64]
+2      n2    linear      [B, 12, 64]  [B, 12, 10]
 ```
 
 Parameters: 2,890
@@ -106,9 +106,9 @@ Input `['B', 16]` → output `['B', 4]`.
 
 ```text
 Network: [B, 16] -> [B, 4]  dtype=float32
-index  name  operation   input shapes  output shapes
-0      n0    layer_norm  x=[B, 16]     out=[B, 16]
-1      n1    linear      x=[B, 16]     out=[B, 4]
+index  name  operation   input shape  output shape
+0      n0    layer_norm  [B, 16]      [B, 16]
+1      n1    linear      [B, 16]      [B, 4]
 ```
 
 Parameters: 68

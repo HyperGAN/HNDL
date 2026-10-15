@@ -80,8 +80,8 @@ Input `['B', 32]` → output `['B', 32]`.
 
 ```text
 Network: [B, 32] -> [B, 32]  dtype=float32
-index  name  operation     input shapes  output shapes
-0      n0    feed_forward  x=[B, 32]     out=[B, 32]
+index  name  operation     input shape  output shape
+0      n0    feed_forward  [B, 32]      [B, 32]
 ```
 
 Parameters: 4,192
@@ -98,8 +98,8 @@ Input `['B', 32]` → output `['B', 32]`.
 
 ```text
 Network: [B, 32] -> [B, 32]  dtype=float32
-index  name  operation     input shapes  output shapes
-0      n0    feed_forward  x=[B, 32]     out=[B, 32]
+index  name  operation     input shape  output shape
+0      n0    feed_forward  [B, 32]      [B, 32]
 ```
 
 Parameters: 4,192
@@ -118,10 +118,10 @@ Input `['B', 16]` → output `['B', 10]`.
 
 ```text
 Network: [B, 16] -> [B, 10]  dtype=float32
-index  name  operation     input shapes  output shapes
-0      n0    linear        x=[B, 16]     out=[B, 32]
-1      n1    feed_forward  x=[B, 32]     out=[B, 32]
-2      n2    linear        x=[B, 32]     out=[B, 10]
+index  name  operation     input shape  output shape
+0      n0    linear        [B, 16]      [B, 32]
+1      n1    feed_forward  [B, 32]      [B, 32]
+2      n2    linear        [B, 32]      [B, 10]
 ```
 
 Parameters: 7,146
@@ -138,8 +138,8 @@ Input `['B', 8, 24]` → output `['B', 8, 24]`.
 
 ```text
 Network: [B, 8, 24] -> [B, 8, 24]  dtype=float32
-index  name  operation     input shapes  output shapes
-0      n0    feed_forward  x=[B, 8, 24]  out=[B, 8, 24]
+index  name  operation     input shape  output shape
+0      n0    feed_forward  [B, 8, 24]   [B, 8, 24]
 ```
 
 Parameters: 3,160
@@ -156,8 +156,8 @@ Input `['B', 4, 16]` → output `['B', 4, 16]`.
 
 ```text
 Network: [B, 4, 16] -> [B, 4, 16]  dtype=float32
-index  name  operation     input shapes  output shapes
-0      n0    feed_forward  x=[B, 4, 16]  out=[B, 4, 16]
+index  name  operation     input shape  output shape
+0      n0    feed_forward  [B, 4, 16]   [B, 4, 16]
 ```
 
 Parameters: 1,024

@@ -49,12 +49,12 @@ Input `['B', 4]` → output `['B', 4]`.
 
 ```text
 Network: [B, 4] -> [B, 4]  dtype=float32
-index  name    operation  input shapes        output shapes
-0      branch  linear     x=[B, 4]            out=[B, 8]
-1      n1      relu       x=[B, 8]            out=[B, 8]
-2      n2      linear     x=[B, 8]            out=[B, 4]
-3      n3      scale      x=[B, 4]            out=[B, 4]
-4      n4      add        a=[B, 4], b=[B, 4]  out=[B, 4]
+name    operation  input shapes                            output shapes
+branch  linear     x=input:x:[B, 4]                        out=[B, 8]
+n1      relu       x=node:branch/out:[B, 8]                out=[B, 8]
+n2      linear     x=node:n1/out:[B, 8]                    out=[B, 4]
+n3      scale      x=node:n2/out:[B, 4]                    out=[B, 4]
+n4      add        a=node:n3/out:[B, 4], b=input:x:[B, 4]  out=[B, 4]
 ```
 
 Parameters: 76
@@ -73,10 +73,10 @@ Input `['B', 5, 4]` → output `['B', 5, 8]`.
 
 ```text
 Network: [B, 5, 4] -> [B, 5, 8]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 5, 4]   out=[B, 5, 8]
-1      n1    scale      x=[B, 5, 8]   out=[B, 5, 8]
-2      n2    tanh       x=[B, 5, 8]   out=[B, 5, 8]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 5, 4]    [B, 5, 8]
+1      n1    scale      [B, 5, 8]    [B, 5, 8]
+2      n2    tanh       [B, 5, 8]    [B, 5, 8]
 ```
 
 Parameters: 40
@@ -95,10 +95,10 @@ Input `['B', 3, 8, 8]` → output `['B', 4, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 4, 8, 8]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    conv       x=[B, 3, 8, 8]  out=[B, 4, 8, 8]
-1      n1    scale      x=[B, 4, 8, 8]  out=[B, 4, 8, 8]
-2      n2    relu       x=[B, 4, 8, 8]  out=[B, 4, 8, 8]
+index  name  operation  input shape   output shape
+0      n0    conv       [B, 3, 8, 8]  [B, 4, 8, 8]
+1      n1    scale      [B, 4, 8, 8]  [B, 4, 8, 8]
+2      n2    relu       [B, 4, 8, 8]  [B, 4, 8, 8]
 ```
 
 Parameters: 112

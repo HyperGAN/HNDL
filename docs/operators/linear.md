@@ -75,10 +75,10 @@ Input `['B', 128]` → output `['B', 10]`.
 
 ```text
 Network: [B, 128] -> [B, 10]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 128]    out=[B, 64]
-1      n1    relu       x=[B, 64]     out=[B, 64]
-2      n2    linear     x=[B, 64]     out=[B, 10]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 128]     [B, 64]
+1      n1    relu       [B, 64]      [B, 64]
+2      n2    linear     [B, 64]      [B, 10]
 ```
 
 Parameters: 8,906
@@ -93,8 +93,8 @@ Input `['B', 16]` → output `['B', 32]`.
 
 ```text
 Network: [B, 16] -> [B, 32]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 16]     out=[B, 32]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 16]      [B, 32]
 ```
 
 Parameters: 512
@@ -111,8 +111,8 @@ Input `['B', 16]` → output `['B', 32]`.
 
 ```text
 Network: [B, 16] -> [B, 32]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 16]     out=[B, 32]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 16]      [B, 32]
 ```
 
 Parameters: 544
@@ -131,10 +131,10 @@ Input `['B', 16, 32]` → output `['B', 16, 8]`.
 
 ```text
 Network: [B, 16, 32] -> [B, 16, 8]  dtype=float32
-index  name  operation  input shapes   output shapes
-0      n0    linear     x=[B, 16, 32]  out=[B, 16, 64]
-1      n1    relu       x=[B, 16, 64]  out=[B, 16, 64]
-2      n2    linear     x=[B, 16, 64]  out=[B, 16, 8]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 16, 32]  [B, 16, 64]
+1      n1    relu       [B, 16, 64]  [B, 16, 64]
+2      n2    linear     [B, 16, 64]  [B, 16, 8]
 ```
 
 Parameters: 2,632
@@ -153,10 +153,10 @@ Input `['B', 256]` → output `['B', 1]`.
 
 ```text
 Network: [B, 256] -> [B, 1]  dtype=float32
-index  name  operation   input shapes  output shapes
-0      n0    linear      x=[B, 256]    out=[B, 128]
-1      n1    leaky_relu  x=[B, 128]    out=[B, 128]
-2      n2    linear      x=[B, 128]    out=[B, 1]
+index  name  operation   input shape  output shape
+0      n0    linear      [B, 256]     [B, 128]
+1      n1    leaky_relu  [B, 128]     [B, 128]
+2      n2    linear      [B, 128]     [B, 1]
 ```
 
 Parameters: 33,025

@@ -67,9 +67,9 @@ Input `['B', 3, 8, 8]` → output `['B', 3, 16, 16]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 3, 16, 16]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    upsample   x=[B, 3, 8, 8]    out=[B, 3, 16, 16]
-1      n1    conv       x=[B, 3, 16, 16]  out=[B, 3, 16, 16]
+index  name  operation  input shape     output shape
+0      n0    upsample   [B, 3, 8, 8]    [B, 3, 16, 16]
+1      n1    conv       [B, 3, 16, 16]  [B, 3, 16, 16]
 ```
 
 Parameters: 84
@@ -86,8 +86,8 @@ Input `['B', 4, 8, 8]` → output `['B', 4, 16, 16]`.
 
 ```text
 Network: [B, 4, 8, 8] -> [B, 4, 16, 16]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    upsample   x=[B, 4, 8, 8]  out=[B, 4, 16, 16]
+index  name  operation  input shape   output shape
+0      n0    upsample   [B, 4, 8, 8]  [B, 4, 16, 16]
 ```
 
 Parameters: 0
@@ -105,9 +105,9 @@ Input `['B', 3, 4, 4]` → output `['B', 8, 16, 16]`.
 
 ```text
 Network: [B, 3, 4, 4] -> [B, 8, 16, 16]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    conv       x=[B, 3, 4, 4]  out=[B, 8, 4, 4]
-1      n1    upsample   x=[B, 8, 4, 4]  out=[B, 8, 16, 16]
+index  name  operation  input shape   output shape
+0      n0    conv       [B, 3, 4, 4]  [B, 8, 4, 4]
+1      n1    upsample   [B, 8, 4, 4]  [B, 8, 16, 16]
 ```
 
 Parameters: 224
@@ -126,10 +126,10 @@ Input `['B', 32]` → output `['B', 16, 8, 8]`.
 
 ```text
 Network: [B, 32] -> [B, 16, 8, 8]  dtype=float32
-index  name  operation  input shapes     output shapes
-0      n0    linear     x=[B, 32]        out=[B, 256]
-1      n1    reshape    x=[B, 256]       out=[B, 16, 4, 4]
-2      n2    upsample   x=[B, 16, 4, 4]  out=[B, 16, 8, 8]
+index  name  operation  input shape    output shape
+0      n0    linear     [B, 32]        [B, 256]
+1      n1    reshape    [B, 256]       [B, 16, 4, 4]
+2      n2    upsample   [B, 16, 4, 4]  [B, 16, 8, 8]
 ```
 
 Parameters: 8,448

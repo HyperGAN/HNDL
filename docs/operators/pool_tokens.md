@@ -64,10 +64,10 @@ Input `['B', 6, 8]` → output `['B', 10]`.
 
 ```text
 Network: [B, 6, 8] -> [B, 10]  dtype=float32
-index  name  operation    input shapes  output shapes
-0      n0    linear       x=[B, 6, 8]   out=[B, 6, 16]
-1      n1    pool_tokens  x=[B, 6, 16]  out=[B, 16]
-2      n2    linear       x=[B, 16]     out=[B, 10]
+index  name  operation    input shape  output shape
+0      n0    linear       [B, 6, 8]    [B, 6, 16]
+1      n1    pool_tokens  [B, 6, 16]   [B, 16]
+2      n2    linear       [B, 16]      [B, 10]
 ```
 
 Parameters: 314
@@ -85,9 +85,9 @@ Input `['B', 4, 32]` → output `['B', 8]`.
 
 ```text
 Network: [B, 4, 32] -> [B, 8]  dtype=float32
-index  name  operation    input shapes  output shapes
-0      n0    pool_tokens  x=[B, 4, 32]  out=[B, 32]
-1      n1    linear       x=[B, 32]     out=[B, 8]
+index  name  operation    input shape  output shape
+0      n0    pool_tokens  [B, 4, 32]   [B, 32]
+1      n1    linear       [B, 32]      [B, 8]
 ```
 
 Parameters: 264
@@ -107,11 +107,11 @@ Input `['B', 5, 6]` → output `['B', 3]`.
 
 ```text
 Network: [B, 5, 6] -> [B, 3]  dtype=float32
-index  name  operation    input shapes  output shapes
-0      n0    linear       x=[B, 5, 6]   out=[B, 5, 12]
-1      n1    relu         x=[B, 5, 12]  out=[B, 5, 12]
-2      n2    pool_tokens  x=[B, 5, 12]  out=[B, 12]
-3      n3    linear       x=[B, 12]     out=[B, 3]
+index  name  operation    input shape  output shape
+0      n0    linear       [B, 5, 6]    [B, 5, 12]
+1      n1    relu         [B, 5, 12]   [B, 5, 12]
+2      n2    pool_tokens  [B, 5, 12]   [B, 12]
+3      n3    linear       [B, 12]      [B, 3]
 ```
 
 Parameters: 123
@@ -130,10 +130,10 @@ Input `['B', 64]` → output `['B', 8]`.
 
 ```text
 Network: [B, 64] -> [B, 8]  dtype=float32
-index  name  operation    input shapes  output shapes
-0      n0    reshape      x=[B, 64]     out=[B, 4, 16]
-1      n1    linear       x=[B, 4, 16]  out=[B, 4, 8]
-2      n2    pool_tokens  x=[B, 4, 8]   out=[B, 8]
+index  name  operation    input shape  output shape
+0      n0    reshape      [B, 64]      [B, 4, 16]
+1      n1    linear       [B, 4, 16]   [B, 4, 8]
+2      n2    pool_tokens  [B, 4, 8]    [B, 8]
 ```
 
 Parameters: 136

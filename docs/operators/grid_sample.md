@@ -50,9 +50,9 @@ Input `['B', 3, 4, 4]` → output `['B', 3, 8, 8]`.
 
 ```text
 Network: [B, 3, 4, 4] -> [B, 3, 8, 8]  dtype=float32
-index  name  operation        input shapes                       output shapes
-0      n0    coordinate_grid  x=[B, 3, 4, 4]                     out=[B, 8, 8, 2]
-1      n1    grid_sample      x=[B, 3, 4, 4], grid=[B, 8, 8, 2]  out=[B, 3, 8, 8]
+name  operation        input shapes                                           output shapes
+n0    coordinate_grid  x=input:x:[B, 3, 4, 4]                                 out=[B, 8, 8, 2]
+n1    grid_sample      x=input:x:[B, 3, 4, 4], grid=node:n0/out:[B, 8, 8, 2]  out=[B, 3, 8, 8]
 ```
 
 Parameters: 0

@@ -56,10 +56,10 @@ Input `['B', 32]` → output `['B', 10]`.
 
 ```text
 Network: [B, 32] -> [B, 10]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 32]     out=[B, 64]
-1      n1    elu        x=[B, 64]     out=[B, 64]
-2      n2    linear     x=[B, 64]     out=[B, 10]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 32]      [B, 64]
+1      n1    elu        [B, 64]      [B, 64]
+2      n2    linear     [B, 64]      [B, 10]
 ```
 
 Parameters: 2,762
@@ -77,9 +77,9 @@ Input `['B', 3, 8, 8]` → output `['B', 8, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 8, 8, 8]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    conv       x=[B, 3, 8, 8]  out=[B, 8, 8, 8]
-1      n1    elu        x=[B, 8, 8, 8]  out=[B, 8, 8, 8]
+index  name  operation  input shape   output shape
+0      n0    conv       [B, 3, 8, 8]  [B, 8, 8, 8]
+1      n1    elu        [B, 8, 8, 8]  [B, 8, 8, 8]
 ```
 
 Parameters: 224
@@ -97,9 +97,9 @@ Input `['B', 4, 8]` → output `['B', 4, 16]`.
 
 ```text
 Network: [B, 4, 8] -> [B, 4, 16]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 4, 8]   out=[B, 4, 16]
-1      n1    elu        x=[B, 4, 16]  out=[B, 4, 16]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 4, 8]    [B, 4, 16]
+1      n1    elu        [B, 4, 16]   [B, 4, 16]
 ```
 
 Parameters: 144

@@ -34,17 +34,17 @@ Input `['B', 1, 28, 28]` → output `['B', 1, 28, 28]`.
 
 ```text
 Network: [B, 1, 28, 28] -> [B, 1, 28, 28]  dtype=float32
-index  name            operation  input shapes      output shapes
-0      n0              flatten    x=[B, 1, 28, 28]  out=[B, 784]
-1      n1              linear     x=[B, 784]        out=[B, 128]
-2      n2              relu       x=[B, 128]        out=[B, 128]
-3      code            linear     x=[B, 128]        out=[B, 32]
-4      n4              relu       x=[B, 32]         out=[B, 32]
-5      n5              linear     x=[B, 32]         out=[B, 128]
-6      n6              relu       x=[B, 128]        out=[B, 128]
-7      reconstruction  linear     x=[B, 128]        out=[B, 784]
-8      n8              sigmoid    x=[B, 784]        out=[B, 784]
-9      n9              reshape    x=[B, 784]        out=[B, 1, 28, 28]
+index  name            operation  input shape     output shape
+0      n0              flatten    [B, 1, 28, 28]  [B, 784]
+1      n1              linear     [B, 784]        [B, 128]
+2      n2              relu       [B, 128]        [B, 128]
+3      code            linear     [B, 128]        [B, 32]
+4      n4              relu       [B, 32]         [B, 32]
+5      n5              linear     [B, 32]         [B, 128]
+6      n6              relu       [B, 128]        [B, 128]
+7      reconstruction  linear     [B, 128]        [B, 784]
+8      n8              sigmoid    [B, 784]        [B, 784]
+9      n9              reshape    [B, 784]        [B, 1, 28, 28]
 ```
 
 Parameters: 209,968. Classic MNIST autoencoder with a 784-128-32-128-784 stack; 784·128+128 + 128·32+32 + 32·128+128 + 128·784+784 = 209,968 parameters, cross-checked against the equivalent torch.nn.Sequential.
@@ -82,17 +82,17 @@ Input `x=['B', 1, 28, 28]`, `y=['B', 10]` → output `logits=['B', 1]`, `feature
 
 ```text
 Network: x=[B, 1, 28, 28], y=[B, 10] -> logits=[B, 1], features=[B, 6272]  dtype=float32
-index  name              operation   input shapes                          output shapes
-0      label_projection  linear      x=[B, 10]                             out=[B, 784]
-1      label_plane       reshape     x=[B, 784]                            out=[B, 1, 28, 28]
-2      conditioned       concat      x0=[B, 1, 28, 28], x1=[B, 1, 28, 28]  out=[B, 2, 28, 28]
-3      stage1            conv        x=[B, 2, 28, 28]                      out=[B, 64, 14, 14]
-4      n4                leaky_relu  x=[B, 64, 14, 14]                     out=[B, 64, 14, 14]
-5      stage2            conv        x=[B, 64, 14, 14]                     out=[B, 128, 7, 7]
-6      n6                batch_norm  x=[B, 128, 7, 7]                      out=[B, 128, 7, 7]
-7      n7                leaky_relu  x=[B, 128, 7, 7]                      out=[B, 128, 7, 7]
-8      features          flatten     x=[B, 128, 7, 7]                      out=[B, 6272]
-9      logits            linear      x=[B, 6272]                           out=[B, 1]
+name              operation   input shapes                                                       output shapes
+label_projection  linear      x=input:y:[B, 10]                                                  out=[B, 784]
+label_plane       reshape     x=node:label_projection/out:[B, 784]                               out=[B, 1, 28, 28]
+conditioned       concat      x0=input:x:[B, 1, 28, 28], x1=node:label_plane/out:[B, 1, 28, 28]  out=[B, 2, 28, 28]
+stage1            conv        x=node:conditioned/out:[B, 2, 28, 28]                              out=[B, 64, 14, 14]
+n4                leaky_relu  x=node:stage1/out:[B, 64, 14, 14]                                  out=[B, 64, 14, 14]
+stage2            conv        x=node:n4/out:[B, 64, 14, 14]                                      out=[B, 128, 7, 7]
+n6                batch_norm  x=node:stage2/out:[B, 128, 7, 7]                                   out=[B, 128, 7, 7]
+n7                leaky_relu  x=node:n6/out:[B, 128, 7, 7]                                       out=[B, 128, 7, 7]
+features          flatten     x=node:n7/out:[B, 128, 7, 7]                                       out=[B, 6272]
+logits            linear      x=node:features/out:[B, 6272]                                      out=[B, 1]
 ```
 
 Parameters: 148,337. Mirza & Osindero, "Conditional Generative Adversarial Nets" (2014), in the usual DCGAN form; 10·784+784 + 2·64·4·4+64 + 64·128·4·4 + 2·128 + 6272+1 = 148,337 parameters.
@@ -135,20 +135,20 @@ Input `['B', 3, 64, 64]` → output `['B', 1]`.
 
 ```text
 Network: [B, 3, 64, 64] -> [B, 1]  dtype=float32
-index  name    operation   input shapes        output shapes
-0      stage1  conv        x=[B, 3, 64, 64]    out=[B, 64, 32, 32]
-1      n1      leaky_relu  x=[B, 64, 32, 32]   out=[B, 64, 32, 32]
-2      stage2  conv        x=[B, 64, 32, 32]   out=[B, 128, 16, 16]
-3      n3      batch_norm  x=[B, 128, 16, 16]  out=[B, 128, 16, 16]
-4      n4      leaky_relu  x=[B, 128, 16, 16]  out=[B, 128, 16, 16]
-5      stage3  conv        x=[B, 128, 16, 16]  out=[B, 256, 8, 8]
-6      n6      batch_norm  x=[B, 256, 8, 8]    out=[B, 256, 8, 8]
-7      n7      leaky_relu  x=[B, 256, 8, 8]    out=[B, 256, 8, 8]
-8      stage4  conv        x=[B, 256, 8, 8]    out=[B, 512, 4, 4]
-9      n9      batch_norm  x=[B, 512, 4, 4]    out=[B, 512, 4, 4]
-10     n10     leaky_relu  x=[B, 512, 4, 4]    out=[B, 512, 4, 4]
-11     n11     flatten     x=[B, 512, 4, 4]    out=[B, 8192]
-12     logit   linear      x=[B, 8192]         out=[B, 1]
+index  name    operation   input shape       output shape
+0      stage1  conv        [B, 3, 64, 64]    [B, 64, 32, 32]
+1      n1      leaky_relu  [B, 64, 32, 32]   [B, 64, 32, 32]
+2      stage2  conv        [B, 64, 32, 32]   [B, 128, 16, 16]
+3      n3      batch_norm  [B, 128, 16, 16]  [B, 128, 16, 16]
+4      n4      leaky_relu  [B, 128, 16, 16]  [B, 128, 16, 16]
+5      stage3  conv        [B, 128, 16, 16]  [B, 256, 8, 8]
+6      n6      batch_norm  [B, 256, 8, 8]    [B, 256, 8, 8]
+7      n7      leaky_relu  [B, 256, 8, 8]    [B, 256, 8, 8]
+8      stage4  conv        [B, 256, 8, 8]    [B, 512, 4, 4]
+9      n9      batch_norm  [B, 512, 4, 4]    [B, 512, 4, 4]
+10     n10     leaky_relu  [B, 512, 4, 4]    [B, 512, 4, 4]
+11     n11     flatten     [B, 512, 4, 4]    [B, 8192]
+12     logit   linear      [B, 8192]         [B, 1]
 ```
 
 Parameters: 2,765,633. Radford, Metz & Chintala, "Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks" (2015), in the form of the PyTorch DCGAN example; the count was checked against the equivalent torch.nn stack — 3·64·4·4+64 + 64·128·4·4 + 2·128 + 128·256·4·4 + 2·256 + 256·512·4·4 + 2·512 + 8192+1 = 2,765,633.
@@ -192,22 +192,22 @@ Input `['B', 100]` → output `['B', 3, 64, 64]`.
 
 ```text
 Network: [B, 100] -> [B, 3, 64, 64]  dtype=float32
-index  name       operation   input shapes        output shapes
-0      project    linear      x=[B, 100]          out=[B, 16384]
-1      seed       reshape     x=[B, 16384]        out=[B, 1024, 4, 4]
-2      seed_norm  batch_norm  x=[B, 1024, 4, 4]   out=[B, 1024, 4, 4]
-3      n3         relu        x=[B, 1024, 4, 4]   out=[B, 1024, 4, 4]
-4      up8        deconv      x=[B, 1024, 4, 4]   out=[B, 512, 8, 8]
-5      n5         batch_norm  x=[B, 512, 8, 8]    out=[B, 512, 8, 8]
-6      n6         relu        x=[B, 512, 8, 8]    out=[B, 512, 8, 8]
-7      up16       deconv      x=[B, 512, 8, 8]    out=[B, 256, 16, 16]
-8      n8         batch_norm  x=[B, 256, 16, 16]  out=[B, 256, 16, 16]
-9      n9         relu        x=[B, 256, 16, 16]  out=[B, 256, 16, 16]
-10     up32       deconv      x=[B, 256, 16, 16]  out=[B, 128, 32, 32]
-11     n11        batch_norm  x=[B, 128, 32, 32]  out=[B, 128, 32, 32]
-12     n12        relu        x=[B, 128, 32, 32]  out=[B, 128, 32, 32]
-13     to_rgb     deconv      x=[B, 128, 32, 32]  out=[B, 3, 64, 64]
-14     n14        tanh        x=[B, 3, 64, 64]    out=[B, 3, 64, 64]
+index  name       operation   input shape       output shape
+0      project    linear      [B, 100]          [B, 16384]
+1      seed       reshape     [B, 16384]        [B, 1024, 4, 4]
+2      seed_norm  batch_norm  [B, 1024, 4, 4]   [B, 1024, 4, 4]
+3      n3         relu        [B, 1024, 4, 4]   [B, 1024, 4, 4]
+4      up8        deconv      [B, 1024, 4, 4]   [B, 512, 8, 8]
+5      n5         batch_norm  [B, 512, 8, 8]    [B, 512, 8, 8]
+6      n6         relu        [B, 512, 8, 8]    [B, 512, 8, 8]
+7      up16       deconv      [B, 512, 8, 8]    [B, 256, 16, 16]
+8      n8         batch_norm  [B, 256, 16, 16]  [B, 256, 16, 16]
+9      n9         relu        [B, 256, 16, 16]  [B, 256, 16, 16]
+10     up32       deconv      [B, 256, 16, 16]  [B, 128, 32, 32]
+11     n11        batch_norm  [B, 128, 32, 32]  [B, 128, 32, 32]
+12     n12        relu        [B, 128, 32, 32]  [B, 128, 32, 32]
+13     to_rgb     deconv      [B, 128, 32, 32]  [B, 3, 64, 64]
+14     n14        tanh        [B, 3, 64, 64]    [B, 3, 64, 64]
 ```
 
 Parameters: 12,658,435. Radford, Metz & Chintala 2015 (DCGAN), figure 1: project and reshape to 4×4×1024, then 8×8×512, 16×16×256, 32×32×128, 64×64×3. The count was checked by building the same stack in plain torch — Linear(100, 16384, bias=False), four ConvTranspose2d(kernel 4, stride 2, padding 1) with bias=False under each of the four BatchNorm2d layers and bias=True on the final RGB stage — which also gives 12,658,435. The PyTorch DCGAN tutorial differs: it starts from a 100×1×1 ConvTranspose2d rather than a linear projection, and its ngf=64 feature maps make the stack 512/256/128/64/3 instead of the paper's 1024/512/256/128/3.
@@ -241,15 +241,15 @@ Input `['B', 64]` (`input_dtype="int64"`) → output `['B', 64, 256]`.
 
 ```text
 Network: [B, 64] -> [B, 64, 256]  dtype=float32  input_dtype=int64
-index  name     operation          input shapes    output shapes
-0      wte      embedding          ids=[B, 64]     out=[B, 64, 128]
-1      wpe      pos_embed          x=[B, 64, 128]  out=[B, 64, 128]
-2      block0   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
-3      block1   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
-4      block2   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
-5      block3   transformer_block  x=[B, 64, 128]  out=[B, 64, 128]
-6      ln_f     layer_norm         x=[B, 64, 128]  out=[B, 64, 128]
-7      lm_head  linear             x=[B, 64, 128]  out=[B, 64, 256]
+index  name     operation          input shape   output shape
+0      wte      embedding          [B, 64]       [B, 64, 128]
+1      wpe      pos_embed          [B, 64, 128]  [B, 64, 128]
+2      block0   transformer_block  [B, 64, 128]  [B, 64, 128]
+3      block1   transformer_block  [B, 64, 128]  [B, 64, 128]
+4      block2   transformer_block  [B, 64, 128]  [B, 64, 128]
+5      block3   transformer_block  [B, 64, 128]  [B, 64, 128]
+6      ln_f     layer_norm         [B, 64, 128]  [B, 64, 128]
+7      lm_head  linear             [B, 64, 128]  [B, 64, 256]
 ```
 
 Parameters: 867,072. Block structure follows Radford et al. 2019, "Language Models are Unsupervised Multitask Learners" (GPT-2); the count was checked against the same architecture built in plain torch (256·128 + 64·128 + 4·(4·128 + 4·(128·128+128) + (512·128+512) + (128·512+128)) + 2·128 + 128·256 = 867,072), with the head untied rather than shared with the token embedding.
@@ -283,12 +283,12 @@ Input `['B', 1, 28, 28]` → output `['B', 10]`.
 
 ```text
 Network: [B, 1, 28, 28] -> [B, 10]  dtype=float32
-index  name    operation  input shapes      output shapes
-0      n0      flatten    x=[B, 1, 28, 28]  out=[B, 784]
-1      query   linear     x=[B, 784]        out=[B, 128]
-2      memory  hopfield   x=[B, 128]        out=[B, 128]
-3      n3      relu       x=[B, 128]        out=[B, 128]
-4      logits  linear     x=[B, 128]        out=[B, 10]
+index  name    operation  input shape     output shape
+0      n0      flatten    [B, 1, 28, 28]  [B, 784]
+1      query   linear     [B, 784]        [B, 128]
+2      memory  hopfield   [B, 128]        [B, 128]
+3      n3      relu       [B, 128]        [B, 128]
+4      logits  linear     [B, 128]        [B, 10]
 ```
 
 Parameters: 109,962. Hopfield layer of Ramsauer et al., "Hopfield Networks is All You Need" (2020), whose only parameter is the stored-pattern matrix; 784·128+128 + 64·128 + 128·10+10 = 109,962 parameters.
@@ -328,19 +328,19 @@ Input `['B', 1, 32, 32]` → output `['B', 10]`.
 
 ```text
 Network: [B, 1, 32, 32] -> [B, 10]  dtype=float32
-index  name    operation  input shapes       output shapes
-0      c1      conv       x=[B, 1, 32, 32]   out=[B, 6, 28, 28]
-1      n1      tanh       x=[B, 6, 28, 28]   out=[B, 6, 28, 28]
-2      s2      avg_pool   x=[B, 6, 28, 28]   out=[B, 6, 14, 14]
-3      c3      conv       x=[B, 6, 14, 14]   out=[B, 16, 10, 10]
-4      n4      tanh       x=[B, 16, 10, 10]  out=[B, 16, 10, 10]
-5      s4      avg_pool   x=[B, 16, 10, 10]  out=[B, 16, 5, 5]
-6      n6      flatten    x=[B, 16, 5, 5]    out=[B, 400]
-7      c5      linear     x=[B, 400]         out=[B, 120]
-8      n8      tanh       x=[B, 120]         out=[B, 120]
-9      f6      linear     x=[B, 120]         out=[B, 84]
-10     n10     tanh       x=[B, 84]          out=[B, 84]
-11     output  linear     x=[B, 84]          out=[B, 10]
+index  name    operation  input shape      output shape
+0      c1      conv       [B, 1, 32, 32]   [B, 6, 28, 28]
+1      n1      tanh       [B, 6, 28, 28]   [B, 6, 28, 28]
+2      s2      avg_pool   [B, 6, 28, 28]   [B, 6, 14, 14]
+3      c3      conv       [B, 6, 14, 14]   [B, 16, 10, 10]
+4      n4      tanh       [B, 16, 10, 10]  [B, 16, 10, 10]
+5      s4      avg_pool   [B, 16, 10, 10]  [B, 16, 5, 5]
+6      n6      flatten    [B, 16, 5, 5]    [B, 400]
+7      c5      linear     [B, 400]         [B, 120]
+8      n8      tanh       [B, 120]         [B, 120]
+9      f6      linear     [B, 120]         [B, 84]
+10     n10     tanh       [B, 84]          [B, 84]
+11     output  linear     [B, 84]          [B, 10]
 ```
 
 Parameters: 61,706. LeCun et al., "Gradient-Based Learning Applied to Document Recognition" (Proc. IEEE, 1998), in the usual modern reading with fully connected C5/F6 layers; checked against the equivalent torch.nn stack: 156 + 2,416 + 48,120 + 10,164 + 850 = 61,706 parameters.
@@ -366,14 +366,14 @@ Input `['B', 1, 28, 28]` → output `['B', 10]`.
 
 ```text
 Network: [B, 1, 28, 28] -> [B, 10]  dtype=float32
-index  name  operation  input shapes      output shapes
-0      n0    flatten    x=[B, 1, 28, 28]  out=[B, 784]
-1      n1    linear     x=[B, 784]        out=[B, 256]
-2      n2    relu       x=[B, 256]        out=[B, 256]
-3      n3    dropout    x=[B, 256]        out=[B, 256]
-4      n4    linear     x=[B, 256]        out=[B, 128]
-5      n5    relu       x=[B, 128]        out=[B, 128]
-6      n6    linear     x=[B, 128]        out=[B, 10]
+index  name  operation  input shape     output shape
+0      n0    flatten    [B, 1, 28, 28]  [B, 784]
+1      n1    linear     [B, 784]        [B, 256]
+2      n2    relu       [B, 256]        [B, 256]
+3      n3    dropout    [B, 256]        [B, 256]
+4      n4    linear     [B, 256]        [B, 128]
+5      n5    relu       [B, 128]        [B, 128]
+6      n6    linear     [B, 128]        [B, 10]
 ```
 
 Parameters: 235,146. Classic MNIST baseline; 784·256+256 + 256·128+128 + 128·10+10 = 235,146 parameters.
@@ -420,23 +420,23 @@ Input `['B', 32]` (`input_dtype="int64"`) → output `['B', 32, 100]`.
 
 ```text
 Network: [B, 32] -> [B, 32, 100]  dtype=float32  input_dtype=int64
-index  name                  operation   input shapes                  output shapes
-0      tokens                embedding   ids=[B, 32]                   out=[B, 32, 64]
-1      positions             pos_embed   x=[B, 32, 64]                 out=[B, 32, 64]
-2      block1_attn_norm      layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
-3      block1_attn           attention   x=[B, 32, 64]                 out=[B, 32, 64]
-4      block1_attn_residual  add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
-5      block1_moe_norm       layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
-6      block1_moe            moe         x=[B, 32, 64]                 out=[B, 32, 64]
-7      block1_moe_residual   add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
-8      block2_attn_norm      layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
-9      block2_attn           attention   x=[B, 32, 64]                 out=[B, 32, 64]
-10     block2_attn_residual  add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
-11     block2_moe_norm       layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
-12     block2_moe            moe         x=[B, 32, 64]                 out=[B, 32, 64]
-13     block2_moe_residual   add         a=[B, 32, 64], b=[B, 32, 64]  out=[B, 32, 64]
-14     final_norm            layer_norm  x=[B, 32, 64]                 out=[B, 32, 64]
-15     lm_head               linear      x=[B, 32, 64]                 out=[B, 32, 100]
+name                  operation   input shapes                                                                    output shapes
+tokens                embedding   ids=input:x:[B, 32]                                                             out=[B, 32, 64]
+positions             pos_embed   x=node:tokens/out:[B, 32, 64]                                                   out=[B, 32, 64]
+block1_attn_norm      layer_norm  x=node:positions/out:[B, 32, 64]                                                out=[B, 32, 64]
+block1_attn           attention   x=node:block1_attn_norm/out:[B, 32, 64]                                         out=[B, 32, 64]
+block1_attn_residual  add         a=node:block1_attn/out:[B, 32, 64], b=node:positions/out:[B, 32, 64]            out=[B, 32, 64]
+block1_moe_norm       layer_norm  x=node:block1_attn_residual/out:[B, 32, 64]                                     out=[B, 32, 64]
+block1_moe            moe         x=node:block1_moe_norm/out:[B, 32, 64]                                          out=[B, 32, 64]
+block1_moe_residual   add         a=node:block1_moe/out:[B, 32, 64], b=node:block1_attn_residual/out:[B, 32, 64]  out=[B, 32, 64]
+block2_attn_norm      layer_norm  x=node:block1_moe_residual/out:[B, 32, 64]                                      out=[B, 32, 64]
+block2_attn           attention   x=node:block2_attn_norm/out:[B, 32, 64]                                         out=[B, 32, 64]
+block2_attn_residual  add         a=node:block2_attn/out:[B, 32, 64], b=node:block1_moe_residual/out:[B, 32, 64]  out=[B, 32, 64]
+block2_moe_norm       layer_norm  x=node:block2_attn_residual/out:[B, 32, 64]                                     out=[B, 32, 64]
+block2_moe            moe         x=node:block2_moe_norm/out:[B, 32, 64]                                          out=[B, 32, 64]
+block2_moe_residual   add         a=node:block2_moe/out:[B, 32, 64], b=node:block2_attn_residual/out:[B, 32, 64]  out=[B, 32, 64]
+final_norm            layer_norm  x=node:block2_moe_residual/out:[B, 32, 64]                                      out=[B, 32, 64]
+lm_head               linear      x=node:final_norm/out:[B, 32, 64]                                               out=[B, 32, 100]
 ```
 
 Parameters: 181,888. Top-k expert routing follows Shazeer et al. 2017 ("Outrageously Large Neural Networks") and the Switch Transformer (Fedus et al. 2021); the count was checked against an equivalent plain-PyTorch build: embedding 100·64 = 6,400, positions 32·64 = 2,048, five layer norms 5·128 = 640, two attentions 2·4·(64·64+64) = 33,280, two MoE layers 2·(4·64 + 4·(128·64+128 + 64·128+64)) = 133,120, head 100·64 = 6,400, total 181,888.
@@ -485,21 +485,21 @@ Input `['B', 3, 224, 224]` → output `['B', 1000]`.
 
 ```text
 Network: [B, 3, 224, 224] -> [B, 1000]  dtype=float32
-index  name       operation        input shapes         output shapes
-0      stem_conv  conv             x=[B, 3, 224, 224]   out=[B, 64, 112, 112]
-1      stem_norm  batch_norm       x=[B, 64, 112, 112]  out=[B, 64, 112, 112]
-2      n2         relu             x=[B, 64, 112, 112]  out=[B, 64, 112, 112]
-3      stem_pool  max_pool         x=[B, 64, 112, 112]  out=[B, 64, 56, 56]
-4      layer1_0   resblock         x=[B, 64, 56, 56]    out=[B, 64, 56, 56]
-5      layer1_1   resblock         x=[B, 64, 56, 56]    out=[B, 64, 56, 56]
-6      layer2_0   resblock         x=[B, 64, 56, 56]    out=[B, 128, 28, 28]
-7      layer2_1   resblock         x=[B, 128, 28, 28]   out=[B, 128, 28, 28]
-8      layer3_0   resblock         x=[B, 128, 28, 28]   out=[B, 256, 14, 14]
-9      layer3_1   resblock         x=[B, 256, 14, 14]   out=[B, 256, 14, 14]
-10     layer4_0   resblock         x=[B, 256, 14, 14]   out=[B, 512, 7, 7]
-11     layer4_1   resblock         x=[B, 512, 7, 7]     out=[B, 512, 7, 7]
-12     n12        global_avg_pool  x=[B, 512, 7, 7]     out=[B, 512]
-13     fc         linear           x=[B, 512]           out=[B, 1000]
+index  name       operation        input shape        output shape
+0      stem_conv  conv             [B, 3, 224, 224]   [B, 64, 112, 112]
+1      stem_norm  batch_norm       [B, 64, 112, 112]  [B, 64, 112, 112]
+2      n2         relu             [B, 64, 112, 112]  [B, 64, 112, 112]
+3      stem_pool  max_pool         [B, 64, 112, 112]  [B, 64, 56, 56]
+4      layer1_0   resblock         [B, 64, 56, 56]    [B, 64, 56, 56]
+5      layer1_1   resblock         [B, 64, 56, 56]    [B, 64, 56, 56]
+6      layer2_0   resblock         [B, 64, 56, 56]    [B, 128, 28, 28]
+7      layer2_1   resblock         [B, 128, 28, 28]   [B, 128, 28, 28]
+8      layer3_0   resblock         [B, 128, 28, 28]   [B, 256, 14, 14]
+9      layer3_1   resblock         [B, 256, 14, 14]   [B, 256, 14, 14]
+10     layer4_0   resblock         [B, 256, 14, 14]   [B, 512, 7, 7]
+11     layer4_1   resblock         [B, 512, 7, 7]     [B, 512, 7, 7]
+12     n12        global_avg_pool  [B, 512, 7, 7]     [B, 512]
+13     fc         linear           [B, 512]           [B, 1000]
 ```
 
 Parameters: 11,689,512. He et al., "Deep Residual Learning for Image Recognition" (CVPR 2016), configuration ResNet-18; the count equals torchvision.models.resnet18(), sum(p.numel() for p in m.parameters()) == 11,689,512, because hndl's resblock is torchvision's BasicBlock — bias-free 3×3 convolutions with batch norm, and a 1×1 convolution plus norm on each downsampling shortcut.
@@ -529,8 +529,8 @@ Input `['B', 64, 16, 16]` → output `['B', 64, 16, 16]`.
 
 ```text
 Network: [B, 64, 16, 16] -> [B, 64, 16, 16]  dtype=float32
-index  name  operation          input shapes       output shapes
-0      n0    spatial_attention  x=[B, 64, 16, 16]  out=[B, 64, 16, 16]
+index  name  operation          input shape      output shape
+0      n0    spatial_attention  [B, 64, 16, 16]  [B, 64, 16, 16]
 ```
 
 Parameters: 5,201. Zhang, Goodfellow, Metaxas & Odena, "Self-Attention Generative Adversarial Networks" (ICML 2019, arXiv 2018), section 3: f and g project to C/8 = 8 channels, h keeps C = 64, the attention map is softmax(f(x)^T g(x)) over the key positions, and the output is y = gamma * o + x with gamma initialized to 0. The count matches the same block in plain torch — three Conv2d(1×1) layers with bias (64·8+8 twice and 64·64+64) plus the single gamma — which also gives 5,201.
@@ -594,38 +594,38 @@ Input `['B', 3, 32, 32]` → output `['B', 1, 32, 32]`.
 
 ```text
 Network: [B, 3, 32, 32] -> [B, 1, 32, 32]  dtype=float32
-index  name     operation  input shapes                            output shapes
-0      n0       conv       x=[B, 3, 32, 32]                        out=[B, 16, 32, 32]
-1      n1       relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
-2      n2       conv       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
-3      skip1    relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
-4      n4       max_pool   x=[B, 16, 32, 32]                       out=[B, 16, 16, 16]
-5      n5       conv       x=[B, 16, 16, 16]                       out=[B, 32, 16, 16]
-6      n6       relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
-7      n7       conv       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
-8      skip2    relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
-9      n9       max_pool   x=[B, 32, 16, 16]                       out=[B, 32, 8, 8]
-10     n10      conv       x=[B, 32, 8, 8]                         out=[B, 64, 8, 8]
-11     n11      relu       x=[B, 64, 8, 8]                         out=[B, 64, 8, 8]
-12     n12      conv       x=[B, 64, 8, 8]                         out=[B, 64, 8, 8]
-13     n13      relu       x=[B, 64, 8, 8]                         out=[B, 64, 8, 8]
-14     n14      upsample   x=[B, 64, 8, 8]                         out=[B, 64, 16, 16]
-15     n15      conv       x=[B, 64, 16, 16]                       out=[B, 32, 16, 16]
-16     upconv2  relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
-17     n17      concat     x0=[B, 32, 16, 16], x1=[B, 32, 16, 16]  out=[B, 64, 16, 16]
-18     n18      conv       x=[B, 64, 16, 16]                       out=[B, 32, 16, 16]
-19     n19      relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
-20     n20      conv       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
-21     n21      relu       x=[B, 32, 16, 16]                       out=[B, 32, 16, 16]
-22     n22      upsample   x=[B, 32, 16, 16]                       out=[B, 32, 32, 32]
-23     n23      conv       x=[B, 32, 32, 32]                       out=[B, 16, 32, 32]
-24     upconv1  relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
-25     n25      concat     x0=[B, 16, 32, 32], x1=[B, 16, 32, 32]  out=[B, 32, 32, 32]
-26     n26      conv       x=[B, 32, 32, 32]                       out=[B, 16, 32, 32]
-27     n27      relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
-28     n28      conv       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
-29     n29      relu       x=[B, 16, 32, 32]                       out=[B, 16, 32, 32]
-30     logits   conv       x=[B, 16, 32, 32]                       out=[B, 1, 32, 32]
+name     operation  input shapes                                                            output shapes
+n0       conv       x=input:x:[B, 3, 32, 32]                                                out=[B, 16, 32, 32]
+n1       relu       x=node:n0/out:[B, 16, 32, 32]                                           out=[B, 16, 32, 32]
+n2       conv       x=node:n1/out:[B, 16, 32, 32]                                           out=[B, 16, 32, 32]
+skip1    relu       x=node:n2/out:[B, 16, 32, 32]                                           out=[B, 16, 32, 32]
+n4       max_pool   x=node:skip1/out:[B, 16, 32, 32]                                        out=[B, 16, 16, 16]
+n5       conv       x=node:n4/out:[B, 16, 16, 16]                                           out=[B, 32, 16, 16]
+n6       relu       x=node:n5/out:[B, 32, 16, 16]                                           out=[B, 32, 16, 16]
+n7       conv       x=node:n6/out:[B, 32, 16, 16]                                           out=[B, 32, 16, 16]
+skip2    relu       x=node:n7/out:[B, 32, 16, 16]                                           out=[B, 32, 16, 16]
+n9       max_pool   x=node:skip2/out:[B, 32, 16, 16]                                        out=[B, 32, 8, 8]
+n10      conv       x=node:n9/out:[B, 32, 8, 8]                                             out=[B, 64, 8, 8]
+n11      relu       x=node:n10/out:[B, 64, 8, 8]                                            out=[B, 64, 8, 8]
+n12      conv       x=node:n11/out:[B, 64, 8, 8]                                            out=[B, 64, 8, 8]
+n13      relu       x=node:n12/out:[B, 64, 8, 8]                                            out=[B, 64, 8, 8]
+n14      upsample   x=node:n13/out:[B, 64, 8, 8]                                            out=[B, 64, 16, 16]
+n15      conv       x=node:n14/out:[B, 64, 16, 16]                                          out=[B, 32, 16, 16]
+upconv2  relu       x=node:n15/out:[B, 32, 16, 16]                                          out=[B, 32, 16, 16]
+n17      concat     x0=node:skip2/out:[B, 32, 16, 16], x1=node:upconv2/out:[B, 32, 16, 16]  out=[B, 64, 16, 16]
+n18      conv       x=node:n17/out:[B, 64, 16, 16]                                          out=[B, 32, 16, 16]
+n19      relu       x=node:n18/out:[B, 32, 16, 16]                                          out=[B, 32, 16, 16]
+n20      conv       x=node:n19/out:[B, 32, 16, 16]                                          out=[B, 32, 16, 16]
+n21      relu       x=node:n20/out:[B, 32, 16, 16]                                          out=[B, 32, 16, 16]
+n22      upsample   x=node:n21/out:[B, 32, 16, 16]                                          out=[B, 32, 32, 32]
+n23      conv       x=node:n22/out:[B, 32, 32, 32]                                          out=[B, 16, 32, 32]
+upconv1  relu       x=node:n23/out:[B, 16, 32, 32]                                          out=[B, 16, 32, 32]
+n25      concat     x0=node:skip1/out:[B, 16, 32, 32], x1=node:upconv1/out:[B, 16, 32, 32]  out=[B, 32, 32, 32]
+n26      conv       x=node:n25/out:[B, 32, 32, 32]                                          out=[B, 16, 32, 32]
+n27      relu       x=node:n26/out:[B, 16, 32, 32]                                          out=[B, 16, 32, 32]
+n28      conv       x=node:n27/out:[B, 16, 32, 32]                                          out=[B, 16, 32, 32]
+n29      relu       x=node:n28/out:[B, 16, 32, 32]                                          out=[B, 16, 32, 32]
+logits   conv       x=node:n29/out:[B, 16, 32, 32]                                          out=[B, 1, 32, 32]
 ```
 
 Parameters: 129,841. Ronneberger, Fischer & Brox, "U-Net: Convolutional Networks for Biomedical Image Segmentation" (MICCAI 2015), scaled down to 16/32/64 channels with padded 3×3 convolutions and nearest-neighbour up-convolutions; the count was checked against the same architecture written as a plain torch.nn.Module (448 + 2320 + 4640 + 9248 + 18496 + 36928 + 18464 + 18464 + 9248 + 4624 + 4624 + 2320 + 17 = 129,841 over its 13 convolutions).
@@ -661,17 +661,17 @@ Input `['B', 3, 32, 32]` → output `['B', 10]`.
 
 ```text
 Network: [B, 3, 32, 32] -> [B, 10]  dtype=float32
-index  name        operation          input shapes      output shapes
-0      patches     patch_embed        x=[B, 3, 32, 32]  out=[B, 64, 192]
-1      cls         cls_token          x=[B, 64, 192]    out=[B, 65, 192]
-2      n2          pos_embed          x=[B, 65, 192]    out=[B, 65, 192]
-3      n3          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
-4      n4          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
-5      n5          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
-6      n6          transformer_block  x=[B, 65, 192]    out=[B, 65, 192]
-7      final_norm  layer_norm         x=[B, 65, 192]    out=[B, 65, 192]
-8      n8          pool_tokens        x=[B, 65, 192]    out=[B, 192]
-9      n9          linear             x=[B, 192]        out=[B, 10]
+index  name        operation          input shape     output shape
+0      patches     patch_embed        [B, 3, 32, 32]  [B, 64, 192]
+1      cls         cls_token          [B, 64, 192]    [B, 65, 192]
+2      n2          pos_embed          [B, 65, 192]    [B, 65, 192]
+3      n3          transformer_block  [B, 65, 192]    [B, 65, 192]
+4      n4          transformer_block  [B, 65, 192]    [B, 65, 192]
+5      n5          transformer_block  [B, 65, 192]    [B, 65, 192]
+6      n6          transformer_block  [B, 65, 192]    [B, 65, 192]
+7      final_norm  layer_norm         [B, 65, 192]    [B, 65, 192]
+8      n8          pool_tokens        [B, 65, 192]    [B, 192]
+9      n9          linear             [B, 192]        [B, 10]
 ```
 
 Parameters: 1,803,850. Dosovitskiy et al. 2020, "An Image Is Worth 16x16 Words" (ViT), in the ViT-Tiny configuration (width 192, 3 heads, mlp_ratio 4) at depth 4 with a 4×4 patch stem on 32×32 inputs; checked against an equivalent plain-PyTorch build: 9,408 stem + 192 class token + 12,480 positions + 4·444,864 blocks + 384 final norm + 1,930 head = 1,803,850.

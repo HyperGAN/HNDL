@@ -68,12 +68,12 @@ Input `['B', 4, 8, 8]` → output `['B', 4, 8, 8]`.
 
 ```text
 Network: [B, 4, 8, 8] -> [B, 4, 8, 8]  dtype=float32
-index  name  operation      input shapes                    output shapes
-0      n0    conv           x=[B, 4, 8, 8]                  out=[B, 4, 8, 8]
-1      n1    relu           x=[B, 4, 8, 8]                  out=[B, 4, 8, 8]
-2      n2    conv           x=[B, 4, 8, 8]                  out=[B, 4, 8, 8]
-3      n3    learned_scale  x=[B, 4, 8, 8]                  out=[B, 4, 8, 8]
-4      n4    add            a=[B, 4, 8, 8], b=[B, 4, 8, 8]  out=[B, 4, 8, 8]
+name  operation      input shapes                                        output shapes
+n0    conv           x=input:x:[B, 4, 8, 8]                              out=[B, 4, 8, 8]
+n1    relu           x=node:n0/out:[B, 4, 8, 8]                          out=[B, 4, 8, 8]
+n2    conv           x=node:n1/out:[B, 4, 8, 8]                          out=[B, 4, 8, 8]
+n3    learned_scale  x=node:n2/out:[B, 4, 8, 8]                          out=[B, 4, 8, 8]
+n4    add            a=node:n3/out:[B, 4, 8, 8], b=input:x:[B, 4, 8, 8]  out=[B, 4, 8, 8]
 ```
 
 Parameters: 169
@@ -92,10 +92,10 @@ Input `['B', 5, 4]` → output `['B', 5, 8]`.
 
 ```text
 Network: [B, 5, 4] -> [B, 5, 8]  dtype=float32
-index  name  operation      input shapes  output shapes
-0      n0    linear         x=[B, 5, 4]   out=[B, 5, 8]
-1      n1    learned_scale  x=[B, 5, 8]   out=[B, 5, 8]
-2      n2    tanh           x=[B, 5, 8]   out=[B, 5, 8]
+index  name  operation      input shape  output shape
+0      n0    linear         [B, 5, 4]    [B, 5, 8]
+1      n1    learned_scale  [B, 5, 8]    [B, 5, 8]
+2      n2    tanh           [B, 5, 8]    [B, 5, 8]
 ```
 
 Parameters: 41
@@ -113,9 +113,9 @@ Input `['B', 16]` → output `['B', 10]`.
 
 ```text
 Network: [B, 16] -> [B, 10]  dtype=float32
-index  name  operation      input shapes  output shapes
-0      n0    linear         x=[B, 16]     out=[B, 10]
-1      n1    learned_scale  x=[B, 10]     out=[B, 10]
+index  name  operation      input shape  output shape
+0      n0    linear         [B, 16]      [B, 10]
+1      n1    learned_scale  [B, 10]      [B, 10]
 ```
 
 Parameters: 171

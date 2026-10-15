@@ -63,9 +63,9 @@ Input `['B', 32]` → output `['B', 10]`.
 
 ```text
 Network: [B, 32] -> [B, 10]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 32]     out=[B, 10]
-1      n1    softmax    x=[B, 10]     out=[B, 10]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 32]      [B, 10]
+1      n1    softmax    [B, 10]      [B, 10]
 ```
 
 Parameters: 330
@@ -83,9 +83,9 @@ Input `['B', 4, 8]` → output `['B', 4, 16]`.
 
 ```text
 Network: [B, 4, 8] -> [B, 4, 16]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 4, 8]   out=[B, 4, 16]
-1      n1    softmax    x=[B, 4, 16]  out=[B, 4, 16]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 4, 8]    [B, 4, 16]
+1      n1    softmax    [B, 4, 16]   [B, 4, 16]
 ```
 
 Parameters: 144
@@ -103,9 +103,9 @@ Input `['B', 3, 4, 4]` → output `['B', 4, 4, 4]`.
 
 ```text
 Network: [B, 3, 4, 4] -> [B, 4, 4, 4]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    conv       x=[B, 3, 4, 4]  out=[B, 4, 4, 4]
-1      n1    softmax    x=[B, 4, 4, 4]  out=[B, 4, 4, 4]
+index  name  operation  input shape   output shape
+0      n0    conv       [B, 3, 4, 4]  [B, 4, 4, 4]
+1      n1    softmax    [B, 4, 4, 4]  [B, 4, 4, 4]
 ```
 
 Parameters: 16

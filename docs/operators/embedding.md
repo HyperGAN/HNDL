@@ -65,9 +65,9 @@ Input `['B', 16]` (`input_dtype="int64"`) → output `['B', 16, 8]`.
 
 ```text
 Network: [B, 16] -> [B, 16, 8]  dtype=float32  input_dtype=int64
-index  name  operation  input shapes   output shapes
-0      n0    embedding  ids=[B, 16]    out=[B, 16, 32]
-1      n1    linear     x=[B, 16, 32]  out=[B, 16, 8]
+index  name  operation  input shape  output shape
+0      n0    embedding  [B, 16]      [B, 16, 32]
+1      n1    linear     [B, 16, 32]  [B, 16, 8]
 ```
 
 Parameters: 32,264
@@ -85,9 +85,9 @@ Input `['B', 8]` (`input_dtype="int64"`) → output `['B', 8, 5]`.
 
 ```text
 Network: [B, 8] -> [B, 8, 5]  dtype=float32  input_dtype=int64
-index  name  operation  input shapes  output shapes
-0      n0    embedding  ids=[B, 8]    out=[B, 8, 5]
-1      n1    relu       x=[B, 8, 5]   out=[B, 8, 5]
+index  name  operation  input shape  output shape
+0      n0    embedding  [B, 8]       [B, 8, 5]
+1      n1    relu       [B, 8, 5]    [B, 8, 5]
 ```
 
 Parameters: 320
@@ -107,11 +107,11 @@ Input `['B', 6]` (`input_dtype="int64"`) → output `['B', 7, 4]`.
 
 ```text
 Network: [B, 6] -> [B, 7, 4]  dtype=float32  input_dtype=int64
-index  name  operation  input shapes  output shapes
-0      n0    embedding  ids=[B, 6]    out=[B, 6, 16]
-1      n1    cls_token  x=[B, 6, 16]  out=[B, 7, 16]
-2      n2    pos_embed  x=[B, 7, 16]  out=[B, 7, 16]
-3      n3    linear     x=[B, 7, 16]  out=[B, 7, 4]
+index  name  operation  input shape  output shape
+0      n0    embedding  [B, 6]       [B, 6, 16]
+1      n1    cls_token  [B, 6, 16]   [B, 7, 16]
+2      n2    pos_embed  [B, 7, 16]   [B, 7, 16]
+3      n3    linear     [B, 7, 16]   [B, 7, 4]
 ```
 
 Parameters: 2,644

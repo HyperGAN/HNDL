@@ -43,11 +43,11 @@ Input `['B', 4]` → output `['B', 4]`.
 
 ```text
 Network: [B, 4] -> [B, 4]  dtype=float32
-index  name    operation  input shapes        output shapes
-0      branch  linear     x=[B, 4]            out=[B, 8]
-1      n1      relu       x=[B, 8]            out=[B, 8]
-2      n2      linear     x=[B, 8]            out=[B, 4]
-3      n3      add        a=[B, 4], b=[B, 4]  out=[B, 4]
+name    operation  input shapes                            output shapes
+branch  linear     x=input:x:[B, 4]                        out=[B, 8]
+n1      relu       x=node:branch/out:[B, 8]                out=[B, 8]
+n2      linear     x=node:n1/out:[B, 8]                    out=[B, 4]
+n3      add        a=node:n2/out:[B, 4], b=input:x:[B, 4]  out=[B, 4]
 ```
 
 Parameters: 76

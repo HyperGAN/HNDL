@@ -46,8 +46,8 @@ Input `['B', 16, 2]` → output `['B', 16, 16]`.
 
 ```text
 Network: [B, 16, 2] -> [B, 16, 16]  dtype=float32
-index  name  operation         input shapes  output shapes
-0      n0    fourier_features  x=[B, 16, 2]  out=[B, 16, 16]
+index  name  operation         input shape  output shape
+0      n0    fourier_features  [B, 16, 2]   [B, 16, 16]
 ```
 
 Parameters: 0

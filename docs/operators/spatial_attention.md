@@ -84,8 +84,8 @@ Input `['B', 64, 8, 8]` → output `['B', 64, 8, 8]`.
 
 ```text
 Network: [B, 64, 8, 8] -> [B, 64, 8, 8]  dtype=float32
-index  name  operation          input shapes     output shapes
-0      n0    spatial_attention  x=[B, 64, 8, 8]  out=[B, 64, 8, 8]
+index  name  operation          input shape    output shape
+0      n0    spatial_attention  [B, 64, 8, 8]  [B, 64, 8, 8]
 ```
 
 Parameters: 5,201
@@ -102,8 +102,8 @@ Input `['B', 16, 4, 4]` → output `['B', 16, 4, 4]`.
 
 ```text
 Network: [B, 16, 4, 4] -> [B, 16, 4, 4]  dtype=float32
-index  name  operation          input shapes     output shapes
-0      n0    spatial_attention  x=[B, 16, 4, 4]  out=[B, 16, 4, 4]
+index  name  operation          input shape    output shape
+0      n0    spatial_attention  [B, 16, 4, 4]  [B, 16, 4, 4]
 ```
 
 Parameters: 545
@@ -123,11 +123,11 @@ Input `['B', 3, 8, 8]` → output `['B', 10]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 10]  dtype=float32
-index  name  operation          input shapes     output shapes
-0      n0    conv               x=[B, 3, 8, 8]   out=[B, 32, 8, 8]
-1      n1    spatial_attention  x=[B, 32, 8, 8]  out=[B, 32, 8, 8]
-2      n2    global_avg_pool    x=[B, 32, 8, 8]  out=[B, 32]
-3      n3    linear             x=[B, 32]        out=[B, 10]
+index  name  operation          input shape    output shape
+0      n0    conv               [B, 3, 8, 8]   [B, 32, 8, 8]
+1      n1    spatial_attention  [B, 32, 8, 8]  [B, 32, 8, 8]
+2      n2    global_avg_pool    [B, 32, 8, 8]  [B, 32]
+3      n3    linear             [B, 32]        [B, 10]
 ```
 
 Parameters: 2,811

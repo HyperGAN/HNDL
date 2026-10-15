@@ -66,9 +66,9 @@ Input `['B', 4, 16]` → output `['B', 8]`.
 
 ```text
 Network: [B, 4, 16] -> [B, 8]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    linear     x=[B, 4, 16]  out=[B, 4, 8]
-1      n1    mean       x=[B, 4, 8]   out=[B, 8]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 4, 16]   [B, 4, 8]
+1      n1    mean       [B, 4, 8]    [B, 8]
 ```
 
 Parameters: 136
@@ -87,10 +87,10 @@ Input `['B', 3, 8, 8]` → output `['B', 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 8]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    conv       x=[B, 3, 8, 8]  out=[B, 8, 8, 8]
-1      n1    mean       x=[B, 8, 8, 8]  out=[B, 8, 8]
-2      n2    mean       x=[B, 8, 8]     out=[B, 8]
+index  name  operation  input shape   output shape
+0      n0    conv       [B, 3, 8, 8]  [B, 8, 8, 8]
+1      n1    mean       [B, 8, 8, 8]  [B, 8, 8]
+2      n2    mean       [B, 8, 8]     [B, 8]
 ```
 
 Parameters: 224
@@ -107,8 +107,8 @@ Input `['B', 3, 8, 8]` → output `['B', 3, 1, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 3, 1, 8]  dtype=float32
-index  name  operation  input shapes    output shapes
-0      n0    mean       x=[B, 3, 8, 8]  out=[B, 3, 1, 8]
+index  name  operation  input shape   output shape
+0      n0    mean       [B, 3, 8, 8]  [B, 3, 1, 8]
 ```
 
 Parameters: 0
@@ -126,9 +126,9 @@ Input `['B', 6, 32]` → output `['B', 10]`.
 
 ```text
 Network: [B, 6, 32] -> [B, 10]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    mean       x=[B, 6, 32]  out=[B, 32]
-1      n1    linear     x=[B, 32]     out=[B, 10]
+index  name  operation  input shape  output shape
+0      n0    mean       [B, 6, 32]   [B, 32]
+1      n1    linear     [B, 32]      [B, 10]
 ```
 
 Parameters: 330

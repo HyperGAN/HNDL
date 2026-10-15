@@ -95,12 +95,12 @@ Input `['B', 3, 28, 28]` → output `['B', 10]`.
 
 ```text
 Network: [B, 3, 28, 28] -> [B, 10]  dtype=float32
-index  name  operation          input shapes       output shapes
-0      n0    conv               x=[B, 3, 28, 28]   out=[B, 16, 28, 28]
-1      n1    relu               x=[B, 16, 28, 28]  out=[B, 16, 28, 28]
-2      n2    adaptive_avg_pool  x=[B, 16, 28, 28]  out=[B, 16, 1, 1]
-3      n3    flatten            x=[B, 16, 1, 1]    out=[B, 16]
-4      n4    linear             x=[B, 16]          out=[B, 10]
+index  name  operation          input shape      output shape
+0      n0    conv               [B, 3, 28, 28]   [B, 16, 28, 28]
+1      n1    relu               [B, 16, 28, 28]  [B, 16, 28, 28]
+2      n2    adaptive_avg_pool  [B, 16, 28, 28]  [B, 16, 1, 1]
+3      n3    flatten            [B, 16, 1, 1]    [B, 16]
+4      n4    linear             [B, 16]          [B, 10]
 ```
 
 Parameters: 618
@@ -119,10 +119,10 @@ Input `['B', 8, 15, 15]` → output `['B', 5]`.
 
 ```text
 Network: [B, 8, 15, 15] -> [B, 5]  dtype=float32
-index  name  operation          input shapes      output shapes
-0      n0    adaptive_avg_pool  x=[B, 8, 15, 15]  out=[B, 8, 4, 4]
-1      n1    flatten            x=[B, 8, 4, 4]    out=[B, 128]
-2      n2    linear             x=[B, 128]        out=[B, 5]
+index  name  operation          input shape     output shape
+0      n0    adaptive_avg_pool  [B, 8, 15, 15]  [B, 8, 4, 4]
+1      n1    flatten            [B, 8, 4, 4]    [B, 128]
+2      n2    linear             [B, 128]        [B, 5]
 ```
 
 Parameters: 645
@@ -139,8 +139,8 @@ Input `['B', 6, 9, 9]` → output `['B', 6, 3, 3]`.
 
 ```text
 Network: [B, 6, 9, 9] -> [B, 6, 3, 3]  dtype=float32
-index  name  operation          input shapes    output shapes
-0      n0    adaptive_avg_pool  x=[B, 6, 9, 9]  out=[B, 6, 3, 3]
+index  name  operation          input shape   output shape
+0      n0    adaptive_avg_pool  [B, 6, 9, 9]  [B, 6, 3, 3]
 ```
 
 Parameters: 0
@@ -157,8 +157,8 @@ Input `['B', 4, 8, 8]` → output `['B', 4, 2, 3]`.
 
 ```text
 Network: [B, 4, 8, 8] -> [B, 4, 2, 3]  dtype=float32
-index  name  operation          input shapes    output shapes
-0      n0    adaptive_avg_pool  x=[B, 4, 8, 8]  out=[B, 4, 2, 3]
+index  name  operation          input shape   output shape
+0      n0    adaptive_avg_pool  [B, 4, 8, 8]  [B, 4, 2, 3]
 ```
 
 Parameters: 0

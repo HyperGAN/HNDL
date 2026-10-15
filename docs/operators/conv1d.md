@@ -98,10 +98,10 @@ Input `['B', 4, 32]` → output `['B', 4, 32]`.
 
 ```text
 Network: [B, 4, 32] -> [B, 4, 32]  dtype=float32
-index  name  operation  input shapes   output shapes
-0      n0    conv1d     x=[B, 4, 32]   out=[B, 16, 32]
-1      n1    relu       x=[B, 16, 32]  out=[B, 16, 32]
-2      n2    conv1d     x=[B, 16, 32]  out=[B, 4, 32]
+index  name  operation  input shape  output shape
+0      n0    conv1d     [B, 4, 32]   [B, 16, 32]
+1      n1    relu       [B, 16, 32]  [B, 16, 32]
+2      n2    conv1d     [B, 16, 32]  [B, 4, 32]
 ```
 
 Parameters: 404
@@ -118,8 +118,8 @@ Input `['B', 3, 16]` → output `['B', 8, 8]`.
 
 ```text
 Network: [B, 3, 16] -> [B, 8, 8]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    conv1d     x=[B, 3, 16]  out=[B, 8, 8]
+index  name  operation  input shape  output shape
+0      n0    conv1d     [B, 3, 16]   [B, 8, 8]
 ```
 
 Parameters: 104
@@ -138,10 +138,10 @@ Input `['B', 2, 16]` → output `['B', 6, 12]`.
 
 ```text
 Network: [B, 2, 16] -> [B, 6, 12]  dtype=float32
-index  name  operation   input shapes  output shapes
-0      n0    conv1d      x=[B, 2, 16]  out=[B, 6, 12]
-1      n1    group_norm  x=[B, 6, 12]  out=[B, 6, 12]
-2      n2    relu        x=[B, 6, 12]  out=[B, 6, 12]
+index  name  operation   input shape  output shape
+0      n0    conv1d      [B, 2, 16]   [B, 6, 12]
+1      n1    group_norm  [B, 6, 12]   [B, 6, 12]
+2      n2    relu        [B, 6, 12]   [B, 6, 12]
 ```
 
 Parameters: 54
@@ -160,10 +160,10 @@ Input `['B', 1, 64]` → output `['B', 32, 16]`.
 
 ```text
 Network: [B, 1, 64] -> [B, 32, 16]  dtype=float32
-index  name  operation   input shapes   output shapes
-0      n0    conv1d      x=[B, 1, 64]   out=[B, 16, 32]
-1      n1    leaky_relu  x=[B, 16, 32]  out=[B, 16, 32]
-2      n2    conv1d      x=[B, 16, 32]  out=[B, 32, 16]
+index  name  operation   input shape  output shape
+0      n0    conv1d      [B, 1, 64]   [B, 16, 32]
+1      n1    leaky_relu  [B, 16, 32]  [B, 16, 32]
+2      n2    conv1d      [B, 16, 32]  [B, 32, 16]
 ```
 
 Parameters: 2,160

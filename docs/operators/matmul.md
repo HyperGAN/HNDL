@@ -66,9 +66,9 @@ Input `['B', 6, 4]` → output `['B', 6, 6]`.
 
 ```text
 Network: [B, 6, 4] -> [B, 6, 6]  dtype=float32
-index  name  operation  input shapes              output shapes
-0      n0    transpose  x=[B, 6, 4]               out=[B, 4, 6]
-1      n1    matmul     a=[B, 6, 4], b=[B, 4, 6]  out=[B, 6, 6]
+name  operation  input shapes                                  output shapes
+n0    transpose  x=input:x:[B, 6, 4]                           out=[B, 4, 6]
+n1    matmul     a=input:x:[B, 6, 4], b=node:n0/out:[B, 4, 6]  out=[B, 6, 6]
 ```
 
 Parameters: 0
@@ -88,11 +88,11 @@ Input `['B', 6, 4]` → output `['B', 6, 4]`.
 
 ```text
 Network: [B, 6, 4] -> [B, 6, 4]  dtype=float32
-index  name  operation  input shapes              output shapes
-0      n0    transpose  x=[B, 6, 4]               out=[B, 4, 6]
-1      n1    matmul     a=[B, 6, 4], b=[B, 4, 6]  out=[B, 6, 6]
-2      n2    softmax    x=[B, 6, 6]               out=[B, 6, 6]
-3      n3    matmul     a=[B, 6, 6], b=[B, 6, 4]  out=[B, 6, 4]
+name  operation  input shapes                                  output shapes
+n0    transpose  x=input:x:[B, 6, 4]                           out=[B, 4, 6]
+n1    matmul     a=input:x:[B, 6, 4], b=node:n0/out:[B, 4, 6]  out=[B, 6, 6]
+n2    softmax    x=node:n1/out:[B, 6, 6]                       out=[B, 6, 6]
+n3    matmul     a=node:n2/out:[B, 6, 6], b=input:x:[B, 6, 4]  out=[B, 6, 4]
 ```
 
 Parameters: 0
@@ -111,10 +111,10 @@ Input `['B', 4, 6]` → output `['B', 4, 4]`.
 
 ```text
 Network: [B, 4, 6] -> [B, 4, 4]  dtype=float32
-index  name  operation  input shapes              output shapes
-0      n0    linear     x=[B, 4, 6]               out=[B, 4, 6]
-1      n1    transpose  x=[B, 4, 6]               out=[B, 6, 4]
-2      n2    matmul     a=[B, 4, 6], b=[B, 6, 4]  out=[B, 4, 4]
+name  operation  input shapes                                      output shapes
+n0    linear     x=input:x:[B, 4, 6]                               out=[B, 4, 6]
+n1    transpose  x=input:x:[B, 4, 6]                               out=[B, 6, 4]
+n2    matmul     a=node:n0/out:[B, 4, 6], b=node:n1/out:[B, 6, 4]  out=[B, 4, 4]
 ```
 
 Parameters: 42

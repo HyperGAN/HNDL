@@ -50,12 +50,12 @@ Input `['B', 128]` → output `['B', 32]`.
 
 ```text
 Network: [B, 128] -> [B, 32]  dtype=float32
-index  name  operation  input shapes          output shapes
-0      n0    split      x=[B, 128]            first=[B, 64], rest=[B, 64]
-1      n1    linear     x=[B, 64]             out=[B, 32]
-2      n2    relu       x=[B, 32]             out=[B, 32]
-3      n3    linear     x=[B, 64]             out=[B, 32]
-4      n4    add        a=[B, 32], b=[B, 32]  out=[B, 32]
+name  operation  input shapes                                  output shapes
+n0    split      x=input:x:[B, 128]                            first=[B, 64], rest=[B, 64]
+n1    linear     x=node:n0/first:[B, 64]                       out=[B, 32]
+n2    relu       x=node:n1/out:[B, 32]                         out=[B, 32]
+n3    linear     x=node:n0/rest:[B, 64]                        out=[B, 32]
+n4    add        a=node:n2/out:[B, 32], b=node:n3/out:[B, 32]  out=[B, 32]
 ```
 
 Parameters: 4,160
@@ -73,8 +73,8 @@ Input `['B', 128]` → output `['B', 32]`.
 
 ```text
 Network: [B, 128] -> [B, 32]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    split      x=[B, 128]    first=[B, 96], rest=[B, 32]
+name  operation  input shapes        output shapes
+n0    split      x=input:x:[B, 128]  first=[B, 96], rest=[B, 32]
 ```
 
 Parameters: 0

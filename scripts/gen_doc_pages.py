@@ -35,8 +35,33 @@ CATEGORY = re.compile(r"^## +(?P<name>.+?)\s*$")
 OPERATOR = re.compile(r"^\| \[`(?P<alias>[^`]+)`\]\((?P<page>[^)]+)\)")
 
 
+DOCS_PREFIXES = (
+    "https://hypergan.github.io/HNDL/",
+    "http://hypergan.github.io/HNDL/",
+)
+
+
 def rewrite_target(target):
-    """Point a repository-relative link at the matching page of the site."""
+    """Point a repository-relative link or production docs URL at the matching page of the site."""
+    for prefix in DOCS_PREFIXES:
+        if target.startswith(prefix):
+            rel = target[len(prefix):]
+            path, _, anchor = rel.partition("#")
+            path = path.strip("/")
+            if not path or path in ("README", "README.md"):
+                page = "index.md"
+            elif path == "operators":
+                page = "operators/index.md"
+            elif path.startswith("operators/"):
+                sub = path[len("operators/"):]
+                if not sub or sub in ("index", "index.md"):
+                    page = "operators/index.md"
+                else:
+                    page = f"operators/{sub}.md" if not sub.endswith(".md") else f"operators/{sub}"
+            else:
+                page = path if path.endswith(".md") else f"{path}.md"
+            return f"{page}#{anchor}" if anchor else page
+
     if target.startswith(("http://", "https://", "mailto:", "#")):
         return target
     path, _, anchor = target.partition("#")
@@ -48,6 +73,7 @@ def rewrite_target(target):
         # Not part of the site (examples, LICENSE): keep it on GitHub.
         return BLOB + target
     return f"{path}#{anchor}" if anchor else path
+
 
 
 def rewrite_links(text):

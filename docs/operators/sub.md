@@ -45,11 +45,11 @@ Input `['B', 4]` → output `['B', 4]`.
 
 ```text
 Network: [B, 4] -> [B, 4]  dtype=float32
-index  name    operation  input shapes        output shapes
-0      branch  linear     x=[B, 4]            out=[B, 8]
-1      n1      relu       x=[B, 8]            out=[B, 8]
-2      n2      linear     x=[B, 8]            out=[B, 4]
-3      n3      sub        a=[B, 4], b=[B, 4]  out=[B, 4]
+name    operation  input shapes                            output shapes
+branch  linear     x=input:x:[B, 4]                        out=[B, 8]
+n1      relu       x=node:branch/out:[B, 8]                out=[B, 8]
+n2      linear     x=node:n1/out:[B, 8]                    out=[B, 4]
+n3      sub        a=node:n2/out:[B, 4], b=input:x:[B, 4]  out=[B, 4]
 ```
 
 Parameters: 76
@@ -67,9 +67,9 @@ Input `['B', 6, 8]` → output `['B', 6, 4]`.
 
 ```text
 Network: [B, 6, 8] -> [B, 6, 4]  dtype=float32
-index  name  operation  input shapes              output shapes
-0      n0    split      x=[B, 6, 8]               first=[B, 6, 4], rest=[B, 6, 4]
-1      n1    sub        a=[B, 6, 4], b=[B, 6, 4]  out=[B, 6, 4]
+name  operation  input shapes                                         output shapes
+n0    split      x=input:x:[B, 6, 8]                                  first=[B, 6, 4], rest=[B, 6, 4]
+n1    sub        a=node:n0/first:[B, 6, 4], b=node:n0/rest:[B, 6, 4]  out=[B, 6, 4]
 ```
 
 Parameters: 0
@@ -89,10 +89,10 @@ Input `['B', 3, 8, 8]` → output `['B', 3, 8, 8]`.
 
 ```text
 Network: [B, 3, 8, 8] -> [B, 3, 8, 8]  dtype=float32
-index  name  operation  input shapes                    output shapes
-0      n0    conv       x=[B, 3, 8, 8]                  out=[B, 3, 8, 8]
-1      n1    tanh       x=[B, 3, 8, 8]                  out=[B, 3, 8, 8]
-2      n2    sub        a=[B, 3, 8, 8], b=[B, 3, 8, 8]  out=[B, 3, 8, 8]
+name  operation  input shapes                                        output shapes
+n0    conv       x=input:x:[B, 3, 8, 8]                              out=[B, 3, 8, 8]
+n1    tanh       x=node:n0/out:[B, 3, 8, 8]                          out=[B, 3, 8, 8]
+n2    sub        a=node:n1/out:[B, 3, 8, 8], b=input:x:[B, 3, 8, 8]  out=[B, 3, 8, 8]
 ```
 
 Parameters: 84

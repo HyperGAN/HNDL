@@ -144,8 +144,8 @@ Input `['B', 8, 32]` → output `['B', 8, 32]`.
 
 ```text
 Network: [B, 8, 32] -> [B, 8, 32]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    attention  x=[B, 8, 32]  out=[B, 8, 32]
+index  name  operation  input shape  output shape
+0      n0    attention  [B, 8, 32]   [B, 8, 32]
 ```
 
 Parameters: 4,224
@@ -162,8 +162,8 @@ Input `['B', 8, 32]` → output `['B', 8, 32]`.
 
 ```text
 Network: [B, 8, 32] -> [B, 8, 32]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    attention  x=[B, 8, 32]  out=[B, 8, 32]
+index  name  operation  input shape  output shape
+0      n0    attention  [B, 8, 32]   [B, 8, 32]
 ```
 
 Parameters: 4,224
@@ -180,8 +180,8 @@ Input `['B', 6, 16]` → output `['B', 6, 16]`.
 
 ```text
 Network: [B, 6, 16] -> [B, 6, 16]  dtype=float32
-index  name  operation  input shapes  output shapes
-0      n0    attention  x=[B, 6, 16]  out=[B, 6, 16]
+index  name  operation  input shape  output shape
+0      n0    attention  [B, 6, 16]   [B, 6, 16]
 ```
 
 Parameters: 1,088
@@ -200,10 +200,10 @@ Input `['B', 10, 8]` → output `['B', 10, 8]`.
 
 ```text
 Network: [B, 10, 8] -> [B, 10, 8]  dtype=float32
-index  name  operation  input shapes   output shapes
-0      n0    linear     x=[B, 10, 8]   out=[B, 10, 16]
-1      n1    attention  x=[B, 10, 16]  out=[B, 10, 16]
-2      n2    linear     x=[B, 10, 16]  out=[B, 10, 8]
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 10, 8]   [B, 10, 16]
+1      n1    attention  [B, 10, 16]  [B, 10, 16]
+2      n2    linear     [B, 10, 16]  [B, 10, 8]
 ```
 
 Parameters: 1,368
@@ -220,8 +220,8 @@ Input `['B', 16, 16]` → output `['B', 16, 16]`.
 
 ```text
 Network: [B, 16, 16] -> [B, 16, 16]  dtype=float32
-index  name  operation  input shapes   output shapes
-0      n0    attention  x=[B, 16, 16]  out=[B, 16, 16]
+index  name  operation  input shape  output shape
+0      n0    attention  [B, 16, 16]  [B, 16, 16]
 ```
 
 Parameters: 1,186
@@ -238,8 +238,8 @@ Input `['B', 64, 32]` → output `['B', 64, 32]`.
 
 ```text
 Network: [B, 64, 32] -> [B, 64, 32]  dtype=float32
-index  name  operation  input shapes   output shapes
-0      n0    attention  x=[B, 64, 32]  out=[B, 64, 32]
+index  name  operation  input shape  output shape
+0      n0    attention  [B, 64, 32]  [B, 64, 32]
 ```
 
 Parameters: 5,028
