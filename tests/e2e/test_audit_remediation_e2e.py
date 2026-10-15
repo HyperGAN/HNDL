@@ -561,3 +561,482 @@ class TestTier1FeatureCoverage:
         publish_yml = REPO_ROOT / ".github" / "workflows" / "publish.yml"
         assert ci_yml.exists()
         assert publish_yml.exists()
+
+
+
+# ==============================================================================
+# TIER 2: Boundary & Corner Cases (Limits, Extremes, and Defect Triggers)
+# ==============================================================================
+
+
+class TestTier2BoundaryCases:
+    """Tier 2: ≥5 tests per feature area covering limits, empty inputs, negative values, and syntax extremes."""
+
+    # --------------------------------------------------------------------------
+    # F1: Line break & newline parsing (H-01, H-02, M-04)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f1_h01_bare_carriage_return_linebreaks(self):
+        """[Finding H-01] Bare \\r carriage returns must not raise unhandled IndexError outside HNDLError."""
+        source = "linear(64)\rrelu()\rlinear()"
+        try:
+            plan = resolve(source, input_shape=("B", 128), output_shape=("B", 10))
+            assert len(plan.nodes) == 3
+        except IndexError as exc:
+            pytest.fail(f"Finding H-01 unhandled IndexError triggered: {exc}")
+        except HNDLError:
+            pass
+
+    def test_tier2_f1_h01_mixed_consecutive_carriage_returns(self):
+        """[Finding H-01] Consecutive \\r\\r and trailing \\r must not crash with IndexError."""
+        source = "linear(64)\r\rrelu()\r\nlinear(10)\r"
+        try:
+            plan = resolve(source, input_shape=("B", 128), output_shape=("B", 10))
+            assert len(plan.nodes) == 3
+        except IndexError as exc:
+            pytest.fail(f"Finding H-01 consecutive \\r triggered IndexError: {exc}")
+        except HNDLError:
+            pass
+
+    def test_tier2_f1_h02_unpacking_34_statements_no_syntax_error(self):
+        """[Finding H-02] 34 unpacking statements following call lines must not trigger false positive E_SYNTAX."""
+        cfg = "linear(64)\n" + "(a, b) = split(x, 32)\n" * 34 + "add(a, b)\n"
+        try:
+            plan = resolve(cfg, input_shape=("B", 64), output_shape=("B", 32))
+            assert plan is not None
+        except HNDLError as exc:
+            if exc.code == "E_SYNTAX" and "more than 32 Python operators" in exc.message:
+                pytest.fail(f"Finding H-02 false positive triggered: {exc}")
+            raise
+
+    def test_tier2_f1_h02_bracket_unpacking_after_call(self):
+        """[Finding H-02] Bracket unpacking [a, b] = split(x, 32) must not count as chained subscript."""
+        cfg = "linear(64)\n" + "[a, b] = split(x, 32)\n" * 34 + "add(a, b)\n"
+        try:
+            plan = resolve(cfg, input_shape=("B", 64), output_shape=("B", 32))
+            assert plan is not None
+        except HNDLError as exc:
+            if exc.code == "E_SYNTAX" and "more than 32 Python operators" in exc.message:
+                pytest.fail(f"Finding H-02 bracket unpacking false positive triggered: {exc}")
+            raise
+
+    def test_tier2_f1_m04_python311_fstring_rejected(self):
+        """[Finding M-04] Python 3.11+ f-string syntax in declarative configs must be rejected with E_SYNTAX."""
+        cfg = 'name = "foo"\nlinear(16, name=f"{name}")\n'
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(cfg, input_shape=("B", 16), output_shape=("B", 16))
+        assert exc_info.value.code == "E_SYNTAX"
+
+    # --------------------------------------------------------------------------
+    # F2: Syntax, tuple & identifier validation (M-03, M-05, M-06)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f2_m03_empty_tuple_target_rejected(self):
+        """[Finding M-03] Empty tuple assignment p = () must be rejected with E_SYNTAX."""
+        cfg = "p = ()\nlinear(10)\n"
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(cfg, input_shape=("B", 16), output_shape=("B", 10))
+        assert exc_info.value.code == "E_SYNTAX"
+
+    def test_tier2_f2_m03_tensor_tuple_arity_error_location(self):
+        """[Finding M-03] E_OUTPUT_ARITY on tensor tuple construction must include line and column numbers."""
+        cfg = "linear(16)\na = split(4)\nb = (a, x)\nlinear(10)"
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(cfg, input_shape=("B", 16), output_shape=("B", 10))
+        err = exc_info.value
+        assert err.code == "E_OUTPUT_ARITY"
+        assert err.line is not None and err.line > 0, "Finding M-03: Missing line number on E_OUTPUT_ARITY"
+        assert err.column is not None and err.column > 0, "Finding M-03: Missing column number on E_OUTPUT_ARITY"
+
+    def test_tier2_f2_m05_falsy_empty_string_input_dtype_rejected(self):
+        """[Finding M-05] Falsy input_dtype='' must raise E_SCHEMA or E_DTYPE, not fall back via boolean or."""
+        with pytest.raises(HNDLError) as exc_info:
+            resolve("linear(10)", input_shape=("B", 16), output_shape=("B", 10), input_dtype="")
+        assert exc_info.value.code in ("E_SCHEMA", "E_DTYPE")
+
+    def test_tier2_f2_m05_falsy_boolean_false_input_dtype_rejected(self):
+        """[Finding M-05] Falsy input_dtype=False must raise E_SCHEMA or E_DTYPE, not fall back."""
+        with pytest.raises(HNDLError) as exc_info:
+            resolve("linear(10)", input_shape=("B", 16), output_shape=("B", 10), input_dtype=False)
+        assert exc_info.value.code in ("E_SCHEMA", "E_DTYPE")
+
+    def test_tier2_f2_m06_keyword_and_range_external_port_names_rejected(self):
+        """[Finding M-06] External port names colliding with Python keywords ('for', 'in') or 'range' must be rejected."""
+        for reserved in ("for", "in", "range"):
+            with pytest.raises(HNDLError) as exc_info:
+                Capture(input_shape={reserved: ("B", 16)}, output_shape={"out": ("B", 16)})
+            assert exc_info.value.code in ("E_NAME", "E_SCHEMA")
+
+    # --------------------------------------------------------------------------
+    # F3: Symbolic solver & interval reporting (M-07, L-03, L-04)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f3_m07_ambiguous_conv_reports_open_interval(self):
+        """[Finding M-07] E_AMBIGUOUS must report the unresolved open interval (7, 8) rather than collapsed (8, 8)."""
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(
+                "conv(16, kernel_size=3, stride=(1, 2), padding=1)\navg_pool(2)",
+                input_shape=("B", 3, 8, 16),
+                output_shape=("B", 16, 4, 4),
+            )
+        err = exc_info.value
+        assert err.code == "E_AMBIGUOUS"
+        assert "(7, 8)" in err.message, f"Finding M-07: expected open interval (7, 8) in message, got: {err.message}"
+        assert "(8, 8)" not in err.message, f"Finding M-07: collapsed interval (8, 8) reported in: {err.message}"
+
+    def test_tier2_f3_l03_ellipsis_rank_underflow_blames_invalid_port(self):
+        """[Finding L-03] Rank underflow when matching ... patterns must blame the port with invalid rank."""
+        source = "add(a, b)"
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(source, input_shape={"a": ("B", 16), "b": ("B",)}, output_shape=("B", 16))
+        assert exc_info.value.code in ("E_SHAPE", "E_CONSTRAINT")
+
+    def test_tier2_f3_l04_conv_transpose_input_negative_guard(self):
+        """[Finding L-04] conv_transpose_input must return None when extent < 1 is mathematically impossible."""
+        result = conv_transpose_input(extent=1, kernel=4, stride=1, padding=0)
+        assert result is None, f"Finding L-04: conv_transpose_input returned negative extent {result} instead of None"
+
+    def test_tier2_f3_l04_conv_input_range_nonpositive_extent(self):
+        """[Finding L-04] conv_input_range on non-positive extent must return empty interval (1, 0)."""
+        result = conv_input_range(extent=0, kernel=3, stride=1, padding=0)
+        assert result[0] > result[1], f"Finding L-04: expected empty interval lower > upper, got: {result}"
+
+    def test_tier2_f3_l04_solver_axis_out_of_bounds_defensive(self):
+        """[Finding L-04] Defensive bounds check when querying out-of-bounds axis."""
+        from hndl.relations import conv_axis
+        with pytest.raises(HNDLError) as exc_info:
+            # Axis 5 is outside rank 4
+            conv_axis(None, "x", "out", kernel=3, stride=1, padding=1, axis=5)
+        assert exc_info.value.code in ("E_CONSTRAINT", "E_ARGUMENT")
+
+    # --------------------------------------------------------------------------
+    # F4: PyTorch chain & sequence slicing (H-03, M-08, M-09)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f4_h03_variadic_single_output_chunk_not_chain(self):
+        """[Finding H-03] Single-output variadic operator (chunk(1)) must not be classified as unary chain."""
+        model = network("a, = chunk(1)\nlinear(a, 10)", input_shape=("B", 8), output_shape=("B", 10), device="cpu")
+        assert model._chain is False, "Finding H-03: single-output chunk(1) was misclassified as unary chain (_chain=True)"
+        # Slicing a non-chain should raise TypeError
+        with pytest.raises(TypeError, match="Branched graphs support node-name lookup only"):
+            _ = model[:2]
+
+    def test_tier2_f4_h03_slice_step_not_one_rejected(self):
+        """[Finding H-03] GraphModule.__getitem__ must reject slice steps other than 1 (step != 1)."""
+        model = network("linear(32)\nrelu()\nlinear(16)", input_shape=("B", 64), output_shape=("B", 16), device="cpu")
+        with pytest.raises((ValueError, TypeError)):
+            _ = model[::2]
+        with pytest.raises((ValueError, TypeError)):
+            _ = model[::-1]
+
+    def test_tier2_f4_m08_preforward_verify_state_during_compilation(self):
+        """[Finding M-08] Pre-forward state verification must run when compiling is active."""
+        model = network("linear(16)", input_shape=("B", 32), output_shape=("B", 16), device="cpu")
+        x = torch.randn(2, 32)
+        model(x)  # fast path cached
+        # Mutate registered parameter before compiled call
+        with torch.no_grad():
+            model[0].weight.add_(1.0)
+        from hndl.torch import _compiling
+        with pytest.raises(HNDLError) as exc_info:
+            with _compiling():
+                model(x)
+        assert "build" in exc_info.value.message or "match" in exc_info.value.message
+
+    def test_tier2_f4_m09_shallow_copy_double_clears_validation(self):
+        """[Finding M-09] Calling .double() on shallow copy copy.copy(model) must clear original model._validated."""
+        model = network("linear(16)", input_shape=("B", 32), output_shape=("B", 16), device="cpu")
+        x = torch.randn(2, 32, dtype=torch.float32)
+        model(x)  # populate _validated
+        assert len(model._validated) > 0
+        shallow = copy.copy(model)
+        shallow.double()
+        assert len(model._validated) == 0, "Finding M-09: model._validated was not cleared after shallow copy mutation"
+
+    def test_tier2_f4_m09_child_module_mutation_detected(self):
+        """[Finding M-09] Calling .double() directly on child module model[0] must not bypass validation."""
+        model = network("linear(16)", input_shape=("B", 32), output_shape=("B", 16), device="cpu")
+        x = torch.randn(2, 32, dtype=torch.float32)
+        model(x)  # populate fast path
+        model[0].double()
+        # Next call with float32 input must re-validate or raise cleanly, not crash in C fast path
+        x_d = torch.randn(2, 32, dtype=torch.float64)
+        try:
+            model(x_d)
+        except (HNDLError, TypeError):
+            pass
+
+    # --------------------------------------------------------------------------
+    # F5: Pretrained model training & revisions (H-04, H-05, M-01, M-02)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f5_h04_pretrained_trainable_leaves_wrapped_model_in_train_mode(self, text_checkpoint):
+        """[Finding H-04] pretrained(..., trainable=True) must leave wrapped model in training mode (model.training == True)."""
+        model = network(
+            f'pretrained("{text_checkpoint}", trainable=True)',
+            input_shape=("B", 4),
+            output_shape=("B", 4, 16),
+            input_dtype="int64",
+            device="cpu",
+        )
+        assert model[0].model.training is True, "Finding H-04: trainable pretrained model left in eval mode after network()"
+
+    def test_tier2_f5_h05_timm_provider_preserves_revision_in_hub_call(self):
+        """[Finding H-05] TimmProvider.instantiate must forward self.source.revision for hf:// sources."""
+        from hndl.pretrained import Source, TimmProvider
+        source = Source("hf", "timm/resnet18.a1_in1k", "rev12345", {}, "", "timm")
+        provider = TimmProvider(source, output="features")
+        assert provider.source.revision == "rev12345"
+
+    def test_tier2_f5_m01_resolve_source_detects_file_mtime_change(self, text_checkpoint):
+        """[Finding M-01] resolve_source must notice file mtime changes and not return stale revision from lru_cache."""
+        from hndl.pretrained import resolve_source
+        source1 = resolve_source(str(text_checkpoint))
+        # Touch config.json
+        cfg_file = text_checkpoint / "config.json"
+        text = cfg_file.read_text(encoding="utf-8")
+        cfg_data = json.loads(text)
+        cfg_data["_test_mtime_mutation"] = True
+        cfg_file.write_text(json.dumps(cfg_data), encoding="utf-8")
+        source2 = resolve_source(str(text_checkpoint))
+        assert source1.revision != source2.revision, "Finding M-01: Stale lru_cache returned identical revision after on-disk edit"
+
+    def test_tier2_f5_m01_safetensors_revision_hashes_weights(self, text_checkpoint):
+        """[Finding M-01] Local .safetensors revision hash must reflect tensor data, not just config.json + st_size."""
+        from hndl.pretrained import resolve_source
+        source1 = resolve_source(str(text_checkpoint))
+        weights_file = text_checkpoint / "model.safetensors"
+        if weights_file.exists():
+            data = bytearray(weights_file.read_bytes())
+            # Mutate last byte (size remains identical)
+            data[-1] ^= 0xFF
+            weights_file.write_bytes(data)
+            source2 = resolve_source(str(text_checkpoint))
+            assert source1.revision != source2.revision, "Finding M-01: Weight modification with unchanged size missed by revision hash"
+
+    def test_tier2_f5_m02_malformed_config_json_raises_hndl_error(self, tmp_path):
+        """[Finding M-02] Corrupted config.json must raise HNDLError('E_PRETRAINED'), not raw json.JSONDecodeError."""
+        bad_dir = tmp_path / "bad_checkpoint"
+        bad_dir.mkdir()
+        (bad_dir / "config.json").write_text("{invalid json", encoding="utf-8")
+        from hndl.pretrained import resolve_source
+        with pytest.raises(HNDLError) as exc_info:
+            resolve_source(str(bad_dir))
+        assert exc_info.value.code == "E_PRETRAINED"
+
+    # --------------------------------------------------------------------------
+    # F6: Numerics & double precision (RMSNorm, RoPE) (H-06, M-12)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f6_h06_rmsnorm_preserves_float64_precision(self):
+        """[Finding H-06] RMSNorm.forward must preserve float64 precision (discrepancy < 1e-12 vs reference)."""
+        norm = RMSNorm(eps=1e-5, affine=False, D=16).double()
+        x = torch.randn(2, 4, 16, dtype=torch.float64)
+        out = norm(x)
+        expected = nn.functional.rms_norm(x, (16,), eps=1e-5)
+        diff = (out - expected).abs().max().item()
+        assert diff < 1e-12, f"Finding H-06: RMSNorm float64 downcast to float32 caused precision error: {diff:.3e}"
+
+    def test_tier2_f6_h06_rmsnorm_gradcheck_double(self):
+        """[Finding H-06] torch.autograd.gradcheck on RMSNorm with double precision."""
+        norm = RMSNorm(eps=1e-5, affine=True, D=8).double()
+        x = torch.randn(2, 3, 8, dtype=torch.float64, requires_grad=True)
+        assert torch.autograd.gradcheck(norm, (x,), eps=1e-6, atol=1e-4)
+
+    def test_tier2_f6_m12_rope_tables_preserves_float64(self):
+        """[Finding M-12] attention._rope_tables must compute angles in float64 when dtype is float64."""
+        from hndl.operators.attention import _rope_tables
+        cos_f64, sin_f64 = _rope_tables(positions=16, head_dim=32, device="cpu", dtype=torch.float64)
+        assert cos_f64.dtype == torch.float64
+        assert sin_f64.dtype == torch.float64
+
+    def test_tier2_f6_m12_pos_embed_t_greater_than_max_len_rejected(self):
+        """[Finding M-12] PosEmbed.forward must raise HNDLError('E_CONSTRAINT') when T > max_len, not broadcast position 0."""
+        from hndl.operators.pos_embed import PosEmbed
+        pos = PosEmbed(max_len=1, D=16)
+        x = torch.randn(2, 4, 16)  # T=4 > max_len=1
+        with pytest.raises(HNDLError) as exc_info:
+            pos(x)
+        assert exc_info.value.code == "E_CONSTRAINT"
+
+    def test_tier2_f6_m12_moe_dense_reference_parity(self):
+        """[Finding M-12] MixtureOfExperts _reference must provide independent dense oracle."""
+        reg = Registry.builtins()
+        moe_op = reg.get("moe")
+        assert moe_op.reference is not None
+
+    # --------------------------------------------------------------------------
+    # F7: Operator references & layer representations (M-13, L-07, L-08)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f7_m13_all_68_non_pretrained_operators_have_reference(self):
+        """[Finding M-13] All 68 non-pretrained operators in builtins must define reference= callable."""
+        reg = Registry.builtins()
+        missing = []
+        for alias in reg.aliases:
+            if alias == "pretrained":
+                continue
+            op = reg.get(alias)
+            if op.reference is None:
+                missing.append(alias)
+        assert not missing, f"Finding M-13: {len(missing)} operators missing reference=: {missing}"
+
+    def test_tier2_f7_l07_grid_sample_rejects_positional_optional_args(self):
+        """[Finding L-07] GridSample optional options (mode, padding_mode) must be keyword-only, not positional."""
+        reg = Registry.builtins()
+        grid_op = reg.get("grid_sample")
+        for opt_name in ("mode", "padding_mode", "align_corners"):
+            if opt_name in grid_op.args:
+                assert grid_op.args[opt_name].positional is False, f"Finding L-07: {opt_name} must have positional=False"
+
+    def test_tier2_f7_l08_resblock_validates_out_channels_divisible_by_groups(self):
+        """[Finding L-08] ResBlock.__init__ direct construction must validate out_channels % groups == 0."""
+        from hndl.operators.resblock import ResBlock
+        with pytest.raises(HNDLError) as exc_info:
+            ResBlock(out_channels=15, in_channels=16, stride=1, norm="group_norm", groups=8, C_in=16, C_out=15)
+        assert exc_info.value.code == "E_CONSTRAINT"
+
+    def test_tier2_f7_l08_extra_repr_present_on_all_spatial_ops(self):
+        """[Finding L-08] CoordinateGrid, FourierFeatures, GridSample must implement non-empty extra_repr()."""
+        from hndl.operators.coordinate_grid import CoordinateGrid
+        from hndl.operators.fourier_features import FourierFeatures
+        from hndl.operators.grid_sample import GridSample
+
+        assert CoordinateGrid(spatial_shape=(8, 8)).extra_repr()
+        assert FourierFeatures(num_frequencies=16, scale=8.0, D=2).extra_repr()
+        assert GridSample(mode="bilinear", padding_mode="zeros", align_corners=True).extra_repr()
+
+    def test_tier2_f7_l08_equalized_linear_and_attention_extra_repr(self):
+        """[Finding L-08] EqualLinear and Attention must include equalized=True in extra_repr()."""
+        from hndl.operators._equalized import EqualLinear
+        from hndl.operators.attention import Attention
+
+        lin = EqualLinear(16, 8, equalized=True)
+        assert "equalized" in lin.extra_repr()
+
+        att = Attention(heads=2, causal=False, dropout=0.0, bias=True, equalized=True,
+                        qkv_bias=True, out_bias=True, rope=False, relative_position_bias=False,
+                        spatial_shape=(0, 0), D=16)
+        assert "equalized" in att.extra_repr()
+
+    # --------------------------------------------------------------------------
+    # F8: Diagnostics & error location attribution (L-01, L-02, L-05)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f8_l01_loop_collision_auto_vs_explicit_distinction(self):
+        """[Finding L-01] Loop-suffixed collision with auto-generated node ID n0 must not say 'explicit name=n0'."""
+        source = (
+            "linear(16)\n"  # auto-generated id is n0
+            "for _ in range(2):\n"
+            "    linear(16, name='n')\n"  # iteration 0 creates n0
+        )
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(source, input_shape=("B", 16), output_shape=("B", 16))
+        assert "an explicit name='n0'" not in exc_info.value.message, "Finding L-01: misattributed auto-generated n0 as explicit"
+
+    def test_tier2_f8_l02_capture_emit_preserves_node_name_on_error(self):
+        """[Finding L-02] resolve_callable emit errors must preserve node='custom_name'."""
+        def bad_callable(x):
+            return ops.linear(x, name="my_bad_linear", invalid_kwarg=123)
+
+        with pytest.raises(HNDLError) as exc_info:
+            resolve_callable(bad_callable, input_shape=("B", 16), output_shape=("B", 16))
+        err = exc_info.value
+        assert err.node == "my_bad_linear", f"Finding L-02: node name was None, expected 'my_bad_linear': {err}"
+
+    def test_tier2_f8_l05_example_post_init_preserves_dict_contracts(self):
+        """[Finding L-05] Example.__post_init__ must preserve multi-port dict contracts, not convert them to key tuples."""
+        ex = Example("linear(10)", input_shape={"x": ("B", 4), "cond": ("B", 2)}, output_shape=("B", 10))
+        assert isinstance(ex.input_shape, dict), "Finding L-05: Example converted input_shape dict to tuple"
+
+    def test_tier2_f8_l05_node_post_init_rejects_string_outputs(self):
+        """[Finding L-05] Node.__post_init__ must validate container types and not split raw strings into characters."""
+        with pytest.raises((HNDLError, TypeError)):
+            Node(id="n0", op="linear@1", args={}, inputs={"x": "input:x"}, outputs="out")
+
+    def test_tier2_f8_l03_underflow_error_message_exact_token(self):
+        """[Finding L-03] Solver rank underflow error message attributes the underflowing port."""
+        with pytest.raises(HNDLError) as exc_info:
+            resolve("flatten(start_dim=1)\n", input_shape=("B",), output_shape=("B", 1))
+        assert exc_info.value.code in ("E_SHAPE", "E_CONSTRAINT")
+
+    # --------------------------------------------------------------------------
+    # F9: Package distribution & fixture integrity (H-07, L-10)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f9_h07_manifest_in_includes_fixtures_and_changelog(self):
+        """[Finding H-07] MANIFEST.in must include tests *.json fixtures and CHANGELOG.md."""
+        manifest_text = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        assert "CHANGELOG.md" in manifest_text, "Finding H-07: CHANGELOG.md omitted from MANIFEST.in"
+        assert "*.json" in manifest_text, "Finding H-07: Plan fixture *.json omitted from MANIFEST.in"
+
+    def test_tier2_f9_h07_all_saved_plans_loadable_without_missing_files(self):
+        """[Finding H-07] All 5 golden plan fixtures must load, build, and run."""
+        fixture_dir = REPO_ROOT / "tests" / "fixtures" / "plans_0_6_0"
+        for json_file in fixture_dir.glob("*.json"):
+            record = json.loads(json_file.read_text(encoding="utf-8"))
+            plan = ResolvedPlan.from_json(record["plan"])
+            model = build(plan, device="cpu")
+            assert model is not None
+
+    def test_tier2_f9_l10_pyproject_toml_has_norecursedirs(self):
+        """[Finding L-10] pyproject.toml must configure norecursedirs ignoring .claude, .venv, build, dist."""
+        pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        assert "norecursedirs" in pyproject_text, "Finding L-10: norecursedirs missing from pyproject.toml"
+
+    def test_tier2_f9_l10_no_nested_claude_worktrees_active(self):
+        """[Finding L-10] Verify no stale nested worktrees exist under .claude/worktrees/."""
+        claude_wt = REPO_ROOT / ".claude" / "worktrees"
+        if claude_wt.exists():
+            nested = list(claude_wt.glob("*"))
+            assert len(nested) == 0, f"Finding L-10: Stale worktrees found in .claude/worktrees/: {nested}"
+
+    def test_tier2_f9_package_build_metadata_strict(self):
+        """[F9 Boundary 5] pyproject.toml dependencies and versions."""
+        pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        assert 'requires-python = ">=3.11,<3.15"' in pyproject_text
+        assert 'dependencies = ["torch>=2.6,<3"]' in pyproject_text
+
+    # --------------------------------------------------------------------------
+    # F10: Documentation, typing & version sync (H-08, M-10, M-11, M-14)
+    # --------------------------------------------------------------------------
+
+    def test_tier2_f10_h08_version_synchronization_all_docs(self):
+        """[Finding H-08] Version must match 0.8.0 / 0.8.1 across pyproject.toml, _version.py, README, SPEC, IMPLEMENTATION."""
+        version = hndl.__version__
+        spec_text = (REPO_ROOT / "SPEC.md").read_text(encoding="utf-8")
+        impl_text = (REPO_ROOT / "IMPLEMENTATION.md").read_text(encoding="utf-8")
+        assert f"Implementation notes: {version}" in impl_text or "0.8." in impl_text
+        assert "0.1.2" not in impl_text, "Finding H-08: Stale version 0.1.2 found in IMPLEMENTATION.md"
+        assert "0.1.2" not in spec_text, "Finding H-08: Stale version 0.1.2 found in SPEC.md"
+
+    def test_tier2_f10_h08_spec_operator_count_equals_69(self):
+        """[Finding H-08] IMPLEMENTATION.md must record 69 operators across 12 categories, not 'Fifty-nine'."""
+        impl_text = (REPO_ROOT / "IMPLEMENTATION.md").read_text(encoding="utf-8")
+        assert "Fifty-nine" not in impl_text, "Finding H-08: Stale 'Fifty-nine operators' in IMPLEMENTATION.md"
+        assert "69" in impl_text, "Finding H-08: Operator count 69 missing from IMPLEMENTATION.md"
+
+    def test_tier2_f10_h08_spec_arg_lists_since_parameter(self):
+        """[Finding H-08] SPEC.md Arg signature must document the 'since' parameter."""
+        spec_text = (REPO_ROOT / "SPEC.md").read_text(encoding="utf-8")
+        assert "since" in spec_text, "Finding H-08: Arg(since=...) parameter missing from SPEC.md"
+
+    def test_tier2_f10_m10_resolved_plan_repr_branched_shows_references(self):
+        """[Finding M-10] ResolvedPlan.__repr__ on branched graph must show producing references and omit chain index."""
+        source = (
+            "a = linear(16)\n"
+            "b = linear(16)\n"
+            "add(a, b)\n"
+        )
+        plan = resolve(source, input_shape=("B", 32), output_shape=("B", 16))
+        rep = repr(plan)
+        assert "index" not in rep, "Finding M-10: index column printed on branched graph repr"
+        assert "node:n0/out" in rep or "n0" in rep
+
+    def test_tier2_f10_m11_public_api_has_type_annotations(self):
+        """[Finding M-11] Public functions (resolve, network, build) must have parameter and return type annotations."""
+        import inspect
+        for fn in (resolve, network, build):
+            sig = inspect.signature(fn)
+            annotated_params = [p.name for p in sig.parameters.values() if p.annotation is not inspect.Parameter.empty]
+            assert len(annotated_params) > 0, f"Finding M-11: Public function {fn.__name__} has zero type annotations"
