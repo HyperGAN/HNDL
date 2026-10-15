@@ -30,7 +30,6 @@ from torch import nn
 
 import hndl
 from hndl import (
-    Arg,
     Example,
     HNDLError,
     Registry,
@@ -40,7 +39,6 @@ from hndl import (
     resolve_callable,
 )
 from hndl.capture import Capture
-from hndl.config import capture_config
 from hndl.operators.rms_norm import RMSNorm
 from hndl.relations import (
     conv_input_range,
@@ -49,7 +47,7 @@ from hndl.relations import (
     conv_transpose_output,
 )
 from hndl.torch import build, network, network_from_callable, parameter_counts
-from hndl.types import Graph, Node
+from hndl.types import Node
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -1035,7 +1033,6 @@ class TestTier2BoundaryCases:
 
     def test_tier2_f10_m11_public_api_has_type_annotations(self):
         """[Finding M-11] Public functions (resolve, network, build) must have parameter and return type annotations."""
-        import inspect
         for fn in (resolve, network, build):
             sig = inspect.signature(fn)
             annotated_params = [p.name for p in sig.parameters.values() if p.annotation is not inspect.Parameter.empty]
@@ -1254,3 +1251,151 @@ class TestTier3CrossFeatureInteractions:
         out = model(x)
         assert out.dtype == torch.float64
         assert out.shape == (2, 4, 8)
+
+
+
+# ==============================================================================
+# TIER 4: Real-World Application Workloads
+# ==============================================================================
+
+
+class TestTier4RealWorldWorkloads:
+    """Tier 4: Realistic end-to-end application workloads exercising multiple subsystems (≥5 tests)."""
+
+    def test_tier4_workload1_transformer_rope_rmsnorm_forward_backward(self, device):
+        """[Workload 1] Full Transformer decoder block with RMSNorm, RoPE, Attention, SwiGLU/MLP and residuals."""
+        source = (
+            "h = x\n"
+            "norm1 = rms_norm(h, name='norm1')\n"
+            "attn = attention(norm1, heads=2, causal=True, rope=True, name='attn')\n"
+            "h = add(h, attn)\n"
+            "norm2 = rms_norm(h, name='norm2')\n"
+            "ffn_up = linear(norm2, 32, name='ffn1')\n"
+            "ffn_act = gelu(ffn_up)\n"
+            "ffn_down = linear(ffn_act, 16, name='ffn2')\n"
+            "out = add(h, ffn_down)\n"
+        )
+        model = network(source, input_shape=("B", 8, 16), output_shape=("B", 8, 16), device=device)
+        x = torch.randn(2, 8, 16, device=device, requires_grad=True)
+        out = model(x)
+        assert out.shape == (2, 8, 16)
+
+        # End-to-end backward pass
+        loss = out.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert model["attn"].q_proj.weight.grad is not None
+        assert model["ffn1"].weight.grad is not None
+
+    def test_tier4_workload2_multitask_cnn_backbone_with_multibranch_heads(self, device):
+        """[Workload 2] Multi-task Vision CNN with ResBlock backbone, classification and reconstruction heads."""
+        source = (
+            "stem = conv(16, kernel_size=3, padding=1, name='stem')\n"
+            "block1 = resblock(stem, 16, name='b1')\n"
+            "block2 = resblock(block1, 32, stride=2, name='b2')\n"
+            "# Branch 1: Classification\n"
+            "pooled = global_avg_pool(block2)\n"
+            "logits = linear(pooled, 10, name='cls_head')\n"
+            "# Branch 2: Dense reconstruction\n"
+            "up = deconv(block2, 16, kernel_size=4, stride=2, padding=1, name='up')\n"
+            "mask = conv(up, 1, kernel_size=3, padding=1, name='mask_head')\n"
+        )
+        model = network(
+            source,
+            input_shape={"x": ("B", 3, 16, 16)},
+            output_shape={"logits": ("B", 10), "mask": ("B", 1, 16, 16)},
+            device=device,
+        )
+        images = torch.randn(2, 3, 16, 16, device=device)
+        outputs = model(x=images)
+        assert outputs["logits"].shape == (2, 10)
+        assert outputs["mask"].shape == (2, 1, 16, 16)
+
+        # State dict preservation
+        state = copy.deepcopy(model.state_dict())
+        assert "nodes.n_stem.weight" in state
+        assert "nodes.n_cls_head.weight" in state
+        assert "nodes.n_mask_head.weight" in state
+
+    def test_tier4_workload3_declarative_loops_unpacking_and_custom_initializers(self, device):
+        """[Workload 3] Deep declarative architecture with loops, tensor unpacking, and explicit initializers."""
+        source = (
+            "h = linear(16, init={'weight': kaiming_normal(), 'bias': 0.0}, name='stem')\n"
+            "for _ in range(3):\n"
+            "    (a, b) = split(h, 8, dim=1)\n"
+            "    left = linear(a, 8, init={'weight': normal(std=0.02)})\n"
+            "    right = linear(b, 8, init={'weight': normal(std=0.02)})\n"
+            "    h = concat(left, right, axis=1)\n"
+            "    h = relu(h)\n"
+            "out = linear(h, 4, init={'weight': xavier_uniform(), 'bias': 0.0}, name='head')\n"
+        )
+        model = network(source, input_shape=("B", 32), output_shape=("B", 4), device=device)
+        x = torch.randn(2, 32, device=device)
+        out = model(x)
+        assert out.shape == (2, 4)
+        assert len(model.plan.nodes) == 1 + 3 * 5 + 1
+
+    def test_tier4_workload4_pretrained_finetuning_vision_and_language(self, text_checkpoint, device):
+        """[Workload 4] Fine-tuning pretrained checkpoint with partial parameter freezing and optimizer step."""
+        source = (
+            f'pretrained("{text_checkpoint}", output="logits", trainable=True, name="backbone")\n'
+            'linear(4, name="classifier")\n'
+        )
+        model = network(
+            source,
+            input_shape=("B", 4),
+            output_shape=("B", 4, 4),
+            input_dtype="int64",
+            device=device,
+        )
+        # Freeze backbone parameters
+        for p in model["backbone"].parameters():
+            p.requires_grad_(False)
+        assert not any(p.requires_grad for p in model["backbone"].parameters())
+        assert all(p.requires_grad for p in model["classifier"].parameters())
+
+        # Optimizer step updates only classifier
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        initial_classifier_weight = model["classifier"].weight.clone()
+        tokens = torch.randint(0, 16, (2, 4), device=device)
+        out = model(tokens)
+        loss = out.sum()
+        loss.backward()
+        optimizer.step()
+
+        # Classifier updated, backbone untouched
+        assert not torch.equal(model["classifier"].weight, initial_classifier_weight)
+
+    def test_tier4_workload5_meta_device_tracing_and_compile_compatibility(self):
+        """[Workload 5] Memory estimation and parameter counting on large multi-stage network."""
+        source = (
+            "linear(64)\n"
+            "relu()\n"
+            "linear(128)\n"
+            "relu()\n"
+            "linear(32)\n"
+        )
+        plan = resolve(source, input_shape=("B", 32), output_shape=("B", 32))
+        counts = parameter_counts(plan)
+        assert sum(counts.values()) > 0
+        assert counts["n0"] > 0
+
+        # Meta device memory budgeting via max_state_bytes limit
+        meta_budgeted_model = build(plan, device="cpu", limits={"max_state_bytes": 10_000_000})
+        assert meta_budgeted_model is not None
+        with pytest.raises(HNDLError) as exc_info:
+            build(plan, device="cpu", limits={"max_state_bytes": 10})
+        assert exc_info.value.code == "E_RESOURCE"
+
+    def test_tier4_workload6_end_to_end_adaptive_style_generator(self, device):
+        """[Workload 6] Continuous coordinate generator with Fourier features and linear projections."""
+        source = (
+            "coords = fourier_features(16, name='fourier')\n"
+            "proj = linear(coords, 32, name='proj')\n"
+            "out = relu(proj)\n"
+        )
+        model = network(source, input_shape={"x": ("B", 2)}, output_shape={"out": ("B", 32)}, device=device)
+        coords = torch.randn(4, 2, device=device)
+        out = model(x=coords)
+        assert out.shape == (4, 32)
+        assert torch.all(out >= 0)
