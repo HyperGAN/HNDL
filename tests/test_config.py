@@ -252,3 +252,109 @@ def test_public_split_infers_omitted_size_from_selected_remainder():
     assert plan.nodes[0].args["size"] == 96
     with pytest.raises(HNDLError, match="E_BINDING"):
         resolve("linear(64)\nout = x", input_shape=("B", 128), output_shape=("B", 128))
+
+
+def test_line_break_normalization_cr_and_crlf(tmp_path):
+    # H-01: Bare \r and CRLF \r\n line breaks normalize cleanly
+    kwargs = {"input_shape": ("B", 128), "output_shape": ("B", 10)}
+    baseline_plan = resolve("linear(64)\nrelu()\nlinear()", **kwargs)
+
+    # Test bare \r
+    cr_plan = resolve("linear(64)\rrelu()\rlinear()", **kwargs)
+    assert [n.id for n in cr_plan.nodes] == [n.id for n in baseline_plan.nodes]
+    assert cr_plan.semantic_digest == baseline_plan.semantic_digest
+
+    # Test Windows CRLF \r\n
+    crlf_plan = resolve("linear(64)\r\nrelu()\r\nlinear()", **kwargs)
+    assert crlf_plan.semantic_digest == baseline_plan.semantic_digest
+
+    # Test syntax error line reporting with \r
+    with pytest.raises(HNDLError) as exc:
+        resolve("linear(64)\rrelu(invalid\rlinear()", **kwargs)
+    assert exc.value.line == 2
+    assert exc.value.code == "E_SYNTAX"
+
+    # Test resolve_file with \r and \r\n
+    cr_file = tmp_path / "cr_model.hndl"
+    cr_file.write_bytes(b"linear(64)\rrelu()\rlinear()")
+    assert resolve_file(cr_file, **kwargs).semantic_digest == baseline_plan.semantic_digest
+
+    crlf_file = tmp_path / "crlf_model.hndl"
+    crlf_file.write_bytes(b"linear(64)\r\nrelu()\r\nlinear()")
+    assert resolve_file(crlf_file, **kwargs).semantic_digest == baseline_plan.semantic_digest
+
+
+def test_validator_location_bounds_guard():
+    # H-01: Validator.location never raises IndexError on out-of-bounds lineno
+    import ast
+    from hndl._parser import Validator
+    validator = Validator(["linear"], [0], ["linear(64)"])
+    fake_node = ast.Name(id="x", ctx=ast.Load())
+    fake_node.lineno = 999
+    fake_node.col_offset = 10
+    loc = validator.location(fake_node)
+    assert loc == {"line": 999, "column": 11}
+
+
+def test_screener_resets_across_newlines_for_unpacking():
+    # H-02: 35+ consecutive tuple and list unpacking statements
+    kwargs = {"input_shape": ("B", 64), "output_shape": ("B", 64)}
+    lines = ["h = x"]
+    for _ in range(35):
+        lines.append("(a, b) = split(h, 32)")
+        lines.append("h = concat(a, b)")
+    lines.append("out = h")
+    tuple_cfg = "\n".join(lines)
+    plan = resolve(tuple_cfg, **kwargs)
+    assert plan is not None
+
+    lines = ["h = x"]
+    for _ in range(35):
+        lines.append("[a, b] = split(h, 32)")
+        lines.append("h = concat(a, b)")
+    lines.append("out = h")
+    list_cfg = "\n".join(lines)
+    plan_list = resolve(list_cfg, **kwargs)
+    assert plan_list is not None
+
+    # Multiline call followed by unpacking
+    multiline_cfg = "linear(\n 64\n)\n(a, b) = split(32)\nout = concat(a, b)\n"
+    assert resolve(multiline_cfg, **kwargs) is not None
+
+    # Chained calls on the same line still rejected
+    with pytest.raises(HNDLError, match="E_SYNTAX"):
+        resolve("linear(64)(x)\n", **kwargs)
+
+
+def test_empty_tuple_target_rejected():
+    # M-03: Empty tuple target p = () is rejected with E_SYNTAX
+    with pytest.raises(HNDLError) as exc:
+        capture("p = ()\nout = x")
+    assert exc.value.code == "E_SYNTAX"
+    assert "Assignments must bind tensor expressions, not literal values" in exc.value.message
+    assert (exc.value.line, exc.value.column) == (1, 5)
+
+
+def test_tensor_tuple_source_attribution_on_arity_error():
+    # M-03: tensor_tuple reports source line and column on E_OUTPUT_ARITY
+    with pytest.raises(HNDLError) as exc:
+        capture("parts = split(4)\nb = (parts, x)\nout = x")
+    assert exc.value.code == "E_OUTPUT_ARITY"
+    assert (exc.value.line, exc.value.column) == (2, 5)
+    assert "A tensor tuple must contain only tensor symbols" in exc.value.message
+
+
+@pytest.mark.parametrize("fstring", [
+    'linear(f"{x}")',
+    'linear(F"{x}")',
+    'linear(fr"{x}")',
+    'linear(rf"{x}")',
+    'linear(f"""{x}""")',
+])
+def test_screener_rejects_fstrings(fstring):
+    # M-04: f-strings rejected in _screen before ast.parse
+    with pytest.raises(HNDLError) as exc:
+        capture(fstring)
+    assert exc.value.code == "E_SYNTAX"
+    assert "f-strings are not permitted in declarative configurations" in exc.value.message
+

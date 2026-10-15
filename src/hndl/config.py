@@ -33,6 +33,8 @@ class _Interpreter:
         self.iterations = []
         # Loop-suffixed node IDs, for a duplicate-name message that explains them.
         self.suffixed = {}
+        # Explicit node names passed outside loops.
+        self.explicit_names = set()
 
     def run(self, statements):
         for statement in statements:
@@ -91,13 +93,18 @@ class _Interpreter:
             if earlier is not None:
                 raise _error("E_NAME", f"Duplicate node name {name!r}: an earlier loop already gave that name to "
                                        f"name={earlier[0]!r} with iteration suffix {earlier[1]!r}", source)
+            self.explicit_names.add(name)
             return name
         suffix = "_".join(str(index) for index, _ in self.iterations)
         node_id = name + suffix
         if node_id in self.capture._ids:
             earlier = self.suffixed.get(node_id)
-            owner = ("an explicit name=" + repr(node_id) if earlier is None
-                     else f"name={earlier[0]!r} with iteration suffix {earlier[1]!r}")
+            if earlier is not None:
+                owner = f"name={earlier[0]!r} with iteration suffix {earlier[1]!r}"
+            elif node_id in self.explicit_names:
+                owner = f"an explicit name={node_id!r}"
+            else:
+                owner = f"an auto-generated ID {node_id!r}"
             raise _error("E_NAME", f"Duplicate node name {node_id!r}: name={name!r} in a loop gets the iteration "
                                    f"suffix {suffix!r}, but an earlier node already has that ID ({owner})", source)
         self.suffixed[node_id] = (name, suffix)
@@ -115,7 +122,8 @@ class _Interpreter:
         if kind in ("tuple", "list", "tensor_tuple"):
             values = [self.evaluate(item) for item in expression["items"]]
             if kind == "tensor_tuple" and not all(isinstance(item, Symbol) for item in values):
-                raise HNDLError("E_OUTPUT_ARITY", "A tensor tuple must contain only tensor symbols")
+                raise _error("E_OUTPUT_ARITY", "A tensor tuple must contain only tensor symbols",
+                             self.where(expression["source"]))
             return values if kind == "list" else tuple(values)
         if kind == "dict":
             return {key: self.evaluate(value) for key, value in expression["items"]}

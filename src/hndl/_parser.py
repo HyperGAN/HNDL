@@ -57,7 +57,7 @@ LOOP_TARGET, LOOP_ITERATOR = "_", "range"
 _LOOP_FORM = "`for _ in range(N):`"
 _ESCAPE_HATCH = "use network_from_callable (native Python) for index-dependent logic"
 _OPERANDS = (tokenize.NAME, tokenize.NUMBER, tokenize.STRING)
-_LAYOUT = (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT)
+_LAYOUT = (tokenize.NL, tokenize.COMMENT)
 
 
 def _valid_name(name):
@@ -73,7 +73,7 @@ def _source_text(source):
         raise HNDLError("E_SYNTAX", "Source must be valid UTF-8 text") from None
     if len(encoded) > MAX_SOURCE_BYTES:
         raise HNDLError("E_RESOURCE", f"Source exceeds {MAX_SOURCE_BYTES} UTF-8 bytes")
-    return source
+    return source.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _counts(token, previous, following):
@@ -105,9 +105,10 @@ def _screen(source, offsets):
     """
     def fail(code, message, token):
         line, column = token.start
-        offset = offsets[line - 1] if line <= len(offsets) else 0
+        offset = offsets[line - 1] if 1 <= line <= len(offsets) else 0
         raise HNDLError(code, message, line=line, column=column + 1 + offset)
 
+    fstring_start = getattr(tokenize, "FSTRING_START", None)
     depth = operators = indent = 0
     previous = None
     tokens = tokenize.generate_tokens(io.StringIO(source).readline)
@@ -115,6 +116,10 @@ def _screen(source, offsets):
         following = next(tokens, None)
         while following is not None:
             token, following = following, next(tokens, None)
+            if (fstring_start is not None and token.type == fstring_start) or (
+                token.type == tokenize.STRING and "f" in token.string.split("'", 1)[0].split('"', 1)[0].lower()
+            ):
+                fail("E_SYNTAX", "f-strings are not permitted in declarative configurations", token)
             if _counts(token, previous, following):
                 operators += 1
                 if operators > MAX_OPERATORS:
@@ -133,7 +138,9 @@ def _screen(source, offsets):
                     fail("E_RESOURCE", f"Source nests loops more than {MAX_LOOP_DEPTH} levels deep", token)
             elif token.type == tokenize.DEDENT:
                 indent = max(0, indent - 1)
-            if token.type not in _LAYOUT:
+            if token.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+                previous = None
+            elif token.type not in _LAYOUT:
                 previous = token
     except HNDLError:  # a ValueError, like the tokenizer's null-byte error
         raise
@@ -153,8 +160,14 @@ class Validator:
     def location(self, node):
         # col_offset counts UTF-8 bytes of the dedented line; report characters
         # of the original line.
-        prefix = self.lines[node.lineno - 1].encode("utf-8")[:node.col_offset].decode("utf-8", "ignore")
-        return {"line": node.lineno, "column": len(prefix) + 1 + self.offsets[node.lineno - 1]}
+        line = getattr(node, "lineno", 1)
+        col = getattr(node, "col_offset", 0)
+        line_idx = line - 1
+        if 0 <= line_idx < len(self.lines):
+            prefix = self.lines[line_idx].encode("utf-8")[:col].decode("utf-8", "ignore")
+            offset = self.offsets[line_idx] if line_idx < len(self.offsets) else 0
+            return {"line": line, "column": len(prefix) + 1 + offset}
+        return {"line": line, "column": col + 1}
 
     def reject(self, message, node, code="E_SYNTAX"):
         location = self.location(node)
@@ -283,8 +296,9 @@ class Validator:
                                for keyword in node.keywords],
                     "source": self.location(node)}
         if assignment:
-            if isinstance(node, ast.Tuple) and all(isinstance(item, (ast.Name, ast.Call)) for item in node.elts):
-                return {"kind": "tensor_tuple", "items": [self.expression(item, assignment=True) for item in node.elts]}
+            if isinstance(node, ast.Tuple) and node.elts and all(isinstance(item, (ast.Name, ast.Call)) for item in node.elts):
+                return {"kind": "tensor_tuple", "items": [self.expression(item, assignment=True) for item in node.elts],
+                        "source": self.location(node)}
             self.reject("Assignments must bind tensor expressions, not literal values", node)
         return self.literal(node, initializers=initializers)
 
@@ -372,7 +386,7 @@ def parse(source, aliases):
             module = ast.parse(dedented, mode="exec", feature_version=(3, 11))
     except SyntaxError as exc:
         line = exc.lineno or 1
-        offset = offsets[line - 1] if line <= len(offsets) else 0
+        offset = offsets[line - 1] if 1 <= line <= len(offsets) else 0
         raise HNDLError("E_SYNTAX", exc.msg, line=line, column=(exc.offset or 1) + offset) from None
     except ValueError as exc:  # null bytes on Python 3.11
         raise HNDLError("E_SYNTAX", str(exc)) from None

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Line break normalization (`H-01`)**: Declarative configuration sources now normalize `\r\n` (CRLF) and bare `\r` (CR) line endings to `\n`, ensuring valid line reporting and preventing unhandled `IndexError` in AST location mapping.
+- **Token screener newline reset (`H-02`)**: Statement-level multi-output unpacking (e.g. `(a, b) = split(...)` or `[a, b] = split(...)`) across newlines no longer increments the operator nesting counter.
+- **Empty tuple target rejection and tensor tuple locations (`M-03`)**: Empty tuple assignments (`p = ()`) are rejected with `E_SYNTAX`, and tensor tuple arity errors (`E_OUTPUT_ARITY`) report precise source line, column, and loop iteration diagnostics.
+- **Declarative f-string rejection (`M-04`)**: Formatted string literals (`f"..."`, `F"..."`, `fr"..."`, `rf"..."`) are rejected during token screening before AST parsing with `E_SYNTAX`.
+- **Loop collision diagnostic clarification (`L-01`)**: Duplicate node name collisions inside loops now distinguish whether the conflicting earlier node had an explicit name, an earlier loop suffix, or an auto-generated ID.
+
 ## 0.8.0 (2026-09-26)
 
 A minor release for operators defined outside HNDL: `ops` calls operators

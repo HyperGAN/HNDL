@@ -428,3 +428,21 @@ def test_saved_plans_keep_the_iterations():
     restored = ResolvedPlan.from_json(plan.to_json())
     assert restored.nodes[1].source["iterations"] == ((1, 2),)
     assert json.loads(plan.to_json())["nodes"][1]["source"]["iterations"] == [[1, 2]]
+
+
+def test_suffixed_name_colliding_with_auto_generated_name():
+    # L-01: Collision with auto-generated ID specifies "an auto-generated ID 'n0'"
+    with pytest.raises(HNDLError, match="E_NAME") as rejected:
+        capture_config("relu()\nfor _ in range(2):\n    relu(name='n')", **TOKENS)
+    assert "an auto-generated ID 'n0'" in rejected.value.message
+    assert "an explicit name='n0'" not in rejected.value.message
+
+
+def test_tensor_tuple_arity_error_in_loop_reports_iterations():
+    # M-03 in loop context: reports iterations
+    with pytest.raises(HNDLError) as exc:
+        capture_config("for _ in range(2):\n    parts = split(4)\n    b = (parts, x)\nout = x", **TOKENS)
+    assert exc.value.code == "E_OUTPUT_ARITY"
+    assert (exc.value.line, exc.value.column) == (3, 9)
+    assert exc.value.iterations == ((0, 2),)
+
