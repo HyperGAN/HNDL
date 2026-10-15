@@ -7,7 +7,7 @@ hand-rolled ``time.perf_counter`` loop: it synchronizes CUDA before and after
 each replicate and its blocked autorange strategy picks a loop count large
 enough that the timer resolution stops mattering.
 
-Verified against torch 2.14: ``blocked_autorange`` returns a
+Verified against torch 2.x (including torch 2.6+): ``blocked_autorange`` returns a
 ``torch.utils.benchmark.utils.common.Measurement`` whose ``.mean`` and
 ``.median`` are per-call times in **seconds** (it also carries ``.iqr``,
 ``.times`` and ``.raw_times``).

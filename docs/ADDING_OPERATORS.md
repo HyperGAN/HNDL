@@ -214,7 +214,7 @@ saved by a release; they must keep loading.
 3. Run `PYTHONPATH=src python -m pytest -q` from the checkout. In a git
    worktree the `.venv` editable install points at the main checkout, so
    `PYTHONPATH=src` is required.
-4. `ruff check src tests examples`.
+4. `ruff check src tests examples scripts`.
 5. `python -m hndl.docs` and commit the generated page. `python -m hndl.docs
    --check` must pass.
 6. Commit, push, and open a PR titled `Add <alias> operator`.

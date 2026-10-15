@@ -1,4 +1,4 @@
-# Implementation notes: 0.1.2
+# Implementation notes: 0.8.1
 
 This release implements the contract in [SPEC.md](SPEC.md). [README.md](README.md)
 introduces the APIs with examples; the [operator catalog](docs/operators/index.md)
@@ -25,16 +25,17 @@ and the [authored networks](docs/networks.md) are generated from the code.
   policies, validation, and finalization. Built-ins are discovered from
   `hndl.operators`; custom operators use the same decorator on a `Registry`.
   See [docs/ADDING_OPERATORS.md](docs/ADDING_OPERATORS.md).
-- Fifty-nine operators across activation, arithmetic, shape, normalization,
-  convolution, spatial, sequence, vision, memory, regularization, and
-  pretrained categories, each with tests against PyTorch references.
+- Sixty-nine (69) operators across activation, arithmetic, convolution, core, memory,
+  normalization, pretrained, regularization, sequence, shape, spatial, and vision
+  categories, each with tests against PyTorch references.
 - `pretrained(source)`: a generic loader for transformers and timm checkpoints
   from local paths or `hf://` repositories. See [docs/pretrained.md](docs/pretrained.md).
 - PyTorch modules, shape tables, name lookup, sequence indexing and shared
   slices, ordinary autograd, state dictionaries, and CPU/CUDA construction in
   float32, float16, or bfloat16.
-- Persisted constant parameter initialization and trainability overrides,
-  shared by both frontends and applied when building or rebuilding a plan.
+- Persisted constant and random initializer schemes (xavier_uniform, xavier_normal,
+  kaiming_uniform, kaiming_normal, truncated_normal, normal, uniform, orthogonal under
+  torch_default@2) and trainability overrides, shared by both frontends and applied when building or rebuilding a plan.
 - Immutable resolved graph data, canonical JSON plan persistence, digests,
   exact operator-version checks, and `build(plan)` without recapturing an
   author function. JSON is a persistence format, not an authoring language.

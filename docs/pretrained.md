@@ -218,6 +218,14 @@ or read it from the `E_PRETRAINED` message raised when `sha256=` is missing.
   loaded until the network is built, and `parameter_counts(plan)` does not
   touch the file at all.
 
+### Capturing intermediate activations (`layer`, `layers`)
+
+When extracting perceptual loss features, multi-scale representations, or feature-pyramid trunk activations:
+- **Single activation**: `layer="features.2"` registers a forward hook on that submodule, captures its activation output, and stops forward execution immediately once that layer completes.
+- **Multiple activations**: `layers=("layer1", "layer2", "layer3")` captures activations from multiple submodules in a single forward pass, stopping execution after the last requested layer in topological execution order.
+- **In-place activation safety**: Every captured activation is cloned immediately upon hook execution (`output.clone()`). This protects captured activations against downstream in-place operations (such as `nn.ReLU(inplace=True)` in ResNets or residual additions `+=`) which would otherwise overwrite the captured activation values or trigger PyTorch autograd version-counter runtime errors during backward passes.
+- **Autograd & gradient flow**: Captured activations retain their complete computational graph and autograd history back to the graph input, supporting both first-order gradients and second derivatives (e.g. for gradient penalties or adversarial training), while model parameters remain frozen unless `trainable=True`.
+
 ## Freezing and dtype
 
 The wrapped model is frozen (`requires_grad=False`) and stays in eval mode

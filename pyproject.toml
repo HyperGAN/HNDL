@@ -49,6 +49,7 @@ hndl = ["py.typed"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra"
+norecursedirs = [".*", "build", "dist", ".claude", ".agents"]
 markers = ["cuda: requires an available CUDA device", "network: downloads checkpoints from the network", "benchmark: slow performance/optimization tests, opt-in only (not run in CI by default)"]
 
 [tool.ruff]

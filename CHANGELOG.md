@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Source distribution fixture inclusion (`H-07`)**: `MANIFEST.in` includes `CHANGELOG.md`, `src/hndl/py.typed`, and recursive test JSON fixtures (`recursive-include tests *.py *.json`), ensuring running `pytest` against an unpacked `sdist` finds all 0.6.0 plan compatibility fixtures.
+- **Specification and implementation catalog synchronization (`H-08`)**: Synchronized `IMPLEMENTATION.md` and `SPEC.md` to document the 69 built-in operators across 12 categories, documented random initializers under `torch_default@2`, documented `Arg.since` in `SPEC.md`, and added synchronization tests in `tests/test_package.py`.
+- **Pretrained intermediate activation capture semantics (`L-07`)**: Documented forward hook capture mechanics, multi-layer extraction, automatic tensor cloning guards against downstream in-place operations, early forward termination, and full autograd preservation in `docs/pretrained.md`.
+- **Operator documentation and benchmark comment hygiene (`L-09`)**: Added `scripts` directory to the `ruff check` checklist in `docs/ADDING_OPERATORS.md`, and updated outdated "torch 2.14" references in benchmark test comments to "PyTorch 2.6+" / "torch 2.x".
+- **Pytest directory recursion exclusion and git cleanup (`L-10`)**: Configured `norecursedirs = [".*", "build", "dist", ".claude", ".agents"]` under `[tool.pytest.ini_options]` in `pyproject.toml`, pruned 28 stale git worktree registrations, cleaned `.claude/worktrees/`, and safely deleted 74 merged local branches.
+
 - **RMSNorm double-precision preservation (`H-06`)**: `RMSNorm.forward` preserves `float64` precision when running double-precision inputs instead of downcasting to `float32`, ensuring exact parity against `F.rms_norm` and passing `torch.autograd.gradcheck`.
 - **RoPE double-precision calculations (`M-12`)**: `attention._rope_tables` calculates frequency exponents, inverse frequencies, and angles in `float64` when `dtype=torch.float64`, preventing numerical noise and precision degradation during double-precision attention evaluation.
 - **PosEmbed sequence length bounds validation (`M-12`)**: `PosEmbed.forward` validates that input sequence length does not exceed `max_len`, raising `HNDLError("E_CONSTRAINT")` instead of silently broadcasting position 0 across longer sequences.

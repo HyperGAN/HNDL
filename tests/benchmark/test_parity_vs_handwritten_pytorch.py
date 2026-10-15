@@ -38,7 +38,7 @@ for the MLP and 1.3 us for the transformer block.
 Each side is timed in :data:`ROUNDS` interleaved rounds and represented by its
 fastest round (see :func:`_compare`). Measured ratios, 12 runs of
 ``python -m pytest -m benchmark tests/benchmark -k parity`` on a 24-core CPU
-machine shared with other work (load average 3-7), torch 2.14, Python 3.14,
+machine shared with other work (load average 3-7), PyTorch 2.6+, Python 3.14,
 2026-09-26:
 
 ===========================  =============

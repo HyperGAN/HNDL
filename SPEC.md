@@ -1,6 +1,6 @@
 # HNDL v1 technical specification
 
-**Status: the implemented 0.1.2 contract.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records what 0.1.2 ships and what remains for v1. [README.md](README.md) introduces the APIs with examples.
+**Status: the implemented 0.8.1 contract.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records what 0.8.1 ships and what remains for v1. [README.md](README.md) introduces the APIs with examples.
 
 “Must” denotes a requirement of this contract. The public frontends are a declarative subset of Python syntax and a separately invoked trusted Python callable. Both share an implicit current tensor for single-input operations, accept explicit tensors for branches, and use one graph/resolver. Every operation — built-in or custom — is an `nn.Module` carrying one `@operator(...)` declaration that the resolver, the backend, the example harness, and the generated documentation all read. Omitted inferable dimensions replace explicit unknown markers; `name=` alone pins module identity; printing a module shows its resolved shapes. JSON is an internal graph/persistence format, not a third authoring frontend. PyTorch is an ordinary hard dependency of the package. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
 
@@ -175,7 +175,7 @@ Custom operators declare policies the same way. Policy declarations are trusted 
 
 ## 6. Built-in operators
 
-The catalog is generated from the declarations themselves. [docs/operators](docs/operators/index.md), produced by `python -m hndl.docs` and checked in CI with `python -m hndl.docs --check`, is the published argument schema: for every operator it lists the alias, exact identity and version, ports and their shape relation, each argument's type, default, bounds and help text, and runnable examples with their resolved shape tables. This specification does not duplicate that table; it fixes the rules every built-in must obey.
+The catalog is generated from the declarations themselves. It contains 69 operators across 12 categories (`activation`, `arithmetic`, `convolution`, `core`, `memory`, `normalization`, `pretrained`, `regularization`, `sequence`, `shape`, `spatial`, and `vision`). [docs/operators](docs/operators/index.md), produced by `python -m hndl.docs` and checked in CI with `python -m hndl.docs --check`, is the published argument schema: for every operator it lists the alias, exact identity and version, ports and their shape relation, each argument's type, default, bounds and help text, and runnable examples with their resolved shape tables. This specification does not duplicate that table; it fixes the rules every built-in must obey.
 
 - Every built-in is one `nn.Module` subclass with one `@operator(...)` declaration (§8), discovered from `hndl.operators` and bound by `Registry.builtins()`. Aliases and identities are unique; duplicate registration fails with `E_REGISTRY`.
 - An alias binds one exact `identity@version`. Resolution never selects a newest installed version, and plans record the identity, not the alias.
@@ -575,7 +575,7 @@ Scaling is exact: an extent of 65 cannot satisfy `2*C`. Contradictions fail; dim
 
 ### Argument declarations
 
-`Arg(type, default, *, min, max, exclusive_min, exclusive_max, help, inferable, dim, positional, choices)` declares one scalar argument. Supported types are `int`, `float`, `bool`, `str`, `"pair"` (an int or two ints, normalized to a pair), `"ints"` (a bounded tuple of ints), and `"strs"` (a bounded tuple of strings, written as a tuple literal in configuration). Integers and booleans are distinct; float arguments accept finite integer or float literals and normalize to floats; `choices` restricts a `str`.
+`Arg(type, default, *, min, max, exclusive_min, exclusive_max, help, inferable, dim, positional, choices, since)` declares one scalar argument. Supported types are `int`, `float`, `bool`, `str`, `"pair"` (an int or two ints, normalized to a pair), `"ints"` (a bounded tuple of ints), and `"strs"` (a bounded tuple of strings, written as a tuple literal in configuration). Integers and booleans are distinct; float arguments accept finite integer or float literals and normalize to floats; `choices` restricts a `str`. `since="0.7.0"` marks an argument added to an operator after its initial release without bumping the operator version; its default preserves previous behavior and is omitted from serialized plans when retaining that default.
 
 Omitting `default` makes the argument required unless `inferable=True`, which lets the resolver solve it and forbids a default. `dim="D_out"` ties an int argument to a shape symbol so a known extent fills the argument and an explicit argument fixes the extent; two arguments cannot bind to the same symbol. `positional=False` keeps an argument keyword-only; positional order is otherwise the mapping order, after any tensor ports. Numeric bounds are inclusive unless the matching exclusive flag is set, bounds must admit a value, and a declared default passes the same validation as an explicit one. Every `Arg` must carry non-empty `help`; the catalog publishes it.
 
@@ -911,7 +911,6 @@ The baseline deliberately leaves these details visible:
 - Publish machine-readable plan schemas, serialization APIs, and cross-version compatibility fixtures. The public frontend signatures, local-binding semantics, and the `@operator` declaration contract are fixed above; the JSON example illustrates the internal graph model.
 - Finalize the canonical JSON encoding's golden digest vectors and the published compatibility matrix for saved plans.
 - Complete full derivation chains and source provenance for every inferred value; today each argument records its origin but not the contributing relation.
-- Extend initialization beyond constant overrides, and general construction policies beyond per-operator requirement profiles; complete the build-receipt representation and runtime-check controls.
 - Define opaque **asserted** contracts for modules that cannot supply relations, including the runtime checks that must accompany them and how backward inference is reported as unavailable.
 - Qualify the supported platform, PyTorch version, and device/dtype matrix with numerical tolerances.
 - Decide whether explicit weight tying between graph nodes enters a later version, and what identity/persistence rules it would require.
