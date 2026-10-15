@@ -237,10 +237,18 @@ def _is_chain(plan: ResolvedPlan | Graph) -> bool:
     """A chain has one external input feeding one unary node after another."""
     if len(plan.inputs) != 1 or len(plan.outputs) != 1:
         return False
+    registry = getattr(plan, "registry", None)
     previous = f"input:{next(iter(plan.inputs))}"
     for node in plan.nodes:
+        variadic = False
+        if registry is not None:
+            try:
+                variadic = tuple(node.outputs) != registry.by_identity(node.op).output_ports
+            except HNDLError:
+                pass
         if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
                 or len(node.outputs) != 1
+                or variadic
                 or (node.outputs[0].startswith("out") and node.outputs[0][3:].isdigit())):
             return False
         previous = f"node:{node.id}/{node.outputs[0]}"

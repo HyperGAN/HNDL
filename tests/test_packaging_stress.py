@@ -28,6 +28,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(scope="session")
 def built_sdist_archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Build the source distribution archive once per test session."""
+    pytest.importorskip("build")
+    if not (REPO_ROOT / ".git").exists():
+        pytest.skip("Not running inside a repository checkout")
     outdir = tmp_path_factory.mktemp("sdist_build")
     cmd = [
         sys.executable,
@@ -357,6 +360,8 @@ def test_all_repository_markdown_links_rewrite_to_valid_files() -> None:
 
 def test_git_worktrees_zero_stale_entries() -> None:
     """Verify git worktree list contains 0 stale/linked worktrees (only main repository)."""
+    if not (REPO_ROOT / ".git").exists():
+        pytest.skip("Not running inside a git repository checkout")
     proc = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=REPO_ROOT,
@@ -381,6 +386,16 @@ def test_claude_worktrees_directory_is_strictly_empty() -> None:
 
 def test_git_merged_branches_are_pruned() -> None:
     """Verify that all branches fully merged into develop have been pruned."""
+    if not (REPO_ROOT / ".git").exists():
+        pytest.skip("Not running inside a git repository checkout")
+    has_develop = subprocess.run(
+        ["git", "rev-parse", "--verify", "refs/heads/develop"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if has_develop.returncode != 0:
+        pytest.skip("Local develop branch ref not present (e.g. shallow CI checkout)")
     proc = subprocess.run(
         ["git", "branch", "--merged", "develop"],
         cwd=REPO_ROOT,
@@ -395,7 +410,7 @@ def test_git_merged_branches_are_pruned() -> None:
     ]
     # develop and master are the only persistent branches allowed to be merged
     for branch in merged_branches:
-        assert branch in ("develop", "master"), (
+        assert branch in ("develop", "master") or branch.startswith("("), (
             f"Stale merged branch '{branch}' found in local git branches! "
             f"Expected only develop and master to be merged into develop."
         )

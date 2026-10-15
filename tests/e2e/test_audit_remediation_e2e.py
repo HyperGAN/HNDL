@@ -802,12 +802,28 @@ class TestTier2BoundaryCases:
         )
         assert model[0].model.training is True, "Finding H-04: trainable pretrained model left in eval mode after network()"
 
-    def test_tier2_f5_h05_timm_provider_preserves_revision_in_hub_call(self):
+    def test_tier2_f5_h05_timm_provider_preserves_revision_in_hub_call(self, monkeypatch):
         """[Finding H-05] TimmProvider.instantiate must forward self.source.revision for hf:// sources."""
+        import types
+        import hndl.pretrained as pretrained_mod
         from hndl.pretrained import Source, TimmProvider
+
+        calls = []
+        fake_timm = types.SimpleNamespace(
+            create_model=lambda name, pretrained=False, **kwargs: calls.append((name, pretrained, kwargs))
+        )
+        fake_safetensors = types.SimpleNamespace()
+        orig_require = pretrained_mod._require
+        monkeypatch.setattr(
+            pretrained_mod,
+            "_require",
+            lambda mod: fake_timm if mod == "timm" else (fake_safetensors if mod == "safetensors" else orig_require(mod)),
+        )
         source = Source("hf", "timm/resnet18.a1_in1k", "rev12345", {}, "", "timm")
         provider = TimmProvider(source, output="features")
         assert provider.source.revision == "rev12345"
+        provider.instantiate(weights=True)
+        assert calls == [("hf-hub:timm/resnet18.a1_in1k@rev12345", True, {})]
 
     def test_tier2_f5_m01_resolve_source_detects_file_mtime_change(self, text_checkpoint):
         """[Finding M-01] resolve_source must notice file mtime changes and not return stale revision from lru_cache."""

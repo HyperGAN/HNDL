@@ -470,11 +470,6 @@ class TestPEP561TypingStress:
 
         assert not missing_report, f"Core public API functions missing type annotations: {missing_report}"
 
-    @pytest.mark.xfail(
-        reason="M-11 edge case: 8 random initializer helpers exported in hndl.__all__ (src/hndl/initializers.py) "
-               "lack parameter and return type annotations.",
-        strict=False,
-    )
     def test_pep561_public_initializer_functions_type_annotations(self):
         """Empirically audit the 8 random initializer functions in hndl.__all__ for type annotations."""
         initializers = [

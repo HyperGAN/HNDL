@@ -158,11 +158,6 @@ def test_is_chain_custom_unary_semantic_output_name_shift():
     assert out.shape == (2, 4)
 
 
-@pytest.mark.xfail(
-    reason="H-03 edge case: _is_chain checks (node.outputs[0].startswith('out') and node.outputs[0][3:].isdigit()) "
-           "which misses variadic operators whose prefix is not 'out' (e.g. 'part0').",
-    strict=False,
-)
 def test_is_chain_custom_variadic_non_out_prefix_fails_or_crashes():
     """Demonstrate vulnerability: custom variadic operator with prefix 'part*' returns a 1-tuple.
 

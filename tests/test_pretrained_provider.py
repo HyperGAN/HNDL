@@ -672,8 +672,13 @@ def test_timm_provider_hf_hub_forwards_revision(monkeypatch):
     fake_timm = types.SimpleNamespace(
         create_model=lambda name, pretrained=False, **kwargs: calls.append((name, pretrained, kwargs))
     )
+    fake_safetensors = types.SimpleNamespace()
     orig_require = sources._require
-    monkeypatch.setattr(sources, "_require", lambda mod: fake_timm if mod == "timm" else orig_require(mod))
+    monkeypatch.setattr(
+        sources,
+        "_require",
+        lambda mod: fake_timm if mod == "timm" else (fake_safetensors if mod == "safetensors" else orig_require(mod)),
+    )
     source = sources.Source("hf", "timm/resnet18.a1_in1k", "rev12345", {}, "", "timm")
     provider = sources.TimmProvider(source, output="features")
     provider.instantiate(weights=True)
@@ -686,8 +691,13 @@ def test_timm_provider_hf_hub_without_revision(monkeypatch):
     fake_timm = types.SimpleNamespace(
         create_model=lambda name, pretrained=False, **kwargs: calls.append((name, pretrained, kwargs))
     )
+    fake_safetensors = types.SimpleNamespace()
     orig_require = sources._require
-    monkeypatch.setattr(sources, "_require", lambda mod: fake_timm if mod == "timm" else orig_require(mod))
+    monkeypatch.setattr(
+        sources,
+        "_require",
+        lambda mod: fake_timm if mod == "timm" else (fake_safetensors if mod == "safetensors" else orig_require(mod)),
+    )
     source = sources.Source("hf", "timm/resnet18.a1_in1k", "", {}, "", "timm")
     provider = sources.TimmProvider(source, output="features")
     provider.instantiate(weights=True)
@@ -696,6 +706,8 @@ def test_timm_provider_hf_hub_without_revision(monkeypatch):
 
 def test_timm_provider_guards_missing_safetensors(monkeypatch):
     import sys
+    import types
+    monkeypatch.setitem(sys.modules, "timm", types.SimpleNamespace(create_model=lambda *a, **kw: None))
     monkeypatch.setitem(sys.modules, "safetensors", None)
     source = sources.Source("hf", "timm/resnet18.a1_in1k", "rev12345", {}, "", "timm")
     provider = sources.TimmProvider(source, output="features")

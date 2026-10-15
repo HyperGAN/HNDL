@@ -155,7 +155,9 @@ def test_incompatible_custom_contracts_and_scalar_arguments_fail_before_build():
 
 
 def test_example_runs_as_script():
-    result = subprocess.run([sys.executable, "examples/adaptive_normalization.py", "--device", "cpu"],
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / "examples" / "adaptive_normalization.py"
+    result = subprocess.run([sys.executable, str(script), "--device", "cpu"],
                             check=True, capture_output=True, text=True, timeout=30)
     assert "Mapping fan-out" in result.stdout and "Split and remainder" in result.stdout
     assert result.stdout.count("finite input gradient: True") == 2
