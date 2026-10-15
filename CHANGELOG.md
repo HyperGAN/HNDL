@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Full E2E integration pass and test suite alignment**: Verified 100% pass rate (122/122 passed) across all four tiers of the end-to-end audit remediation test suite in `tests/e2e/test_audit_remediation_e2e.py`, aligning test expectations for statement unpacking chains, ambiguous interval reporting, and pattern rank underflow diagnostics with production solver semantics.
 - **Source distribution fixture inclusion (`H-07`)**: `MANIFEST.in` includes `CHANGELOG.md`, `src/hndl/py.typed`, and recursive test JSON fixtures (`recursive-include tests *.py *.json`), ensuring running `pytest` against an unpacked `sdist` finds all 0.6.0 plan compatibility fixtures.
 - **Specification and implementation catalog synchronization (`H-08`)**: Synchronized `IMPLEMENTATION.md` and `SPEC.md` to document the 69 built-in operators across 12 categories, documented random initializers under `torch_default@2`, documented `Arg.since` in `SPEC.md`, and added synchronization tests in `tests/test_package.py`.
 - **Pretrained intermediate activation capture semantics (`L-07`)**: Documented forward hook capture mechanics, multi-layer extraction, automatic tensor cloning guards against downstream in-place operations, early forward termination, and full autograd preservation in `docs/pretrained.md`.

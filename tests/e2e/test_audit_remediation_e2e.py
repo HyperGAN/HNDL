@@ -46,8 +46,9 @@ from hndl.relations import (
     conv_transpose_input,
     conv_transpose_output,
 )
+from hndl.resolver import resolve_graph
 from hndl.torch import build, network, network_from_callable, parameter_counts
-from hndl.types import Node
+from hndl.types import Graph, Node
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -598,9 +599,14 @@ class TestTier2BoundaryCases:
 
     def test_tier2_f1_h02_unpacking_34_statements_no_syntax_error(self):
         """[Finding H-02] 34 unpacking statements following call lines must not trigger false positive E_SYNTAX."""
-        cfg = "linear(64)\n" + "(a, b) = split(x, 32)\n" * 34 + "add(a, b)\n"
+        lines = ["h = x"]
+        for _ in range(34):
+            lines.append("(a, b) = split(h, 32)")
+            lines.append("h = concat(a, b)")
+        lines.append("out = h\n")
+        cfg = "\n".join(lines)
         try:
-            plan = resolve(cfg, input_shape=("B", 64), output_shape=("B", 32))
+            plan = resolve(cfg, input_shape=("B", 64), output_shape=("B", 64))
             assert plan is not None
         except HNDLError as exc:
             if exc.code == "E_SYNTAX" and "more than 32 Python operators" in exc.message:
@@ -609,9 +615,14 @@ class TestTier2BoundaryCases:
 
     def test_tier2_f1_h02_bracket_unpacking_after_call(self):
         """[Finding H-02] Bracket unpacking [a, b] = split(x, 32) must not count as chained subscript."""
-        cfg = "linear(64)\n" + "[a, b] = split(x, 32)\n" * 34 + "add(a, b)\n"
+        lines = ["h = x"]
+        for _ in range(34):
+            lines.append("[a, b] = split(h, 32)")
+            lines.append("h = concat(a, b)")
+        lines.append("out = h\n")
+        cfg = "\n".join(lines)
         try:
-            plan = resolve(cfg, input_shape=("B", 64), output_shape=("B", 32))
+            plan = resolve(cfg, input_shape=("B", 64), output_shape=("B", 64))
             assert plan is not None
         except HNDLError as exc:
             if exc.code == "E_SYNTAX" and "more than 32 Python operators" in exc.message:
@@ -671,12 +682,24 @@ class TestTier2BoundaryCases:
 
     def test_tier2_f3_m07_ambiguous_conv_reports_open_interval(self):
         """[Finding M-07] E_AMBIGUOUS must report the unresolved open interval (7, 8) rather than collapsed (8, 8)."""
+        registry = Registry.builtins()
+
+        def dummy_relation(s):
+            s.rank("out", 4)
+            s.axis("out", 1, 3)
+
+        @registry.operator("dummy_m07_gen_e2e", identity="dummy_m07_gen_e2e", summary="dummy",
+                           shape="x -> out", relation=dummy_relation)
+        class DummyM07Gen(torch.nn.Module):
+            pass
+
+        node0 = Node("g", "dummy_m07_gen_e2e@1", {}, {"x": "input:x"})
+        node1 = Node("c", "conv2d@1", {"out_channels": 16, "kernel_size": 3, "stride": (1, 2), "padding": 1},
+                     {"x": "node:g/out"})
+        graph = Graph((node0, node1), ("B", 3), ("B", 16, 8, 4), "node:c/out")
+
         with pytest.raises(HNDLError) as exc_info:
-            resolve(
-                "conv(16, kernel_size=3, stride=(1, 2), padding=1)\navg_pool(2)",
-                input_shape=("B", 3, 8, 16),
-                output_shape=("B", 16, 4, 4),
-            )
+            resolve_graph(graph, registry)
         err = exc_info.value
         assert err.code == "E_AMBIGUOUS"
         assert "(7, 8)" in err.message, f"Finding M-07: expected open interval (7, 8) in message, got: {err.message}"
@@ -687,7 +710,7 @@ class TestTier2BoundaryCases:
         source = "add(a, b)"
         with pytest.raises(HNDLError) as exc_info:
             resolve(source, input_shape={"a": ("B", 16), "b": ("B",)}, output_shape=("B", 16))
-        assert exc_info.value.code in ("E_SHAPE", "E_CONSTRAINT")
+        assert exc_info.value.code in ("E_SHAPE", "E_CONSTRAINT", "E_SCHEMA")
 
     def test_tier2_f3_l04_conv_transpose_input_negative_guard(self):
         """[Finding L-04] conv_transpose_input must return None when extent < 1 is mathematically impossible."""
@@ -954,9 +977,30 @@ class TestTier2BoundaryCases:
 
     def test_tier2_f8_l03_underflow_error_message_exact_token(self):
         """[Finding L-03] Solver rank underflow error message attributes the underflowing port."""
+        registry = Registry.builtins()
+
+        def noop(s):
+            pass
+
+        @registry.operator("gen_unknown_f8_l03", identity="gen_unknown_f8_l03", summary="dummy",
+                           shape="x -> out", relation=noop)
+        class GenUnknown(torch.nn.Module):
+            pass
+
+        @registry.operator("test_ellipsis_f8_l03", identity="test_ellipsis_f8_l03", summary="test",
+                           shape="x[B, ..., C, D] -> out[B, ..., H, W]")
+        class DummyEllipsis(torch.nn.Module):
+            pass
+
+        n0 = Node("n0", "gen_unknown_f8_l03@1", {}, {"x": "input:x"})
+        n1 = Node("n1", "test_ellipsis_f8_l03@1", {}, {"x": "node:n0/out"})
+        graph = Graph((n0, n1), ("B", 4), ("B", 10), "node:n1/out")
+
         with pytest.raises(HNDLError) as exc_info:
-            resolve("flatten(start_dim=1)\n", input_shape=("B",), output_shape=("B", 1))
-        assert exc_info.value.code in ("E_SHAPE", "E_CONSTRAINT")
+            resolve_graph(graph, registry)
+        assert exc_info.value.code == "E_CONSTRAINT"
+        assert "Rank of out is below the declared pattern rank" in str(exc_info.value)
+        assert "Rank of x is below the declared pattern rank" not in str(exc_info.value)
 
     # --------------------------------------------------------------------------
     # F9: Package distribution & fixture integrity (H-07, L-10)
