@@ -470,3 +470,34 @@ def test_example_multi_port_shapes_and_container_validation():
     with pytest.raises(HNDLError, match="E_REGISTRY"):
         Example("linear(10)", input_shape={"x": "B, 4"}, output_shape=("B", 10))
 
+
+def test_relations_conv_input_range_and_transpose_input_guards():
+    """[L-04] conv_input_range and conv_transpose_input guard non-positive and unreachable extents."""
+    from hndl.relations import conv_input_range, conv_transpose_input, conv_axis
+
+    # conv_input_range on extent <= 0 returns (1, 0)
+    assert conv_input_range(0, kernel=5, stride=1, padding=0, dilation=1) == (1, 0)
+    assert conv_input_range(-1, kernel=5, stride=1, padding=0, dilation=1) == (1, 0)
+    assert conv_input_range(-5, kernel=3, stride=2, padding=1, dilation=1) == (1, 0)
+
+    # conv_transpose_input returns None when extent <= 0 or input extent < 1
+    assert conv_transpose_input(0, kernel=1, stride=1) is None
+    assert conv_transpose_input(-3, kernel=3, stride=1) is None
+    # kernel=4, stride=1, extent=1 -> numerator = 1 - 3 - 1 = -3 -> -2 < 1 -> None
+    assert conv_transpose_input(1, kernel=4, stride=1) is None
+
+    # Valid transpose input remains functional
+    assert conv_transpose_input(4, kernel=3, stride=1, padding=1) == 4
+
+    # conv_axis rejects negative axis with E_CONSTRAINT
+    registry = Registry()
+
+    @registry.operator("bad_neg", identity="host.bad_neg", summary="Negative axis.", shape="x -> out",
+                       relation=lambda s: conv_axis(s, -1, kernel=1, stride=1), shape_text="axis -1")
+    class BadNeg(Shift):
+        pass
+
+    with pytest.raises(HNDLError, match="E_CONSTRAINT.*has no axis -1"):
+        resolve("bad_neg()", registry=registry, input_shape=("B", 4), output_shape=("B", 4))
+
+

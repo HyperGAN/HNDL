@@ -294,7 +294,7 @@ class Example(Immutable):
                     if not isinstance(k, str) or isinstance(v, str) or not isinstance(v, (tuple, list)):
                         _registry_error(f"Example {label}[{k!r}] must be a shape sequence")
                     frozen[k] = tuple(v)
-                return MappingProxyType(frozen)
+                return frozen
             if isinstance(contract, str) or not isinstance(contract, (tuple, list)):
                 _registry_error(f"Example {label} must be a shape sequence or mapping of shape sequences")
             return tuple(contract)

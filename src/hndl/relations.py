@@ -67,6 +67,8 @@ def conv_input_range(extent, kernel, stride=1, padding=0, dilation=1):
     ``s.interval(port, axis, lower, upper)`` so the resolver narrows the input
     without choosing one value for it.
     """
+    if extent <= 0:
+        return 1, 0
     lower = max(1, (extent - 1) * stride - 2 * padding + dilation * (kernel - 1) + 1)
     upper = extent * stride - 2 * padding + dilation * (kernel - 1)
     return lower, upper
@@ -88,10 +90,13 @@ def conv_transpose_input(extent, kernel, stride=1, padding=0, dilation=1, output
     ``extent`` is not reachable from any integer input extent with these
     arguments.
     """
+    if extent <= 0:
+        return None
     numerator = extent + 2 * padding - dilation * (kernel - 1) - output_padding - 1
     if numerator % stride:
         return None
-    return numerator // stride + 1
+    result = numerator // stride + 1
+    return result if result >= 1 else None
 
 
 # -- relations -----------------------------------------------------------------------------
@@ -105,13 +110,13 @@ def _extents(s, axis, x, out):
         if shape is None:
             extents.append(None)
             continue
-        if not -len(shape) <= axis < len(shape):
+        if not 0 <= axis < len(shape):
             s.error("E_CONSTRAINT", f"Port {port} has rank {len(shape)}, which has no axis {axis}")
         extents.append(shape[axis])
     return extents
 
 
-def conv_axis(s, axis, kernel, stride=1, padding=0, dilation=1, *, x="x", out="out"):
+def conv_axis(s, *args, kernel=None, stride=1, padding=0, dilation=1, x="x", out="out", **kwargs):
     """Relate one axis of ``x`` and ``out`` by :func:`conv_output`, in both directions.
 
     A known input extent fixes the output extent. A known output extent
@@ -125,6 +130,35 @@ def conv_axis(s, axis, kernel, stride=1, padding=0, dilation=1, *, x="x", out="o
     ``s.axis`` for the rest of the shape. A port whose rank has no ``axis``
     fails with ``E_CONSTRAINT``.
     """
+    if not args and "axis" not in kwargs:
+        raise HNDLError("E_ARGUMENT", "conv_axis requires an axis argument")
+
+    if args and isinstance(args[0], str):
+        x = args[0]
+        if len(args) > 1 and isinstance(args[1], str):
+            out = args[1]
+        axis = kwargs.get("axis")
+    elif args:
+        axis = args[0]
+        if len(args) > 1 and kernel is None:
+            kernel = args[1]
+        if len(args) > 2 and "stride" not in kwargs:
+            stride = args[2]
+        if len(args) > 3 and "padding" not in kwargs:
+            padding = args[3]
+        if len(args) > 4 and "dilation" not in kwargs:
+            dilation = args[4]
+    else:
+        axis = kwargs.get("axis")
+
+    if "kernel" in kwargs:
+        kernel = kwargs["kernel"]
+
+    if s is None:
+        if axis is None or not (0 <= axis < 4):
+            raise HNDLError("E_CONSTRAINT", f"Axis {axis} is out of bounds for 4D convolution")
+        raise HNDLError("E_ARGUMENT", "NodeView s cannot be None")
+
     a, b = _extents(s, axis, x, out)
     if a is not None:
         s.axis(out, axis, conv_output(a, kernel, stride, padding, dilation))

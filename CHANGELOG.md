@@ -11,6 +11,9 @@
 - **External port name reservation checks (`M-06`)**: External port names matching Python keywords (`for`, `def`), loop iterator (`range`), initializer schemes (`normal`, `uniform`), or operator aliases are strictly rejected across `Graph` definitions, `Capture`, and `resolve_graph`.
 - **Callable capture diagnostic attribution (`L-02`)**: Errors raised during callable capture (argument validation, port binding, and initialization) preserve explicit node names (`node=`) in diagnostics.
 - **Container type validation (`L-05`)**: `Example.input_shape`/`output_shape` and `Node.args`/`inputs`/`outputs` validate container types and protect against accidental string slicing or key-dropping.
+- **Ambiguous solver interval reporting (`M-07`)**: When an ambiguous port has both collapsed and open interval constraints across different axes, `E_AMBIGUOUS` reports the open interval rather than the collapsed interval.
+- **Ellipsis rank underflow port attribution (`L-03`)**: In `_Solver.patterns`, rank underflow when expanding ellipsis patterns directly attributes the port whose measured rank underflows the pattern rank.
+- **Defensive bounds checks in solver and relations (`L-04`)**: `_Solver.axis` and `_Solver.interval` bounds-check axes to guard against negative axis aliasing and `IndexError`; `conv_input_range` returns empty interval `(1, 0)` on non-positive extents; `conv_transpose_input` returns `None` when mathematically unreachable; `conv_axis` verifies valid axes and guards against `None` context.
 
 ## 0.8.0 (2026-09-26)
 

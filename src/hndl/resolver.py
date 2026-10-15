@@ -300,7 +300,7 @@ class _Solver:
 
     def axis(self, ref, axis, value, code="E_CONSTRAINT"):
         shape = self.shapes.get(ref)
-        if shape is None or value is None:
+        if shape is None or value is None or not (0 <= axis < len(shape)):
             return
         updated = [None] * len(shape)
         updated[0] = shape[0]
@@ -343,6 +343,8 @@ class _Solver:
 
     def interval(self, ref, axis, lower, upper):
         """Intersect a bounded inverse interval, fixing the axis when it collapses."""
+        if axis < 0:
+            return
         previous = self.intervals.get((ref, axis))
         if previous:
             lower, upper = max(lower, previous[0]), min(upper, previous[1])
@@ -350,7 +352,7 @@ class _Solver:
             self.error("E_CONSTRAINT", "Convolution inverse intervals are incompatible")
         self.intervals[ref, axis] = (lower, upper)
         shape = self.shapes.get(ref)
-        known = shape[axis] if shape is not None and axis < len(shape) else None
+        known = shape[axis] if shape is not None and 0 <= axis < len(shape) else None
         if known is not None and not lower <= known <= upper:
             self.error("E_CONSTRAINT", f"Input extent {known} lies outside required [{lower}, {upper}]")
         if lower == upper:
@@ -393,15 +395,16 @@ class _Solver:
             if ELLIPSIS in pattern:
                 shape = view.shape(name)
                 if shape is not None:
-                    ellipsis_length = len(shape) - (len(pattern) - 1)
+                    length = len(shape) - (len(pattern) - 1)
+                    if length < 0:
+                        self.error("E_CONSTRAINT", f"Rank of {name} is below the declared pattern rank")
+                    ellipsis_length = length
                     break
         expanded = []
         for name, pattern in entries:
             if ELLIPSIS in pattern:
                 if ellipsis_length is None:
                     continue
-                if ellipsis_length < 0:
-                    self.error("E_CONSTRAINT", f"Rank of {name} is below the declared pattern rank")
                 index = pattern.index(ELLIPSIS)
                 pattern = pattern[:index] + tuple(Sym(f"...{i}") for i in range(ellipsis_length)) + pattern[index + 1:]
             expanded.append((name, pattern))
@@ -453,7 +456,9 @@ class _Solver:
             for port, ref in list(node.inputs.items()) + [(port, f"node:{node.id}/{port}") for port in node.outputs]:
                 shape = self.shapes.get(ref)
                 if shape is None or any(value is None for value in shape):
-                    interval = next((bounds for (r, _), bounds in self.intervals.items() if r == ref), None)
+                    interval = next((bounds for (r, ax), bounds in self.intervals.items()
+                                     if r == ref and bounds[0] < bounds[1]
+                                     and (shape is None or (ax < len(shape) and shape[ax] is None))), None)
                     detail = f"; inverse allows {interval}" if interval else ""
                     self.error("E_AMBIGUOUS", f"Shape for {port} ({ref}) remains ambiguous{detail}; supply a dimension or a policy")
             missing = [name for name, arg in spec.args.items() if arg.inferable and name not in args]

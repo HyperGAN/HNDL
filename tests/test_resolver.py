@@ -163,3 +163,91 @@ def test_resolve_graph_rejects_reserved_ports():
         resolve_graph(graph_scheme)
     assert "collide with initializer schemes: normal" in exc.value.message
 
+
+def test_ambiguous_interval_reporting_ignores_collapsed_axes():
+    """[M-07] E_AMBIGUOUS reports open intervals (lo < hi) instead of collapsed ones (lo == hi)."""
+    registry = Registry.builtins()
+
+    def dummy_relation(s):
+        s.rank("out", 4)
+        s.axis("out", 1, 3)
+
+    @registry.operator("dummy_m07_gen", identity="dummy_m07_gen", summary="dummy",
+                       shape="x -> out", relation=dummy_relation)
+    class DummyM07Gen(nn.Module):
+        pass
+
+    # Node g outputs [B, 3, None, None].
+    # Node c is conv2d with stride (1, 2) and out_channels 16.
+    # Output shape is [B, 16, 8, 4].
+    # Axis 2 (stride 1) collapses to (8, 8) -> resolves to 8.
+    # Axis 3 (stride 2) has interval (7, 8) -> remains None (ambiguous).
+    node0 = Node("g", "dummy_m07_gen@1", {}, {"x": "input:x"})
+    node1 = Node("c", "conv2d@1", {"out_channels": 16, "kernel_size": 3, "stride": (1, 2), "padding": 1},
+                 {"x": "node:g/out"})
+    graph = Graph((node0, node1), ("B", 3), ("B", 16, 8, 4), "node:c/out")
+
+    with pytest.raises(HNDLError) as exc_info:
+        resolve_graph(graph, registry)
+
+    error_msg = str(exc_info.value)
+    assert exc_info.value.code == "E_AMBIGUOUS"
+    assert "; inverse allows (7, 8)" in error_msg
+    assert "(8, 8)" not in error_msg
+
+
+def test_patterns_ellipsis_underflow_blames_responsible_port():
+    """[L-03] _Solver.patterns blames the port with underflowing rank, not the first ellipsis port."""
+    registry = Registry.builtins()
+
+    def noop(s):
+        pass
+
+    @registry.operator("gen_unknown_l03", identity="gen_unknown_l03", summary="dummy",
+                       shape="x -> out", relation=noop)
+    class GenUnknownL03(nn.Module):
+        pass
+
+    @registry.operator("test_ellipsis_l03", identity="test_ellipsis_l03", summary="test",
+                       shape="x[B, ..., C, D] -> out[B, ..., H, W]")
+    class DummyEllipsisL03(nn.Module):
+        pass
+
+    # n0 produces out with shape None (unknown rank)
+    # n1 requires pattern rank >= 3 on both x and out
+    # n1/out is fixed to rank 2 ("B", 10), which underflows pattern rank
+    n0 = Node("n0", "gen_unknown_l03@1", {}, {"x": "input:x"})
+    n1 = Node("n1", "test_ellipsis_l03@1", {}, {"x": "node:n0/out"})
+    graph = Graph((n0, n1), ("B", 4), ("B", 10), "node:n1/out")
+
+    with pytest.raises(HNDLError) as exc_info:
+        resolve_graph(graph, registry)
+
+    error_msg = str(exc_info.value)
+    assert exc_info.value.code == "E_CONSTRAINT"
+    assert "Rank of out is below the declared pattern rank" in error_msg
+    assert "Rank of x is below the declared pattern rank" not in error_msg
+
+
+def test_solver_axis_and_interval_defensive_bounds():
+    """[L-04] _Solver.axis and _Solver.interval reject negative and out-of-bounds axes cleanly."""
+    from hndl.resolver import _Solver, DEFAULT_LIMITS
+
+    solver = _Solver(Graph((), ("B", 3, 8, 8), ("B", 3, 8, 8), "input:x"), (), {}, DEFAULT_LIMITS)
+    ref = "test_tensor"
+    solver.shapes[ref] = ["B", 3, 8, 8]
+
+    # Negative axis must not mutate or alias the last element
+    solver.axis(ref, -1, 99)
+    assert solver.shapes[ref] == ["B", 3, 8, 8]
+
+    # Out-of-bounds axis must not raise IndexError
+    solver.axis(ref, 10, 99)
+    assert solver.shapes[ref] == ["B", 3, 8, 8]
+
+    # Interval on negative axis must be a no-op
+    solver.interval(ref, -1, 5, 5)
+    assert solver.shapes[ref] == ["B", 3, 8, 8]
+    assert (ref, -1) not in solver.intervals
+
+
