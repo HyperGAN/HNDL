@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 (2026-10-15)
 
 - **Full E2E integration pass and test suite alignment**: Verified 100% pass rate (122/122 passed) across all four tiers of the end-to-end audit remediation test suite in `tests/e2e/test_audit_remediation_e2e.py`, aligning test expectations for statement unpacking chains, ambiguous interval reporting, and pattern rank underflow diagnostics with production solver semantics.
 - **Source distribution fixture inclusion (`H-07`)**: `MANIFEST.in` includes `CHANGELOG.md`, `src/hndl/py.typed`, and recursive test JSON fixtures (`recursive-include tests *.py *.json`), ensuring running `pytest` against an unpacked `sdist` finds all 0.6.0 plan compatibility fixtures.
@@ -11,9 +11,6 @@
 - **Resolved plan representation and operator positional argument validation (`M-10`)**: `ResolvedPlan.__repr__` differentiates unary sequential chains (displaying index, single input shape, and single output shape columns) from branched multi-input/multi-output graphs (omitting index, displaying full input/output shape columns with port reference names `p=ref:[...]`), aligning plan printing with `GraphModule.__repr__`. `make_operator` and `Operator.__post_init__` strictly enforce that operators declaring `positional_rest` have no `positional=True` arguments, and `Operator.positional_names` returns an empty tuple `()` when `positional_rest` is set.
 - **Public API typing and PEP 561 compliance (`M-11`)**: Added `src/hndl/py.typed` marker package, enabled `from __future__ import annotations` across core modules, replaced untyped `: object` signatures in `types.py` and `operator.py` with concrete type hints, and fully typed public entrypoint functions (`resolve`, `resolve_file`, `network`, `network_file`, `network_from_callable`, `build`, `parameter_counts`).
 - **CI isolation, benchmark fixture alignment, and documentation links (`M-14`)**: Isolated wheel testing directory inside `$RUNNER_TEMP` in `.github/workflows/publish.yml` and added a dedicated sdist unpack and test step; added `develop` branch to `on.push.branches` in `.github/workflows/ci.yml`; wired `device` fixture across benchmark tests and aligned `HandwrittenTransformerBlock` in `test_parity_vs_handwritten_pytorch.py` to use 3 separate `Linear` projections and `F.scaled_dot_product_attention` matching `Attention`; intercepted production URLs in `scripts/gen_doc_pages.py` to map to internal Markdown targets.
-
-
-
 - **RMSNorm double-precision preservation (`H-06`)**: `RMSNorm.forward` preserves `float64` precision when running double-precision inputs instead of downcasting to `float32`, ensuring exact parity against `F.rms_norm` and passing `torch.autograd.gradcheck`.
 - **RoPE double-precision calculations (`M-12`)**: `attention._rope_tables` calculates frequency exponents, inverse frequencies, and angles in `float64` when `dtype=torch.float64`, preventing numerical noise and precision degradation during double-precision attention evaluation.
 - **PosEmbed sequence length bounds validation (`M-12`)**: `PosEmbed.forward` validates that input sequence length does not exceed `max_len`, raising `HNDLError("E_CONSTRAINT")` instead of silently broadcasting position 0 across longer sequences.
