@@ -447,3 +447,26 @@ def test_importing_hndl_and_its_harness_does_not_import_pytest():
             "assert 'pytest' not in sys.modules and '_pytest' not in sys.modules")
     env = dict(os.environ, PYTHONPATH=src)
     subprocess.run([sys.executable, "-c", code], check=True, env=env)
+
+
+def test_example_multi_port_shapes_and_container_validation():
+    from hndl.operator import Example
+
+    # Multi-port mapping preserved
+    ex = Example("linear(10)", input_shape={"x": ("B", 4), "y": ("B", 6)},
+                 output_shape={"out": ("B", 10)}, note="Multi-port example")
+    assert ex.input_shape == {"x": ("B", 4), "y": ("B", 6)}
+    assert ex.output_shape == {"out": ("B", 10)}
+    assert ex.inputs == ex.input_shape
+    assert ex.outputs == ex.output_shape
+
+    # Invalid shape container types rejected
+    with pytest.raises(HNDLError, match="E_REGISTRY"):
+        Example("linear(10)", input_shape="B, 4", output_shape=("B", 10))
+
+    with pytest.raises(HNDLError, match="E_REGISTRY"):
+        Example("linear(10)", input_shape=123, output_shape=("B", 10))
+
+    with pytest.raises(HNDLError, match="E_REGISTRY"):
+        Example("linear(10)", input_shape={"x": "B, 4"}, output_shape=("B", 10))
+

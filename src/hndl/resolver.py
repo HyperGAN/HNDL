@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from collections.abc import Mapping
+import keyword
 from math import prod
 import re
 import warnings
@@ -9,6 +10,7 @@ import warnings
 from .errors import HNDLError, source_location
 from .operator import COMPUTE_DTYPES, ELLIPSIS, INDEX_DTYPES, NodeView, SUPPORTED_RANKS, Sym
 from .registry import Registry, normalize_arguments
+from .settings import SCHEME_NAMES
 from .types import (BATCH, EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, ResolvedNode, ResolvedPlan,
                     batch_multiple)
 
@@ -34,6 +36,21 @@ def _limits(overrides):
     if any(type(value) is not int or value <= 0 for value in result.values()):
         raise HNDLError("E_RESOURCE", "All resource limits must be positive integers")
     return result
+
+
+def _validate_port_reservations(ports, registry):
+    ports = set(ports)
+    keywords = sorted(name for name in ports if keyword.iskeyword(name))
+    if keywords:
+        raise HNDLError("E_SCHEMA", f"External port names must not be Python keywords: {', '.join(keywords)}")
+    if "range" in ports:
+        raise HNDLError("E_NAME", "External port names collide with reserved loop iterator: range")
+    schemes = sorted(ports & SCHEME_NAMES)
+    if schemes:
+        raise HNDLError("E_NAME", f"External port names collide with initializer schemes: {', '.join(schemes)}")
+    aliases = sorted(ports & set(registry.aliases))
+    if aliases:
+        raise HNDLError("E_NAME", f"External port names collide with operator aliases: {', '.join(aliases)}")
 
 
 def _contract(shape, label, limits, *, multiples=False):
@@ -465,6 +482,7 @@ def resolve_graph(graph, registry=None, limits=None):
     registry = Registry.builtins() if registry is None else registry
     if not isinstance(registry, Registry):
         raise HNDLError("E_REGISTRY", "registry must be an explicit Registry")
+    _validate_port_reservations(set(graph.inputs) | set(graph.outputs), registry)
     limits = _limits(limits)
     if graph.dtype not in COMPUTE_DTYPES:
         raise HNDLError("E_SCHEMA", f"dtype must be one of {', '.join(COMPUTE_DTYPES)}")

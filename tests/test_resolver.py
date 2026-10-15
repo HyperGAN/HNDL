@@ -136,3 +136,30 @@ def test_huge_concat_input_count_rejected_before_materializing_ports():
     node = Node("join", "concat@1", {"input_count": 2**31 - 1}, {})
     with pytest.raises(HNDLError, match="max_edges"):
         resolve_graph(Graph((node,), ("B", 4), ("B", 4), "node:join/out"))
+
+
+def test_resolve_graph_rejects_reserved_ports():
+    # Operator alias port
+    graph_alias = Graph(nodes=(), input_shape=("B", 4), output_shape=("B", 4), output_ref="input:linear",
+                        named_inputs={"linear": {"shape": ("B", 4), "dtype": "float32"}},
+                        named_outputs={"output": {"shape": ("B", 4), "ref": "input:linear"}})
+    with pytest.raises(HNDLError, match="E_NAME") as exc:
+        resolve_graph(graph_alias)
+    assert "collide with operator aliases: linear" in exc.value.message
+
+    # range port
+    graph_range = Graph(nodes=(), input_shape=("B", 4), output_shape=("B", 4), output_ref="input:range",
+                        named_inputs={"range": {"shape": ("B", 4), "dtype": "float32"}},
+                        named_outputs={"output": {"shape": ("B", 4), "ref": "input:range"}})
+    with pytest.raises(HNDLError, match="E_NAME") as exc:
+        resolve_graph(graph_range)
+    assert "collide with reserved loop iterator: range" in exc.value.message
+
+    # scheme port
+    graph_scheme = Graph(nodes=(), input_shape=("B", 4), output_shape=("B", 4), output_ref="input:normal",
+                         named_inputs={"normal": {"shape": ("B", 4), "dtype": "float32"}},
+                         named_outputs={"output": {"shape": ("B", 4), "ref": "input:normal"}})
+    with pytest.raises(HNDLError, match="E_NAME") as exc:
+        resolve_graph(graph_scheme)
+    assert "collide with initializer schemes: normal" in exc.value.message
+

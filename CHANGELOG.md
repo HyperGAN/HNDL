@@ -7,6 +7,10 @@
 - **Empty tuple target rejection and tensor tuple locations (`M-03`)**: Empty tuple assignments (`p = ()`) are rejected with `E_SYNTAX`, and tensor tuple arity errors (`E_OUTPUT_ARITY`) report precise source line, column, and loop iteration diagnostics.
 - **Declarative f-string rejection (`M-04`)**: Formatted string literals (`f"..."`, `F"..."`, `fr"..."`, `rf"..."`) are rejected during token screening before AST parsing with `E_SYNTAX`.
 - **Loop collision diagnostic clarification (`L-01`)**: Duplicate node name collisions inside loops now distinguish whether the conflicting earlier node had an explicit name, an earlier loop suffix, or an auto-generated ID.
+- **Explicit input dtype validation (`M-05`)**: Falsy `input_dtype` values (`""`, `False`, `0`, `()`) are preserved and rejected with `E_SCHEMA` rather than silently coerced to `float32`.
+- **External port name reservation checks (`M-06`)**: External port names matching Python keywords (`for`, `def`), loop iterator (`range`), initializer schemes (`normal`, `uniform`), or operator aliases are strictly rejected across `Graph` definitions, `Capture`, and `resolve_graph`.
+- **Callable capture diagnostic attribution (`L-02`)**: Errors raised during callable capture (argument validation, port binding, and initialization) preserve explicit node names (`node=`) in diagnostics.
+- **Container type validation (`L-05`)**: `Example.input_shape`/`output_shape` and `Node.args`/`inputs`/`outputs` validate container types and protect against accidental string slicing or key-dropping.
 
 ## 0.8.0 (2026-09-26)
 

@@ -284,12 +284,30 @@ class Example(Immutable):
     def __post_init__(self):
         if type(self.source) is not str or not self.source.strip():
             _registry_error("Example source must be a non-empty configuration string")
-        object.__setattr__(self, "input_shape", tuple(self.input_shape))
-        object.__setattr__(self, "output_shape", tuple(self.output_shape))
+
+        def _freeze_contract(contract, label):
+            if isinstance(contract, Mapping):
+                if not contract:
+                    _registry_error(f"Example {label} must not be empty")
+                frozen = {}
+                for k, v in contract.items():
+                    if not isinstance(k, str) or isinstance(v, str) or not isinstance(v, (tuple, list)):
+                        _registry_error(f"Example {label}[{k!r}] must be a shape sequence")
+                    frozen[k] = tuple(v)
+                return MappingProxyType(frozen)
+            if isinstance(contract, str) or not isinstance(contract, (tuple, list)):
+                _registry_error(f"Example {label} must be a shape sequence or mapping of shape sequences")
+            return tuple(contract)
+
+        object.__setattr__(self, "input_shape", _freeze_contract(self.input_shape, "input_shape"))
+        object.__setattr__(self, "output_shape", _freeze_contract(self.output_shape, "output_shape"))
         if self.input_dtype is not None and self.input_dtype not in COMPUTE_DTYPES + INDEX_DTYPES:
             _registry_error(f"Example input_dtype must be one of {', '.join(COMPUTE_DTYPES + INDEX_DTYPES)}")
         if type(self.network) is not bool:
             _registry_error("Example network flag must be a boolean")
+
+    inputs = property(lambda self: self.input_shape)
+    outputs = property(lambda self: self.output_shape)
 
 
 def _validate_name(name, kind):

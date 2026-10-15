@@ -8,7 +8,7 @@ import re
 
 from .errors import HNDLError, source_location
 from .registry import Registry, normalize_arguments
-from .resolver import _limits
+from .resolver import _limits, _validate_port_reservations
 from .settings import normalize_settings
 from .types import (EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, named_contracts,
                     named_dtypes)
@@ -45,8 +45,8 @@ class Symbol:
         raise HNDLError("E_CAPTURE", "Use registered symbolic operators instead of eager torch operations")
 
 
-def _error(code, message, source=None):
-    return HNDLError(code, message, **source_location(source))
+def _error(code, message, source=None, node=None):
+    return HNDLError(code, message, node=node, **source_location(source))
 
 
 def _foreign_operator(registry, op):
@@ -72,12 +72,10 @@ class Capture:
         self.registry = Registry.builtins() if registry is None else registry
         shapes, self.named_inputs = named_contracts(input_shape, "input_shape", EXTERNAL_INPUT)
         dtypes = named_dtypes(input_dtype, tuple(shapes))
-        self.input_contracts = {name: {"shape": shape, "dtype": dtypes[name] or dtype}
+        self.input_contracts = {name: {"shape": shape, "dtype": dtype if dtypes[name] is None else dtypes[name]}
                                 for name, shape in shapes.items()}
         self.output_contracts, self.named_outputs = named_contracts(output_shape, "output_shape", EXTERNAL_OUTPUT)
-        reserved = sorted((set(self.input_contracts) | set(self.output_contracts)) & set(self.registry.aliases))
-        if reserved:
-            raise HNDLError("E_NAME", f"External port names collide with operator aliases: {', '.join(reserved)}")
+        _validate_port_reservations(set(self.input_contracts) | set(self.output_contracts), self.registry)
         self.input_shape = next(iter(self.input_contracts.values()))["shape"]
         self.output_shape = next(iter(self.output_contracts.values()))
         self.dtype = dtype
@@ -99,9 +97,9 @@ class Capture:
         _ACTIVE.reset(self._token)
         self._token = None
 
-    def _symbol(self, value, source=None):
+    def _symbol(self, value, source=None, node=None):
         if not isinstance(value, Symbol) or value._owner is not self:
-            raise _error("E_CAPTURE", "Input must be a symbolic tensor from this capture", source)
+            raise _error("E_CAPTURE", "Input must be a symbolic tensor from this capture", source, node=node)
         return value
 
     def emit(self, op, positional, keyword, *, source=None):
@@ -110,21 +108,22 @@ class Capture:
         # may run in any capture whose registry holds that very declaration,
         # as every registry built from ``Registry.builtins()`` does for the
         # built-ins, and nowhere else.
-        if self.registry._identities.get(op.key) is not op:
-            raise _error("E_CAPTURE", _foreign_operator(self.registry, op), source)
         args = list(positional)
         kwargs = dict(keyword)
         name = kwargs.pop("name", _DEFAULT)
+        node_context = name if (name is not _DEFAULT and isinstance(name, str) and _NODE_ID.fullmatch(name)) else None
+        if self.registry._identities.get(op.key) is not op:
+            raise _error("E_CAPTURE", _foreign_operator(self.registry, op), source, node=node_context)
         policy = kwargs.pop("policy", _DEFAULT)
         construction = {key: kwargs.pop(key) for key in ("init", "trainable") if key in kwargs}
         try:
             initialization, trainability = normalize_settings(**construction)
         except HNDLError as exc:
             if source is not None and exc.line is None:
-                raise _error(exc.code, exc.message, source) from None
-            raise
+                raise _error(exc.code, exc.message, source, node=exc.node or node_context) from None
+            raise HNDLError(exc.code, exc.message, node=exc.node or node_context, **source_location(source)) from None
         if policy is not _DEFAULT and type(policy) is not str:
-            raise _error("E_ARGUMENT", "policy must be a registered policy name", source)
+            raise _error("E_ARGUMENT", "policy must be a registered policy name", source, node=node_context)
         policy = None if policy is _DEFAULT else policy
         ports = tuple(op.input_ports)
         bindings = {}
@@ -133,50 +132,50 @@ class Capture:
             prefix = op.variadic
             count = 0
             while args and isinstance(args[0], Symbol):
-                bindings[f"{prefix}{count}"] = self._symbol(args.pop(0), source)
+                bindings[f"{prefix}{count}"] = self._symbol(args.pop(0), source, node=node_context)
                 count += 1
             for key in tuple(kwargs):
                 if re.fullmatch(re.escape(prefix) + r"[0-9]+", key):
                     if key in bindings:
-                        raise _error("E_BINDING", f"Duplicate input binding {key}", source)
-                    bindings[key] = self._symbol(kwargs.pop(key), source)
+                        raise _error("E_BINDING", f"Duplicate input binding {key}", source, node=node_context)
+                    bindings[key] = self._symbol(kwargs.pop(key), source, node=node_context)
             if len(bindings) < 2 or set(bindings) != {f"{prefix}{i}" for i in range(len(bindings))}:
-                raise _error("E_BINDING", f"Variadic inputs require contiguous {prefix}0...{prefix}N bindings with at least two tensors", source)
+                raise _error("E_BINDING", f"Variadic inputs require contiguous {prefix}0...{prefix}N bindings with at least two tensors", source, node=node_context)
             if "input_count" in kwargs and (type(kwargs["input_count"]) is not int
                                              or kwargs["input_count"] != len(bindings)):
-                raise _error("E_BINDING", "input_count does not match supplied tensors", source)
+                raise _error("E_BINDING", "input_count does not match supplied tensors", source, node=node_context)
             kwargs["input_count"] = len(bindings)
         elif len(ports) == 1:
             port = ports[0]
             if args and isinstance(args[0], Symbol):
-                bindings[port] = self._symbol(args.pop(0), source)
+                bindings[port] = self._symbol(args.pop(0), source, node=node_context)
             if port in kwargs:
                 if port in bindings:
-                    raise _error("E_BINDING", f"Duplicate input binding {port}", source)
-                bindings[port] = self._symbol(kwargs.pop(port), source)
+                    raise _error("E_BINDING", f"Duplicate input binding {port}", source, node=node_context)
+                bindings[port] = self._symbol(kwargs.pop(port), source, node=node_context)
             if port not in bindings:
                 if self.current is None:
-                    raise _error("E_CURRENT", "No current tensor; supply an explicit input after a multi-output operation", source)
+                    raise _error("E_CURRENT", "No current tensor; supply an explicit input after a multi-output operation", source, node=node_context)
                 bindings[port] = self.current
         else:
             for port in ports:
                 if args and isinstance(args[0], Symbol):
-                    bindings[port] = self._symbol(args.pop(0), source)
+                    bindings[port] = self._symbol(args.pop(0), source, node=node_context)
                 if port in kwargs:
                     if port in bindings:
-                        raise _error("E_BINDING", f"Duplicate input binding {port}", source)
-                    bindings[port] = self._symbol(kwargs.pop(port), source)
+                        raise _error("E_BINDING", f"Duplicate input binding {port}", source, node=node_context)
+                    bindings[port] = self._symbol(kwargs.pop(port), source, node=node_context)
                 if port not in bindings:
-                    raise _error("E_BINDING", f"Multi-input operation requires explicit port {port}", source)
+                    raise _error("E_BINDING", f"Multi-input operation requires explicit port {port}", source, node=node_context)
 
         if name is _DEFAULT:
             name = f"n{len(self.nodes)}"
         if type(name) is not str or _NODE_ID.fullmatch(name) is None:
             raise _error("E_NAME", "Node names must match [a-z][a-z0-9_]*", source)
         if name in self._ids:
-            raise _error("E_NAME", f"Duplicate node name {name!r}", source)
+            raise _error("E_NAME", f"Duplicate node name {name!r}", source, node=name)
         if len(self.nodes) >= self.max_nodes:
-            raise _error("E_RESOURCE", "Graph exceeds max_nodes", source)
+            raise _error("E_RESOURCE", "Graph exceeds max_nodes", source, node=name)
 
         explicit = set(kwargs)
         if args:
@@ -185,8 +184,8 @@ class Capture:
             normalized = normalize_arguments(op, tuple(args), kwargs, policy=policy)
         except HNDLError as exc:
             if source is not None and exc.line is None:
-                raise _error(exc.code, exc.message, source) from None
-            raise
+                raise _error(exc.code, exc.message, source, node=exc.node or node_context) from None
+            raise HNDLError(exc.code, exc.message, node=exc.node or node_context, **source_location(source)) from None
         profile = op.policies[policy] if policy else None
         policy_fields = set(profile.requires) if profile else set()
         metadata = dict(source or {})

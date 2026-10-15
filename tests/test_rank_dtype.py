@@ -133,3 +133,18 @@ def test_omitted_lookup_width_is_solved_or_reported():
     with pytest.raises(HNDLError, match="E_AMBIGUOUS"):
         resolve("lookup()\nlinear(3)", input_shape=("B", 7), output_shape=("B", 7, 3), input_dtype="int64",
                 registry=registry)
+
+
+@pytest.mark.parametrize("falsy_dtype", ["", False, 0, ()])
+def test_falsy_input_dtype_fails_with_schema_error(falsy_dtype):
+    with pytest.raises(HNDLError, match="E_SCHEMA") as exc:
+        resolve("linear(4)", input_shape=("B", 3), output_shape=("B", 4), input_dtype=falsy_dtype)
+    assert "input_dtype" in exc.value.message
+
+
+def test_falsy_named_input_dtype_fails_with_schema_error():
+    with pytest.raises(HNDLError, match="E_SCHEMA") as exc:
+        resolve("concat(x, y)", input_shape={"x": ("B", 4), "y": ("B", 4)},
+                output_shape=("B", 8), input_dtype={"x": "", "y": "float32"})
+    assert "input_dtype[x]" in exc.value.message
+

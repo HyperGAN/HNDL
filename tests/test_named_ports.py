@@ -253,3 +253,23 @@ def test_custom_operator_and_parameter_counts_with_named_ports():
     assert parameter_counts(model.plan, registry=registry) == {"n0": 0, "n1": 0}
     result = model(torch.ones(2, 3), torch.ones(2, 3))
     torch.testing.assert_close(result, torch.full((2, 3), 2.0))
+
+
+@pytest.mark.parametrize("bad_port,error_code,match_msg", [
+    ("for", "E_SCHEMA", "must not be Python keywords"),
+    ("def", "E_SCHEMA", "must not be Python keywords"),
+    ("range", "E_NAME", "collide with reserved loop iterator: range"),
+    ("normal", "E_NAME", "collide with initializer schemes: normal"),
+    ("uniform", "E_NAME", "collide with initializer schemes: uniform"),
+])
+def test_external_port_reservations(bad_port, error_code, match_msg):
+    # Input port
+    with pytest.raises(HNDLError, match=error_code) as exc_in:
+        resolve("linear(3)", input_shape={bad_port: ("B", 4)}, output_shape=("B", 3))
+    assert match_msg in exc_in.value.message
+
+    # Output port
+    with pytest.raises(HNDLError, match=error_code) as exc_out:
+        resolve("linear(3)", input_shape=("B", 4), output_shape={bad_port: ("B", 3)})
+    assert match_msg in exc_out.value.message
+

@@ -185,3 +185,24 @@ print(plan.semantic_digest)
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == plan.semantic_digest
+
+
+def test_node_container_type_validation():
+    from hndl.types import Node
+
+    # outputs must not be a string
+    with pytest.raises(TypeError, match="Node outputs must be a sequence of strings"):
+        Node("n0", "linear@1", outputs="out")
+
+    # args must be a Mapping
+    with pytest.raises(TypeError, match="Node args must be a Mapping"):
+        Node("n0", "linear@1", args=[1, 2, 3])
+
+    # inputs must be a Mapping
+    with pytest.raises(TypeError, match="Node inputs must be a Mapping"):
+        Node("n0", "linear@1", inputs=["input:x"])
+
+    # outputs elements must be strings
+    with pytest.raises(TypeError, match="All output ports must be strings"):
+        Node("n0", "linear@1", outputs=(1, 2))
+

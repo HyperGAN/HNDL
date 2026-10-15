@@ -193,3 +193,51 @@ def test_argument_origin_metadata_distinguishes_policy_and_defaults():
     assert source["argument_origins"]["stride"] == "policy-selected"
     assert source["argument_origins"]["bias"] == "operator default"
     assert source["policy"] == "spatial.up2_transpose@1"
+
+
+def test_callable_emit_errors_preserve_explicit_node_context():
+    from hndl import resolve_callable
+
+    # 1. Argument error
+    with pytest.raises(HNDLError) as exc1:
+        resolve_callable(lambda x: ops.linear(x, name="custom_linear", invalid_kwarg=42),
+                         input_shape=("B", 10), output_shape=("B", 20))
+    assert exc1.value.node == "custom_linear"
+    assert exc1.value.code == "E_ARGUMENT"
+    assert "node custom_linear" in str(exc1.value)
+
+    # 2. Binding error (duplicate binding)
+    with pytest.raises(HNDLError) as exc2:
+        resolve_callable(lambda x: ops.linear(x, x=x, name="dup_binding"),
+                         input_shape=("B", 10), output_shape=("B", 20))
+    assert exc2.value.node == "dup_binding"
+    assert exc2.value.code == "E_BINDING"
+    assert "node dup_binding" in str(exc2.value)
+
+    # 3. Variadic binding error
+    with pytest.raises(HNDLError) as exc3:
+        resolve_callable(lambda x: ops.concat(x, name="unary_concat"),
+                         input_shape=("B", 10), output_shape=("B", 20))
+    assert exc3.value.node == "unary_concat"
+    assert exc3.value.code == "E_BINDING"
+
+    # 4. Settings error (invalid initialization)
+    with pytest.raises(HNDLError) as exc4:
+        resolve_callable(lambda x: ops.linear(x, name="bad_init", init={"weight": "unknown_scheme"}),
+                         input_shape=("B", 10), output_shape=("B", 20))
+    assert exc4.value.node == "bad_init"
+    assert exc4.value.code == "E_INITIALIZATION"
+
+    # 5. Policy error
+    with pytest.raises(HNDLError) as exc5:
+        resolve_callable(lambda x: ops.linear(x, name="bad_policy", policy=123),
+                         input_shape=("B", 10), output_shape=("B", 20))
+    assert exc5.value.node == "bad_policy"
+    assert exc5.value.code == "E_ARGUMENT"
+
+    # 6. Unnamed node does not invent node name
+    with pytest.raises(HNDLError) as exc6:
+        resolve_callable(lambda x: ops.linear(x, invalid_kwarg=42),
+                         input_shape=("B", 10), output_shape=("B", 20))
+    assert exc6.value.node is None
+

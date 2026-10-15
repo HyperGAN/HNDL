@@ -1,12 +1,13 @@
 """Immutable, torch-free graph records and portable resolved plans."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
+import keyword
 import math
 import re
 from types import MappingProxyType
-from collections.abc import Mapping
 
 from .errors import HNDLError
 from .settings import (normalize_initialization, normalize_trainability,
@@ -133,6 +134,8 @@ def named_contracts(value, label, default_name):
         for name in names:
             if type(name) is not str or _PORT_NAME.fullmatch(name) is None:
                 raise HNDLError("E_SCHEMA", f"{label} names must match [a-z][a-z0-9_]*")
+            if keyword.iskeyword(name):
+                raise HNDLError("E_SCHEMA", f"{label} names must not be Python keywords")
         return {name: _shape(value[name], f"{label}[{name}]") for name in names}, True
     return {default_name: _shape(value, label)}, False
 
@@ -166,7 +169,7 @@ def _external_ports(record):
         inputs = {}
         for name, entry in _entries(record.named_inputs, "inputs", ("shape",), ("dtype",)):
             inputs[name] = {"shape": _shape(entry["shape"], f"input_shape[{name}]"),
-                            "dtype": entry.get("dtype") or record.dtype}
+                            "dtype": record.dtype if entry.get("dtype") is None else entry.get("dtype")}
     leading = next(iter(inputs.values()))
     object.__setattr__(record, "input_shape", leading["shape"])
     object.__setattr__(record, "input_dtype", leading["dtype"])
@@ -196,6 +199,8 @@ def _entries(mapping, label, required, optional):
     for name, entry in mapping.items():
         if type(name) is not str or _PORT_NAME.fullmatch(name) is None:
             raise HNDLError("E_SCHEMA", f"External {label} names must match [a-z][a-z0-9_]*")
+        if keyword.iskeyword(name):
+            raise HNDLError("E_SCHEMA", f"External {label} names must not be Python keywords")
         if (not isinstance(entry, Mapping) or set(required) - set(entry)
                 or set(entry) - set(required) - set(optional)):
             raise HNDLError("E_SCHEMA", f"Each external {label[:-1]} declares {', '.join(required)}")
@@ -255,6 +260,14 @@ class Node(Immutable):
     trainability: Mapping = field(default_factory=normalize_trainability, kw_only=True)
 
     def __post_init__(self):
+        if not isinstance(self.args, Mapping):
+            raise TypeError(f"Node args must be a Mapping, got {type(self.args).__name__}")
+        if not isinstance(self.inputs, Mapping):
+            raise TypeError(f"Node inputs must be a Mapping, got {type(self.inputs).__name__}")
+        if isinstance(self.outputs, str) or not isinstance(self.outputs, (tuple, list)):
+            raise TypeError(f"Node outputs must be a sequence of strings, got {type(self.outputs).__name__}")
+        if not all(isinstance(port, str) for port in self.outputs):
+            raise TypeError("All output ports must be strings")
         object.__setattr__(self, "args", freeze(self.args))
         object.__setattr__(self, "inputs", freeze(self.inputs))
         object.__setattr__(self, "outputs", tuple(self.outputs))
