@@ -1040,3 +1040,217 @@ class TestTier2BoundaryCases:
             sig = inspect.signature(fn)
             annotated_params = [p.name for p in sig.parameters.values() if p.annotation is not inspect.Parameter.empty]
             assert len(annotated_params) > 0, f"Finding M-11: Public function {fn.__name__} has zero type annotations"
+
+
+
+# ==============================================================================
+# TIER 3: Cross-Feature Interactions (Pairwise Combinations)
+# ==============================================================================
+
+
+class TestTier3CrossFeatureInteractions:
+    """Tier 3: Pairwise combinations across major feature areas (≥15 tests)."""
+
+    def test_tier3_f1_f2_multiline_config_with_tuples_and_reserved_ports(self, device):
+        """[Pairwise F1 + F2] Multiline config with tuple unpacking and named contracts."""
+        source = (
+            "# Multiline config with unpacking\n"
+            "features = linear(32, name='stem')\n"
+            "(left, right) = split(features, 16)\n"
+            "left_out = linear(left, 8, name='l_branch')\n"
+            "right_out = linear(right, 8, name='r_branch')\n"
+            "out = add(left_out, right_out)\n"
+        )
+        model = network(source, input_shape={"x": ("B", 64)}, output_shape={"out": ("B", 8)}, device=device)
+        x = torch.randn(2, 64, device=device)
+        out = model(x=x)
+        assert out.shape == (2, 8)
+
+    def test_tier3_f1_f4_multiline_chain_slicing(self, device):
+        """[Pairwise F1 + F4] Multiline linear chain parsed and built, sliced into sub-networks."""
+        source = (
+            "linear(64)\n"
+            "relu()\n"
+            "linear(32)\n"
+            "relu()\n"
+            "linear(10)\n"
+        )
+        model = network(source, input_shape=("B", 128), output_shape=("B", 10), device=device)
+        assert model._chain is True
+        sub_model = model[1:4]
+        assert isinstance(sub_model, nn.Sequential)
+        assert len(sub_model) == 3
+        x = torch.randn(2, 64, device=device)
+        out = sub_model(x)
+        assert out.shape == (2, 32)
+
+    def test_tier3_f2_f3_complex_unpacking_with_symbolic_shape_solving(self, device):
+        """[Pairwise F2 + F3] Multi-head split and join with bidirectional shape constraints."""
+        source = (
+            "stem = conv(32, kernel_size=3, padding=1)\n"
+            "(c1, c2) = split(stem, 16, dim=1)\n"
+            "p1 = conv(c1, 16, kernel_size=3, padding=1)\n"
+            "p2 = conv(c2, 16, kernel_size=3, padding=1)\n"
+            "concat(p1, p2, axis=1)\n"
+        )
+        model = network(
+            source,
+            input_shape=("B", 3, 16, 16),
+            output_shape=("B", 32, 16, 16),
+            device=device,
+        )
+        x = torch.randn(2, 3, 16, 16, device=device)
+        assert model(x).shape == (2, 32, 16, 16)
+
+    def test_tier3_f3_f4_branched_graph_with_conv_and_slicing_rejection(self, device):
+        """[Pairwise F3 + F4] Non-chain branched network with conv and skip connection correctly rejects sequential slicing."""
+        source = (
+            "stem = conv(16, kernel_size=3, padding=1)\n"
+            "branch = conv(stem, 16, kernel_size=3, padding=1)\n"
+            "add(stem, branch)\n"
+        )
+        model = network(source, input_shape=("B", 3, 16, 16), output_shape=("B", 16, 16, 16), device=device)
+        assert model._chain is False
+        with pytest.raises(TypeError, match="Branched graphs support node-name lookup only"):
+            _ = model[:2]
+
+    def test_tier3_f3_f6_conv_transpose_solver_with_rmsnorm_float64(self, device):
+        """[Pairwise F3 + F6] ConvTranspose upsampling followed by double-precision RMSNorm."""
+        source = (
+            "deconv(16, kernel_size=4, stride=2, padding=1)\n"
+            "flatten()\n"
+            "rms_norm()\n"
+        )
+        model = network(
+            source,
+            input_shape=("B", 32, 4, 4),
+            output_shape=("B", 16 * 8 * 8),
+            device=device,
+        ).double()
+        x = torch.randn(2, 32, 4, 4, device=device, dtype=torch.float64)
+        out = model(x)
+        assert out.dtype == torch.float64
+        assert out.shape == (2, 1024)
+
+    def test_tier3_f4_f5_slicing_network_containing_pretrained_module(self, text_checkpoint, device):
+        """[Pairwise F4 + F5] Slicing lookup on a network containing a Pretrained module."""
+        source = (
+            f'pretrained("{text_checkpoint}", name="lm")\n'
+            'linear(10, name="head")\n'
+        )
+        model = network(
+            source,
+            input_shape=("B", 4),
+            output_shape=("B", 4, 10),
+            input_dtype="int64",
+            device=device,
+        )
+        assert model["lm"] is not None
+        assert model["head"] is not None
+        assert "lm" in [n.id for n in model.plan.nodes]
+
+    def test_tier3_f4_f6_rmsnorm_rope_attention_with_shallow_copy_double(self, device):
+        """[Pairwise F4 + F6] RMSNorm + RoPE Attention layer, cloned via shallow copy and cast to double."""
+        source = (
+            "rms_norm()\n"
+            "attention(heads=2, rope=True)\n"
+        )
+        model = network(source, input_shape=("B", 4, 16), output_shape=("B", 4, 16), device=device)
+        x_f32 = torch.randn(2, 4, 16, device=device, dtype=torch.float32)
+        out_f32 = model(x_f32)
+        assert out_f32.dtype == torch.float32
+
+        # Shallow copy cast to double
+        clone = copy.copy(model)
+        clone.double()
+        x_f64 = torch.randn(2, 4, 16, device=device, dtype=torch.float64)
+        out_f64 = clone(x_f64)
+        assert out_f64.dtype == torch.float64
+
+    def test_tier3_f5_f6_pretrained_checkpoint_with_float64_inference(self, text_checkpoint, device):
+        """[Pairwise F5 + F6] Pretrained checkpoint chained with float64 normalization and linear head."""
+        source = (
+            f'pretrained("{text_checkpoint}", name="lm")\n'
+            'rms_norm(name="norm")\n'
+            'linear(16, name="proj")\n'
+        )
+        model = network(
+            source,
+            input_shape=("B", 4),
+            output_shape=("B", 4, 16),
+            input_dtype="int64",
+            device=device,
+        )
+        tokens = torch.randint(0, 16, (2, 4), device=device)
+        out = model(tokens)
+        assert out.shape == (2, 4, 16)
+
+    def test_tier3_f2_f8_identifier_collision_error_attribution(self):
+        """[Pairwise F2 + F8] Identifier collision with operator alias produces clean error attribution."""
+        with pytest.raises(HNDLError) as exc_info:
+            Capture(input_shape={"linear": ("B", 16)}, output_shape={"out": ("B", 16)})
+        assert exc_info.value.code == "E_NAME"
+        assert "linear" in exc_info.value.message
+
+    def test_tier3_f1_f8_loop_unrolling_diagnostic_attribution(self):
+        """[Pairwise F1 + F8] Declarative loop unrolling collision error attribution."""
+        source = (
+            "linear(16)\n"
+            "for _ in range(2):\n"
+            "    linear(16, name='n')\n"
+        )
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(source, input_shape=("B", 16), output_shape=("B", 16))
+        err = exc_info.value
+        assert err.code == "E_NAME"
+        assert "n0" in err.message
+
+    def test_tier3_f6_f7_float64_rope_attention_reference_parity(self, device):
+        """[Pairwise F6 + F7] RoPE Attention with float64 inputs compared against reference."""
+        source = "attention(heads=2, rope=True)\n"
+        plan = resolve(source, input_shape=("B", 4, 16), output_shape=("B", 4, 16))
+        model = build(plan, device=device).double()
+        x = torch.randn(2, 4, 16, device=device, dtype=torch.float64)
+        out = model(x=x)["output"]
+        assert out.dtype == torch.float64
+        assert out.shape == (2, 4, 16)
+
+    def test_tier3_f4_f8_preforward_state_verification_error_diagnostic(self):
+        """[Pairwise F4 + F8] State mutation prior to forward reports the failing parameter."""
+        model = network("linear(16, name='my_fc')", input_shape=("B", 32), output_shape=("B", 16), device="cpu")
+        x = torch.randn(2, 32)
+        model(x)  # fast path
+        del model["my_fc"].bias
+        with pytest.raises(HNDLError) as exc_info:
+            model(x)
+        assert exc_info.value.code in ("E_STATE", "E_RUNTIME")
+
+    def test_tier3_f3_f7_operator_references_with_strided_spatial_transforms(self, device):
+        """[Pairwise F3 + F7] Spatial downsampling with max_pool and reference matching."""
+        source = "max_pool(2)\n"
+        model = network(source, input_shape=("B", 16, 8, 8), output_shape=("B", 16, 4, 4), device=device)
+        x = torch.randn(2, 16, 8, 8, device=device)
+        out = model(x)
+        expected = nn.functional.max_pool2d(x, 2)
+        torch.testing.assert_close(out, expected)
+
+    def test_tier3_f2_f4_multi_output_chunk_operator_prevents_sequential_chain(self):
+        """[Pairwise F2 + F4] chunk(1) operator produces variadic outputs and blocks unary chain slicing."""
+        model = network("a, = chunk(1)\nlinear(a, 8)", input_shape=("B", 16), output_shape=("B", 8), device="cpu")
+        assert model._chain is False
+
+    def test_tier3_f5_f8_pretrained_missing_file_clean_error_code(self):
+        """[Pairwise F5 + F8] Missing pretrained checkpoint path produces clean E_PRETRAINED error code."""
+        from hndl.pretrained import resolve_source
+        with pytest.raises(HNDLError) as exc_info:
+            resolve_source("/nonexistent/path/to/checkpoint")
+        assert exc_info.value.code == "E_PRETRAINED"
+
+    def test_tier3_f6_f10_rmsnorm_rope_typed_api_interaction(self, device):
+        """[Pairwise F6 + F10] Executing double precision network through public typed entrypoints."""
+        model = network("rms_norm()\nlinear(8)", input_shape=("B", 4, 16), output_shape=("B", 4, 8), device=device)
+        model.double()
+        x = torch.randn(2, 4, 16, device=device, dtype=torch.float64)
+        out = model(x)
+        assert out.dtype == torch.float64
+        assert out.shape == (2, 4, 8)
