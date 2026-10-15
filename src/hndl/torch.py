@@ -6,6 +6,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 import copy
+import heapq
 import itertools
 import operator
 import os
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 # describing the resolved architecture, never the parameters that train.
 SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes",
                              "_input_names", "_input_set", "_input_dtypes", "_output_dtypes",
-                             "_build_dtype", "_node_labels",
+                             "_build_dtype", "_node_labels", "_single_output",
                              "_spec_inputs", "_spec_outputs", "_spec_in", "_spec_out"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
@@ -106,7 +107,8 @@ _NONES = itertools.repeat(None)
 
 def _registration_hook(module, name, value):
     global _watch_generation
-    if _watched.get(id(module)) is module:
+    wr = _watched.data.get(id(module))
+    if wr is not None and wr() is module:
         _watch_generation = next(_ticks)
     # Returning None leaves the registration exactly as the caller asked.
 
@@ -283,6 +285,7 @@ class GraphModule(nn.Module):
         _watch(self._state_program)
         self._state_seen = _watch_generation
         self._stores = self._record_stores()
+        self._single_output = len(plan.outputs) == 1
         self.build_receipt = MappingProxyType(receipt)
 
     def __setattr__(self, name, value):
@@ -550,8 +553,10 @@ class GraphModule(nn.Module):
         tensor_stores = [store for module in modules for store in (module._parameters, module._buffers)]
         same = tuple([module._modules for module in modules] + [store for store in tensor_stores if not store])
         views = tuple([store.values() for store in tensor_stores if store])
-        dtypes_devices = [(t.dtype, t.device) if t is not None else None for t in _chain(views)]
-        return same, tuple(map(dict, same)), views, [*map(len, views), *map(_is, _chain(views), _NONES), *dtypes_devices]
+        ids = [*map(len, views), *map(id, _chain(views))]
+        shape = [*map(len, views), *map(_is, _chain(views), _NONES),
+                 *[(t.dtype, t.device) if t is not None else None for t in _chain(views)]]
+        return same, tuple(map(dict, same)), views, ids, shape
 
     def _state_checked(self, generation):
         """Record that the registered state matched the build at ``generation``."""
@@ -650,7 +655,7 @@ class GraphModule(nn.Module):
                 resolved.append(dimension)
         return tuple(resolved)
 
-    def _resolve_shapes(self, batch):
+    def _resolve_shapes(self, batch, cache=True):
         """Bind every port's expected shape and dtype to this batch, once.
 
         The whole program is published as a single tuple, so a caller on
@@ -675,7 +680,8 @@ class GraphModule(nn.Module):
                    effective(self._output_dtypes[name]),
                    (f"output {name!r}", self._spec_outputs[name], None))
                   for name, entry in self.plan.outputs.items()))
-        self._compiled = compiled
+        if cache:
+            self._compiled = compiled
         return compiled
 
     def _build_program(self, expected_in, expected_out, effdt):
@@ -699,24 +705,66 @@ class GraphModule(nn.Module):
         """The unchecked loop: every tensor lives in a numbered slot.
 
         External inputs take the first slots in declaration order and every
-        node output the next free one, so a node's arguments are list indices
-        rather than string-keyed lookups. Each row is ``(module, arguments,
-        single output slot or None, node)``: ``arguments`` is a bare slot for
-        a one-input node, the common case, and a tuple of slots otherwise;
-        ``node`` holds what only the multi-output and failure paths read.
+        node output the next free one, recycling intermediate slots when their
+        last consumer finishes.
         """
+        output_refs = {entry["ref"] for entry in self.plan.outputs.values()}
+        last_consumer = {}
+        for i, node in enumerate(self.plan.nodes):
+            for in_ref in node.inputs.values():
+                last_consumer[in_ref] = i
+        for ref in output_refs:
+            last_consumer[ref] = len(self.plan.nodes)
+
         slots = {f"input:{name}": index for index, name in enumerate(self._input_names)}
+        num_inputs = len(self._input_names)
+        free_slots = []
+        free_set = set()
+        next_slot = num_inputs
+
         program = []
-        for node in self.plan.nodes:
+        for i, node in enumerate(self.plan.nodes):
             ins = tuple(slots[node.inputs[port]] for port in self._port_orders[node.id])
             outs = []
             for port in node.outputs:
-                slots[f"node:{node.id}/{port}"] = len(slots)
-                outs.append(slots[f"node:{node.id}/{port}"])
-            program.append((self.nodes[f"n_{node.id}"], ins[0] if len(ins) == 1 else ins,
-                            outs[0] if len(outs) == 1 else None,
-                            (ins, tuple(outs), node.outputs, frozenset(node.outputs), node.id)))
-        padding = (None,) * (len(slots) - len(self._input_names))
+                ref = f"node:{node.id}/{port}"
+                if free_slots:
+                    slot = heapq.heappop(free_slots)
+                    free_set.remove(slot)
+                else:
+                    slot = next_slot
+                    next_slot += 1
+                slots[ref] = slot
+                outs.append(slot)
+
+            # After outputs are allocated, recycle dead inputs
+            for in_ref in node.inputs.values():
+                if not in_ref.startswith("input:") and last_consumer.get(in_ref) == i:
+                    dead_slot = slots[in_ref]
+                    if dead_slot not in free_set:
+                        heapq.heappush(free_slots, dead_slot)
+                        free_set.add(dead_slot)
+
+            # Also recycle any outputs that have no consumers and are not graph outputs
+            for port in node.outputs:
+                ref = f"node:{node.id}/{port}"
+                if ref not in last_consumer:
+                    dead_slot = slots[ref]
+                    if dead_slot not in free_set:
+                        heapq.heappush(free_slots, dead_slot)
+                        free_set.add(dead_slot)
+
+            fast_ins = ins[0] if len(ins) == 1 else operator.itemgetter(*ins) if len(ins) > 1 else None
+            program.append((
+                self.nodes[f"n_{node.id}"],
+                fast_ins,
+                outs[0] if len(outs) == 1 else None,
+                (ins, tuple(outs), node.outputs, frozenset(node.outputs), node.id),
+            ))
+
+        max_slot = max(slots.values()) if slots else num_inputs - 1
+        total_slots = max(max_slot + 1, num_inputs)
+        padding = (None,) * (total_slots - num_inputs)
         outputs = tuple((name, slots[entry["ref"]]) for name, entry in self.plan.outputs.items())
         return padding, tuple(program), outputs
 
@@ -761,19 +809,20 @@ class GraphModule(nn.Module):
 
     def _run_checked(self, inputs, compiling):
         """One call with every port checked before and after its node."""
-        leading = inputs[self._input_names[0]]
+        if type(inputs) is not tuple:
+            inputs = tuple(inputs[n] for n in self._input_names)
+        leading = inputs[0]
         batch = leading.shape[0] if isinstance(leading, torch.Tensor) and leading.ndim else None
         # The resolved expectations depend on the batch and on the dtype casts
         # ``_apply`` records; the device is read live by ``_check`` instead, so
         # ``.to(device)`` needs no invalidation.
         compiled = self._compiled
         if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
-            compiled = self._resolve_shapes(batch)
+            compiled = self._resolve_shapes(batch, cache=not compiling)
         _, _, input_program, node_program, output_program = compiled
         check = self._check
         values = {}
-        for name, key, expected, dtype, port in input_program:
-            value = inputs[name]
+        for (name, key, expected, dtype, port), value in zip(input_program, inputs):
             check(value, expected, dtype, port, batch)
             values[key] = value
         for module, ins, outs, out_ports, out_set, node_id in node_program:
@@ -805,12 +854,18 @@ class GraphModule(nn.Module):
 
     def _signature(self, inputs):
         """What a validated call is keyed on, or ``None`` for a non-tensor input."""
-        key = [self.training, _autocast_enabled()]
-        for name in self._input_names:
-            value = inputs[name]
-            if not isinstance(value, torch.Tensor):
+        if type(inputs) is not tuple:
+            inputs = tuple(inputs[n] for n in self._input_names)
+        if len(inputs) == 1:
+            v = inputs[0]
+            if not isinstance(v, torch.Tensor):
                 return None
-            key += (value.shape, value.dtype, value.device)
+            return (self.training, _autocast_enabled(), v.shape, v.dtype, v.device)
+        key = [self.training, _autocast_enabled()]
+        for v in inputs:
+            if not isinstance(v, torch.Tensor):
+                return None
+            key += (v.shape, v.dtype, v.device)
         return tuple(key)
 
     def _validate(self, inputs, signature, generation, stores_changed=False):
@@ -834,33 +889,46 @@ class GraphModule(nn.Module):
         validated[signature] = True
         return outputs
 
-    def _execute(self, inputs):
+    def _execute(self, inputs, single=False):
+        if type(inputs) is not tuple:
+            inputs = tuple(inputs[n] for n in self._input_names)
         if _is_compiling():
             # Traced once per guard set, so the full checks cost nothing per
             # call there and dynamo turns them into guards.
             self._verify_state("build")
             outputs = self._run_checked(inputs, compiling=True)
             self._verify_state("forward")
+            if single:
+                return next(iter(outputs.values()))
             return outputs
         generation = _watch_generation
         signature = self._signature(inputs)
         # _record_stores, compared: submodules and empty stores by identity,
         # the other stores by length and which values are None.
-        same, copies, views, shape = self._stores
+        same, copies, views, ids, shape = self._stores
         try:
-            dtypes_devices = [(t.dtype, t.device) if t is not None else None for t in _chain(views)]
-            current_shape = [*map(len, views), *map(_is, _chain(views), _NONES), *dtypes_devices]
-            changed = same != copies or current_shape != shape
+            if same != copies:
+                changed = True
+            elif [*map(len, views), *map(id, _chain(views))] != ids:
+                dtypes_devices = [(t.dtype, t.device) if t is not None else None for t in _chain(views)]
+                current_shape = [*map(len, views), *map(_is, _chain(views), _NONES), *dtypes_devices]
+                changed = current_shape != shape
+            else:
+                changed = False
         except Exception:  # noqa: BLE001 - a submodule's own __eq__ raised
             changed = True
         if changed or generation != self._state_seen or signature not in self._validated:
-            return self._validate(inputs, signature, generation, changed)
+            outputs = self._validate(inputs, signature, generation, changed)
+            if single:
+                return next(iter(outputs.values()))
+            return outputs
         padding, program, output_slots = self._fast
-        values = [*map(inputs.__getitem__, self._input_names), *padding]
+        values = [*inputs, *padding]
         try:
             for module, ins, out, node in program:
                 result = (module(values[ins]) if type(ins) is int
-                          else module(*[values[slot] for slot in ins]))
+                          else module(*ins(values)) if ins is not None
+                          else module())
                 if out is not None and type(result) is _Tensor:
                     values[out] = result
                 else:
@@ -873,22 +941,23 @@ class GraphModule(nn.Module):
             self._annotate_failure(node_id, error, [values[slot] for slot in ins],
                                    leading.shape[0] if leading.ndim else None, after_validation=True)
             raise
-        outputs = {name: values[slot] for name, slot in output_slots}
         if _watch_generation != generation:
             # Something registered state while this call ran --- perhaps one
             # of its own modules. Check it now, as the first call would have.
             generation = _watch_generation
             self._verify_state("forward")
             self._state_checked(generation)
-        return outputs
+        if single:
+            return values[output_slots[0][1]]
+        return {name: values[slot] for name, slot in output_slots}
 
     def _bind(self, args, kwargs):
         """Bind runtime tensors to the declared external inputs, in order."""
         names = self._input_names
         if not kwargs and len(args) == len(names):
-            return dict(zip(names, args))
+            return args if type(args) is tuple else tuple(args)
         if not args and kwargs.keys() == self._input_set:
-            return kwargs
+            return tuple(kwargs[n] for n in names)
         expected = "Expected exactly the external tensor inputs " + ", ".join(repr(n) for n in names)
         if len(args) > len(names):
             raise HNDLError("E_BINDING", expected)
@@ -899,7 +968,7 @@ class GraphModule(nn.Module):
             bound[name] = value
         if set(bound) != set(names):
             raise HNDLError("E_BINDING", expected)
-        return bound
+        return tuple(bound[n] for n in names)
 
     def forward(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         return self._execute(self._bind((), inputs))
@@ -963,10 +1032,7 @@ class Network(GraphModule):
     """Tensor facade over the graph: one tensor out, or a dict of named outputs."""
 
     def forward(self, *inputs: torch.Tensor, **named: torch.Tensor) -> torch.Tensor | dict[str, torch.Tensor]:
-        results = self._execute(self._bind(inputs, named))
-        if len(results) == 1:
-            return next(iter(results.values()))
-        return results
+        return self._execute(self._bind(inputs, named), single=self._single_output)
 
 
 @contextmanager
@@ -1017,14 +1083,18 @@ def construct(spec, node, device, dtype):
             kwargs[name] = symbols[name]
     for name in spec.init_shapes:
         kwargs[name] = {port: tuple(shape) for port, shape in getattr(node, name).items()}
-    with torch.device(device):
+    device_obj = device if isinstance(device, torch.device) else torch.device(device)
+    if device_obj.type == "cpu" and getattr(torch._C, "_len_torch_function_stack", lambda: 1)() == 0:
         layer = spec.module(**kwargs)
+    else:
+        with torch.device(device_obj):
+            layer = spec.module(**kwargs)
     if not isinstance(layer, nn.Module):
         raise HNDLError("E_REGISTRY", f"{node.id}: operator {spec.alias} did not construct an nn.Module")
-    if torch.device(device).type == "meta":
+    if device_obj.type == "meta":
         # The allocation-free probe only measures; never move a module onto meta.
         return layer
-    return layer.to(device=device, dtype=dtype)
+    return layer.to(device=device_obj, dtype=dtype)
 
 
 def _state_bytes(module, compute_dtype=None):
@@ -1055,15 +1125,15 @@ def parameter_counts(
     from .registry import Registry
     registry = registry if registry is not None else plan.registry or Registry.builtins()
     counts: dict[str, int | None] = {}
-    for node in plan.nodes:
-        spec = registry.by_identity(node.op)
-        try:
-            with registry.activated():
+    with registry.activated():
+        for node in plan.nodes:
+            spec = registry.by_identity(node.op)
+            try:
                 layer = construct(spec, node, "meta", DTYPES[plan.dtype])
-        except Exception:
-            counts[node.id] = None
-            continue
-        counts[node.id] = sum(p.numel() for p in layer.parameters())
+            except Exception:
+                counts[node.id] = None
+                continue
+            counts[node.id] = sum(p.numel() for p in layer.parameters())
     return counts
 
 
@@ -1199,23 +1269,27 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
         registry = Registry.builtins()
     from .resolver import validate_concrete_plan, _limits
     bounds = _limits(limits)
-    plan = validate_concrete_plan(plan, registry=registry, limits=limits)
+    limits_items = tuple(sorted(limits.items())) if isinstance(limits, dict) else ()
+    bounds_items = tuple(sorted(bounds.items()))
+    stamp = getattr(plan, "_validated_stamp", None)
+    if stamp != (id(registry), limits_items) and stamp != (id(registry), bounds_items):
+        plan = validate_concrete_plan(plan, registry=registry, limits=limits)
     specs = {node.id: registry.by_identity(node.op) for node in plan.nodes}
     port_orders = {node.id: specs[node.id].input_ports_for(node.args) for node in plan.nodes}
 
     # Bound registered storage with an allocation-free meta construction first.
     total = 0
     unbounded = []
-    for node in plan.nodes:
-        try:
-            with registry.activated():
+    with registry.activated():
+        for node in plan.nodes:
+            try:
                 probe = construct(specs[node.id], node, "meta", dtype)
-        except Exception:
-            unbounded.append(node.id)
-            continue
-        total += _state_bytes(probe, dtype)
-        if total > bounds["max_state_bytes"]:
-            raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes before allocation", node=node.id)
+            except Exception:
+                unbounded.append(node.id)
+                continue
+            total += _state_bytes(probe, dtype)
+            if total > bounds["max_state_bytes"]:
+                raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes before allocation", node=node.id)
 
     modules = OrderedDict()
     module_owners, tensor_owners, storage_owners = {}, {}, {}

@@ -67,7 +67,19 @@ def _digest(*parts):
     return hasher.hexdigest()[:16]
 
 
-_file_digests = {}
+@lru_cache(maxsize=256)
+def _memoized_file_sha256(path_str: str, st_size: int, st_mtime_ns: int) -> str:
+    hasher = sha256()
+    try:
+        with open(path_str, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                hasher.update(block)
+    except OSError as exc:
+        _fail(f"Cannot read checkpoint file {path_str}: {exc}")
+    return hasher.hexdigest()
+
+
+_file_digests = _memoized_file_sha256
 
 
 def file_sha256(path: str | os.PathLike[str]) -> str:
@@ -77,18 +89,7 @@ def file_sha256(path: str | os.PathLike[str]) -> str:
         stat = path.stat()
     except OSError as exc:
         _fail(f"Cannot stat checkpoint file {path}: {exc}")
-    key = (str(path), stat.st_size, stat.st_mtime_ns)
-    digest = _file_digests.get(key)
-    if digest is None:
-        hasher = sha256()
-        try:
-            with open(path, "rb") as handle:
-                for block in iter(lambda: handle.read(1 << 20), b""):
-                    hasher.update(block)
-        except OSError as exc:
-            _fail(f"Cannot read checkpoint file {path}: {exc}")
-        digest = _file_digests[key] = hasher.hexdigest()
-    return digest
+    return _memoized_file_sha256(str(path), stat.st_size, stat.st_mtime_ns)
 
 
 def _verify_digest(path, expected):
@@ -256,7 +257,7 @@ def resolve_source(
 def _resolve_source_cache_clear():
     _cached_resolve_hf.cache_clear()
     _cached_resolve_local.cache_clear()
-    _file_digests.clear()
+    _memoized_file_sha256.cache_clear()
 
 
 def _resolve_source_cache_info():
@@ -337,6 +338,15 @@ class Contract(Immutable):
     image_size: object = None  # (H, W) for pixels when the architecture fixes it
 
 
+def _load_safetensors_state(location: str) -> dict[str, torch.Tensor]:
+    _require("safetensors")
+    from safetensors.torch import load_file
+    try:
+        return load_file(location)
+    except Exception as exc:
+        _fail(f"Cannot load weights from {location}: {exc}")
+
+
 class TransformersProvider(Immutable):
     name = "transformers"
 
@@ -407,12 +417,7 @@ class TransformersProvider(Immutable):
             return cls.from_pretrained(location, **kwargs)
 
     def _load_safetensors(self, model):
-        _require("safetensors")
-        from safetensors.torch import load_file
-        try:
-            state = load_file(self.source.location)
-        except Exception as exc:
-            _fail(f"Cannot load weights from {self.source.location}: {exc}")
+        state = _load_safetensors_state(self.source.location)
         missing, unexpected = model.load_state_dict(state, strict=False)
         # Tied parameters (e.g. GPT-2's lm_head) are not stored; retie them.
         tied = getattr(model, "_tied_weights_keys", None) or ()
@@ -460,12 +465,7 @@ class TimmProvider(Immutable):
         if not weights or self.source.kind == "file":
             model = self.timm.create_model(self.architecture, pretrained=False, **kwargs)
             if weights:
-                _require("safetensors")
-                from safetensors.torch import load_file
-                try:
-                    state = load_file(self.source.location)
-                except Exception as exc:
-                    _fail(f"Cannot load weights from {self.source.location}: {exc}")
+                state = _load_safetensors_state(self.source.location)
                 missing, unexpected = model.load_state_dict(state, strict=False)
                 if missing or unexpected:
                     _fail(f"{self.source.location}: missing keys {sorted(missing)[:5]}, unexpected keys {sorted(unexpected)[:5]}")
@@ -511,9 +511,9 @@ def submodule(model, name, location):
         _fail(f"{location} has no submodule {name!r}; available: {listed}{more}")
 
 
-def capture_layer(model, name, x, location):
+def capture_layer(model, name, x, location, target=None):
     """Run ``model(x)`` and return the named submodule's output, stopping there."""
-    target = submodule(model, name, location)
+    target = target if target is not None else submodule(model, name, location)
 
     def hook(module, inputs, output):
         raise _Captured(output)
@@ -532,7 +532,7 @@ def capture_layer(model, name, x, location):
     return value
 
 
-def capture_layers(model, names, x, location):
+def capture_layers(model, names, x, location, targets=None):
     """Run ``model(x)`` once and return every named submodule's output, in order.
 
     One pass, one hook per requested submodule, and the pass unwinds as soon as
@@ -546,7 +546,7 @@ def capture_layers(model, names, x, location):
     A submodule that runs twice before the pass stops fails rather than
     silently returning one of its calls.
     """
-    targets = {name: submodule(model, name, location) for name in names}
+    targets = targets if targets is not None else {name: submodule(model, name, location) for name in names}
     captured = {}
     handles = []
 
@@ -640,9 +640,9 @@ class LocalProvider:
                 model.load_state_dict(state, strict=True)
             except RuntimeError as exc:
                 _fail(f"{path} does not fit provider {self.source.config['provider']!r}: {exc}")
-        for name in (self.layer, *self.layers):
-            if name:
-                submodule(model, name, self.source.location)
+        targets = {name: submodule(model, name, self.source.location)
+                   for name in (self.layer, *self.layers) if name}
+        model._hndl_targets = targets
         return model
 
     def select(self, result):
@@ -651,11 +651,14 @@ class LocalProvider:
     def call(self, model, x, kind):
         if self.readout:
             return call_readout(model, self.read, self.readout, x, self.source.location)
+        targets = getattr(model, "_hndl_targets", None)
         if self.layers:
-            return capture_layers(model, self.layers, x, self.source.location)
+            sub_targets = {name: targets[name] for name in self.layers} if targets else None
+            return capture_layers(model, self.layers, x, self.source.location, targets=sub_targets)
         if not self.layer:
             return model(x)
-        return capture_layer(model, self.layer, x, self.source.location)
+        sub_target = targets.get(self.layer) if targets else None
+        return capture_layer(model, self.layer, x, self.source.location, target=sub_target)
 
 
 def provider_for(source, output, component, layer="", readout="", layers=()):

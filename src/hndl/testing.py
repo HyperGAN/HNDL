@@ -256,12 +256,13 @@ def check_round_trip(registry, operator, example):
     return plan
 
 
-def check_build_and_run(registry, operator, example, *, device="cpu", dtype="float32", batch=2):
+def check_build_and_run(registry, operator, example, *, device="cpu", dtype="float32", batch=2, plan=None):
     """``example`` builds on ``device`` in ``dtype``, runs forward and backward, and is reproducible."""
     from .torch import build, parameter_counts
 
     spec = _spec(registry, operator)
-    plan = resolve(example.source, **example_contract(example, registry=registry, dtype=dtype))
+    if plan is None or plan.dtype != dtype:
+        plan = resolve(example.source, **example_contract(example, registry=registry, dtype=dtype))
     model = build(plan, device=device, initialization_seed=3)
     torch_dtype = _torch_dtype(plan.dtype)
     wrong = sorted({str(p.dtype) for p in model.parameters() if p.dtype != torch_dtype})
@@ -273,7 +274,7 @@ def check_build_and_run(registry, operator, example, *, device="cpu", dtype="flo
         _fail(f"{spec.alias}: repr(model) consumed random numbers")
     if spec.alias not in text:
         _fail(f"{spec.alias}: repr(model) does not name the operator")
-    counts = parameter_counts(plan)
+    counts = parameter_counts(plan, registry=registry)
     real = {node.id: sum(p.numel() for p in model[node.id].parameters()) for node in plan.nodes}
     if counts != real:
         _fail(f"{spec.alias}: parameter_counts {counts} disagrees with the built modules {real}")
@@ -300,7 +301,7 @@ def check_build_and_run(registry, operator, example, *, device="cpu", dtype="flo
     return model
 
 
-def check_reference(registry, operator, example, *, device="cpu"):
+def check_reference(registry, operator, example, *, device="cpu", plan=None):
     """Every node of the operator in ``example`` matches its declared ``reference``.
 
     Outputs and the gradients of every floating input are compared with
@@ -312,7 +313,8 @@ def check_reference(registry, operator, example, *, device="cpu"):
     spec = _spec(registry, operator)
     if spec.reference is None:
         return False
-    plan = resolve(example.source, **example_contract(example, registry=registry))
+    if plan is None:
+        plan = resolve(example.source, **example_contract(example, registry=registry))
     model = build(plan, device=device, initialization_seed=5)
     for node in plan.nodes:
         if node.op != spec.key:
@@ -369,7 +371,7 @@ def check_operator(registry, alias, *, devices=None, dtypes=None, network=False)
             continue
         label = f"{spec.alias} example {index}"
         try:
-            check_round_trip(registry, spec, example)
+            plan = check_round_trip(registry, spec, example)
         except AssertionError as exc:
             raise AssertionError(f"{label}: {exc}") from exc
         for device in devices:
@@ -379,10 +381,10 @@ def check_operator(registry, alias, *, devices=None, dtypes=None, network=False)
                 selected = ("float32",) + (REDUCED_PRECISION if str(device).startswith("cuda") else ())
             for dtype in selected:
                 try:
-                    check_build_and_run(registry, spec, example, device=device, dtype=dtype)
+                    check_build_and_run(registry, spec, example, device=device, dtype=dtype, plan=plan if dtype == "float32" else None)
                 except AssertionError as exc:
                     raise AssertionError(f"{label} on {device} in {dtype}: {exc}") from exc
             try:
-                check_reference(registry, spec, example, device=device)
+                check_reference(registry, spec, example, device=device, plan=plan)
             except AssertionError as exc:
                 raise AssertionError(f"{label} on {device}, reference: {exc}") from exc
