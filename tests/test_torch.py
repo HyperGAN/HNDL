@@ -1018,3 +1018,97 @@ def test_torch_compile_traces_the_checked_program():
     torch.testing.assert_close(compiled(x), expected)
     torch.testing.assert_close(compiled(x), expected)
     torch.testing.assert_close(model(x), expected)
+
+
+def test_is_chain_variadic_single_output_and_slice_step_validation():
+    """H-03: Variadic single-output nodes must not be chains; slices must reject step != 1."""
+    # Variadic node returning single output tuple must not be classified as unary chain
+    branched = network("a, = chunk(1)\nlinear(a, 10)", input_shape=("B", 8), output_shape=("B", 10), device="cpu")
+    assert branched._chain is False
+    with pytest.raises(TypeError, match="Branched graphs support node-name lookup only"):
+        _ = branched[:2]
+    assert branched["n0"] is not None
+
+    # Unary chain slice step validation
+    chain = network("linear(8)\nrelu()\nlinear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    assert chain._chain is True
+    assert isinstance(chain[:2], nn.Sequential)
+    assert isinstance(chain[0:2:1], nn.Sequential)
+    with pytest.raises(ValueError, match="GraphModule slice step must be 1; got 2"):
+        _ = chain[::2]
+    with pytest.raises(ValueError, match="GraphModule slice step must be 1; got -1"):
+        _ = chain[::-1]
+    with pytest.raises(ValueError, match="GraphModule slice step must be 1; got 0"):
+        _ = chain[::0]
+
+
+def test_compile_pre_forward_state_verification(monkeypatch):
+    """M-08: Pre-forward state verification must run on torch.compile path."""
+    import hndl.torch
+    monkeypatch.setattr(hndl.torch, "_is_compiling", lambda: True)
+
+    model = network("linear(8)\nrelu()\nlinear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    # Mutate state before forward
+    model.nodes["n_n0"].register_buffer("extra", torch.zeros(1))
+    with pytest.raises(HNDLError) as exc:
+        model(torch.randn(2, 4))
+    assert exc.value.code == "E_RUNTIME"
+    assert "no longer matches the build" in exc.value.message
+    assert "changed during forward" not in exc.value.message
+
+
+def test_shallow_copy_and_submodule_cast_cache_invalidation():
+    """M-09: Shallow copies and submodule in-place casts must invalidate fast-path signatures."""
+    model = network("linear(8)\nrelu()\nlinear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    x = torch.randn(2, 4)
+    model(x)
+    assert len(model._validated) > 0
+
+    shallow = copy.copy(model)
+    # Casting shallow copy clears original model's shared cache
+    shallow.double()
+    assert len(model._validated) == 0
+
+    # Shallow copy executes cleanly with float64
+    x64 = torch.randn(2, 4, dtype=torch.float64)
+    out64 = shallow(x64)
+    assert out64.dtype == torch.float64
+
+    # Model detects parameter dtype mutation via _stores and avoids fast path
+    with pytest.raises(RuntimeError):
+        model(x)
+
+    # Submodule in-place cast also invalidates fast path via _stores
+    fresh = network("linear(8)\nrelu()\nlinear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    fresh(x)
+    assert len(fresh._validated) > 0
+    fresh[0].double()
+    with pytest.raises(RuntimeError):
+        fresh(x)
+
+
+def test_state_bytes_meta_device_view_deduplication():
+    """L-06: Meta-device estimation must deduplicate views sharing storage."""
+    from hndl.torch import _state_bytes
+
+    class ViewModule(nn.Module):
+        def __init__(self, device):
+            super().__init__()
+            self.w1 = nn.Parameter(torch.empty(10, device=device))
+            self.w2 = nn.Parameter(self.w1.view(2, 5))
+            self.register_buffer("b", torch.empty(5, dtype=torch.int64, device=device))
+
+    mod_meta = ViewModule(device="meta")
+    # 10 float32 elements (40 bytes, deduplicated) + 5 int64 elements (40 bytes) = 80 bytes
+    assert _state_bytes(mod_meta) == 80
+    # compute_dtype=float64: 10 * 8 = 80 bytes + 40 bytes = 120 bytes
+    assert _state_bytes(mod_meta, compute_dtype=torch.float64) == 120
+    # compute_dtype=float16: 10 * 2 = 20 bytes + 40 bytes = 60 bytes
+    assert _state_bytes(mod_meta, compute_dtype=torch.float16) == 60
+
+    # CPU module has identical deduplicated counts
+    mod_cpu = ViewModule(device="cpu")
+    assert _state_bytes(mod_cpu) == 80
+    assert _state_bytes(mod_cpu, compute_dtype=torch.float64) == 120
+    assert _state_bytes(mod_cpu, compute_dtype=torch.float16) == 60
+

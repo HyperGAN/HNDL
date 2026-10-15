@@ -14,6 +14,10 @@
 - **Ambiguous solver interval reporting (`M-07`)**: When an ambiguous port has both collapsed and open interval constraints across different axes, `E_AMBIGUOUS` reports the open interval rather than the collapsed interval.
 - **Ellipsis rank underflow port attribution (`L-03`)**: In `_Solver.patterns`, rank underflow when expanding ellipsis patterns directly attributes the port whose measured rank underflows the pattern rank.
 - **Defensive bounds checks in solver and relations (`L-04`)**: `_Solver.axis` and `_Solver.interval` bounds-check axes to guard against negative axis aliasing and `IndexError`; `conv_input_range` returns empty interval `(1, 0)` on non-positive extents; `conv_transpose_input` returns `None` when mathematically unreachable; `conv_axis` verifies valid axes and guards against `None` context.
+- **Chain classification and slice step validation (`H-03`)**: `_is_chain` now verifies `tuple(node.outputs) == ("out",)` so single-output tuple-returning operators (`chunk(1)`) are not misclassified as unary chains, and `GraphModule.__getitem__` strictly rejects non-unit slice steps (`step != 1`) with `ValueError`.
+- **Pre-forward state verification on compile path (`M-08`)**: `GraphModule._execute` now verifies registered state matches the build before executing forward when `torch.compiler.is_compiling()` is active, preventing TorchDynamo tracing crashes and misattributed mutations.
+- **Fast-path cache invalidation on shallow copy and submodule mutation (`M-09`)**: `GraphModule._apply` now clears `self._validated` in place, ensuring that casting a shallow copy invalidates cached signatures on the original graph, and `_record_stores`/`_execute` tracks parameter/buffer dtypes and devices to prevent unhandled ATen errors upon submodule in-place casts.
+- **Meta-device view storage deduplication (`L-06`)**: `_state_bytes` now keys meta-device storages by `(value.device, storage._cdata)` rather than `id(value)`, accurately deduplicating storage footprints for parameter and buffer views on `meta` devices.
 
 ## 0.8.0 (2026-09-26)
 

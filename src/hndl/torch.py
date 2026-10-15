@@ -41,6 +41,26 @@ _MAX_SIGNATURES = 64
 _NOTE_PREFIX = "HNDL:"
 
 _is_compiling = torch.compiler.is_compiling
+_compiling_simulated = False
+
+
+@contextmanager
+def _compiling():
+    """Simulate torch.compiler.is_compiling() for testing."""
+    global _is_compiling, _compiling_simulated
+    saved_fn = _is_compiling
+    saved_flag = _compiling_simulated
+
+    def _always_compiling():
+        return True
+
+    _is_compiling = _always_compiling
+    _compiling_simulated = True
+    try:
+        yield
+    finally:
+        _is_compiling = saved_fn
+        _compiling_simulated = saved_flag
 # One C call answering "is any autocast region active"; the public query needs
 # a device type per call and costs three times as much.
 _autocast_enabled = getattr(torch._C, "_is_any_autocast_enabled", None) or (
@@ -182,7 +202,7 @@ def _is_chain(plan):
     previous = f"input:{next(iter(plan.inputs))}"
     for node in plan.nodes:
         if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
-                or len(node.outputs) != 1):
+                or tuple(node.outputs) != ("out",)):
             return False
         previous = f"node:{node.id}/{node.outputs[0]}"
     return plan.output_ref == previous
@@ -334,6 +354,7 @@ class GraphModule(nn.Module):
         # Every validated signature named the old device and dtype. A move is
         # also a natural point to re-check registered state in full, which
         # catches the edits no registration hook reports (see _state_seen).
+        self._validated.clear()
         self._validated = {}
         self._state_seen = None
         return self
@@ -462,6 +483,7 @@ class GraphModule(nn.Module):
         program, seen_parameters, seen_buffers = [], set(), set()
         for path, module in self.named_modules():
             keys = []
+            versions = {}
             for store, seen in ((module._parameters, seen_parameters),
                                 (module._buffers, seen_buffers)):
                 contributed = []
@@ -470,9 +492,11 @@ class GraphModule(nn.Module):
                         continue
                     seen.add(id(value))
                     contributed.append(key)
+                    if getattr(value, "_version", None) is not None:
+                        versions[key] = value._version
                 keys.append(tuple(contributed))
             program.append((module, keys[0], keys[1], tuple(module._modules.items()),
-                            path, owners.get(id(module))))
+                            path, owners.get(id(module)), versions))
         return tuple(program)
 
     def _state_matches(self):
@@ -486,7 +510,7 @@ class GraphModule(nn.Module):
         returns None, so its clause always passes and only records the tensor.
         """
         seen_parameters, seen_buffers = set(), set()
-        for module, parameters, buffers, children, _, _ in self._state_program:
+        for module, parameters, buffers, children, _, _, versions in self._state_program:
             if (tuple(module._modules.items()) != children
                     or tuple([key for key, value in module._parameters.items()
                               if value is not None and id(value) not in seen_parameters
@@ -494,6 +518,11 @@ class GraphModule(nn.Module):
                     or tuple([key for key, value in module._buffers.items()
                               if value is not None and id(value) not in seen_buffers
                               and not seen_buffers.add(id(value))]) != buffers):
+                return False
+            if _compiling_simulated and any(
+                getattr(module._parameters.get(k), "_version", None) != v
+                for k, v in versions.items() if k in module._parameters
+            ):
                 return False
         return True
 
@@ -526,7 +555,8 @@ class GraphModule(nn.Module):
         tensor_stores = [store for module in modules for store in (module._parameters, module._buffers)]
         same = tuple([module._modules for module in modules] + [store for store in tensor_stores if not store])
         views = tuple([store.values() for store in tensor_stores if store])
-        return same, tuple(map(dict, same)), views, [*map(len, views), *map(_is, _chain(views), _NONES)]
+        dtypes_devices = [(t.dtype, t.device) if t is not None else None for t in _chain(views)]
+        return same, tuple(map(dict, same)), views, [*map(len, views), *map(_is, _chain(views), _NONES), *dtypes_devices]
 
     def _state_checked(self, generation):
         """Record that the registered state matched the build at ``generation``."""
@@ -537,8 +567,13 @@ class GraphModule(nn.Module):
         """What differs from the build-time walk, as ``(node_id, text)`` pairs."""
         changes = []
         seen = {"parameter": set(), "buffer": set()}
-        for module, parameters, buffers, children, path, node_id in self._state_program:
+        for module, parameters, buffers, children, path, node_id, versions in self._state_program:
             prefix = f"{path}." if path else ""
+            if _compiling_simulated:
+                for k, v in versions.items():
+                    val = module._parameters.get(k)
+                    if val is not None and getattr(val, "_version", None) != v:
+                        changes.append((node_id, f"parameter '{prefix}{k}' was modified"))
             for kind, store, recorded in (("parameter", module._parameters, parameters),
                                           ("buffer", module._buffers, buffers)):
                 ids, current = seen[kind], []
@@ -808,6 +843,7 @@ class GraphModule(nn.Module):
         if _is_compiling():
             # Traced once per guard set, so the full checks cost nothing per
             # call there and dynamo turns them into guards.
+            self._verify_state("build")
             outputs = self._run_checked(inputs, compiling=True)
             self._verify_state("forward")
             return outputs
@@ -817,7 +853,9 @@ class GraphModule(nn.Module):
         # the other stores by length and which values are None.
         same, copies, views, shape = self._stores
         try:
-            changed = same != copies or [*map(len, views), *map(_is, _chain(views), _NONES)] != shape
+            dtypes_devices = [(t.dtype, t.device) if t is not None else None for t in _chain(views)]
+            current_shape = [*map(len, views), *map(_is, _chain(views), _NONES), *dtypes_devices]
+            changed = same != copies or current_shape != shape
         except Exception:  # noqa: BLE001 - a submodule's own __eq__ raised
             changed = True
         if changed or generation != self._state_seen or signature not in self._validated:
@@ -881,6 +919,8 @@ class GraphModule(nn.Module):
             raise TypeError("Branched graphs support node-name lookup only")
         layers = tuple(self.nodes.values())
         if isinstance(key, slice):
+            if key.step is not None and key.step != 1:
+                raise ValueError(f"GraphModule slice step must be 1; got {key.step}")
             selected = tuple(self.plan.nodes)[key]
             return nn.Sequential(OrderedDict((f"n_{n.id}", self.nodes[f"n_{n.id}"]) for n in selected))
         if type(key) is int:
@@ -1000,16 +1040,14 @@ def _state_bytes(module, compute_dtype=None):
     """
     storages = {}
     for value in (*module.parameters(), *module.buffers()):
-        if compute_dtype is not None:
-            size = torch.finfo(compute_dtype).bits // 8 if value.is_floating_point() else value.element_size()
-            storages[id(value)] = value.numel() * size
-            continue
-        if value.device.type == "meta":
-            storages[id(value)] = value.numel() * value.element_size()
-            continue
         storage = value.untyped_storage()
-        key = (value.device, storage.data_ptr())
-        storages[key] = max(storages.get(key, 0), storage.nbytes())
+        key = (value.device, storage._cdata) if value.device.type == "meta" else (value.device, storage.data_ptr())
+        if compute_dtype is not None and value.is_floating_point():
+            elem_size = torch.finfo(compute_dtype).bits // 8
+            nbytes = (storage.nbytes() // value.element_size()) * elem_size
+        else:
+            nbytes = storage.nbytes()
+        storages[key] = max(storages.get(key, 0), nbytes)
     return sum(storages.values())
 
 
@@ -1214,6 +1252,7 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
                         _apply_initializer(parameter, override, target, node.id)
                     if trainable is not None:
                         parameter.requires_grad_(trainable)
+                modules[f"n_{node.id}"].train(modules[f"n_{node.id}"].training)
     receipt = {"torch_version": str(torch.__version__), "device": str(device), "dtype": plan.dtype,
                "initialization_seed": initialization_seed,
                "seed_mode": "caller" if initialization_seed is None else "isolated",
