@@ -194,9 +194,13 @@ def test_sdist_saved_plan_compat_mutation_oracle(built_sdist_archive: Path, tmp_
 
 def _load_gen_doc_pages() -> ModuleType:
     """Load scripts/gen_doc_pages.py with mock mkdocs dependencies if uninstalled."""
+    if not (REPO_ROOT / "scripts" / "gen_doc_pages.py").is_file():
+        pytest.skip("scripts/gen_doc_pages.py not present")
     module_name = "scripts.gen_doc_pages"
     if module_name in sys.modules:
         return sys.modules[module_name]
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
 
     for mod in ["mkdocs", "mkdocs.structure", "mkdocs.structure.files", "mkdocs_gen_files"]:
         if mod not in sys.modules:

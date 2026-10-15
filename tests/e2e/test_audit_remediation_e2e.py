@@ -556,6 +556,8 @@ class TestTier1FeatureCoverage:
 
     def test_tier1_f10_github_workflows_exist(self):
         """[F10 Happy Path 5] GitHub Actions CI and publish workflows exist."""
+        if not (REPO_ROOT / ".git").exists():
+            pytest.skip("Not running inside a git repository checkout (.github excluded from sdist)")
         ci_yml = REPO_ROOT / ".github" / "workflows" / "ci.yml"
         publish_yml = REPO_ROOT / ".github" / "workflows" / "publish.yml"
         assert ci_yml.exists()
