@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 
 from ..operator import Example, operator
@@ -7,6 +8,7 @@ from ..operator import Example, operator
     "add",
     summary="Elementwise sum of two tensors with identical shapes.",
     shape="a[B, ...], b[B, ...] -> out[B, ...]",
+    reference=lambda module: torch.add,
     examples=[Example('saved = x\nlinear(8, name="branch")\nrelu()\nh = linear(4)\nadd(h, saved)',
                       ("B", 4), ("B", 4), "A residual connection: both inputs are explicit.")],
     category="arithmetic",

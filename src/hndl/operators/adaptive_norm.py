@@ -1,7 +1,18 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from ..operator import Arg, Example, operator
+
+
+def _reference(module):
+    def adaptive_norm(x, params):
+        c = x.shape[1]
+        delta_gamma, beta = params[:, :c], params[:, c:]
+        norm = F.instance_norm(x, eps=module.eps)
+        return (1 + delta_gamma[:, :, None, None]) * norm + beta[:, :, None, None]
+
+    return adaptive_norm
 
 
 @operator(
@@ -9,6 +20,7 @@ from ..operator import Arg, Example, operator
     summary="Instance-normalize features, then apply a per-example learned scale and bias.",
     shape="x[B, C, H, W], params[B, 2*C] -> out[B, C, H, W]",
     args={"eps": Arg(float, 1e-5, min=0, exclusive_min=True, positional=False, help="Added to the variance for stability.")},
+    reference=_reference,
     examples=[
         Example("z1, z2 = split(64)\nlinear(z1)\nfeatures = reshape(32, 4, 4)\nadaptive_norm(features, z2)",
                 ("B", 128), ("B", 32, 4, 4), "32 channels need 64 style values; the projection resolves to 512."),

@@ -26,11 +26,21 @@ def _finalize(args, input_shapes, output_shapes):
     return {**args, "shape": tuple(output_shapes["out"][1:])}
 
 
+def _reference(module):
+    shape = module.shape
+
+    def reshape(x):
+        return x.reshape(x.shape[0], *shape)
+
+    return reshape
+
+
 @operator(
     "reshape",
     summary="View the tensor with new non-batch dimensions, preserving the element count.",
     shape="x -> out",
     relation=_relation,
+    reference=_reference,
     shape_text="prod(x[1:]) == prod(out[1:]); out[1:len(shape)+1] == shape",
     args={"shape": Arg(INTS, (), min=1, max=MAX_DIMENSION_LITERAL,
                        help="Leading non-batch dimensions. Remaining dimensions are inferred.")},

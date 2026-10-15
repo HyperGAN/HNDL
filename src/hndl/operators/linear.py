@@ -1,3 +1,4 @@
+from torch.nn import functional as F
 from torch.nn.utils import parametrizations
 
 from ..errors import HNDLError
@@ -16,11 +17,26 @@ def _relation(s):
         s.error("E_CONSTRAINT", "linear expects [B, D] or [B, T, D]; flatten or reshape image tensors first")
 
 
+def _reference(module):
+    def apply(x):
+        training = module.training
+        module.eval()
+        try:
+            weight = module.weight
+        finally:
+            module.train(training)
+        scale = (module.in_features ** -0.5) if getattr(module, "equalized", False) else 1
+        return F.linear(x, weight * scale, module.bias)
+
+    return apply
+
+
 @operator(
     "linear",
     summary="Fully connected layer: a learned affine map on the last axis.",
     shape="x[B, ..., D_in] -> out[B, ..., D_out]",
     relation=_relation,
+    reference=_reference,
     validate=_validate,
     args={
         "out_features": Arg(int, inferable=True, dim="D_out", min=1, max=MAX_DIMENSION_LITERAL,

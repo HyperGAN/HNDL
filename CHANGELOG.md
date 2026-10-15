@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **RMSNorm double-precision preservation (`H-06`)**: `RMSNorm.forward` preserves `float64` precision when running double-precision inputs instead of downcasting to `float32`, ensuring exact parity against `F.rms_norm` and passing `torch.autograd.gradcheck`.
+- **RoPE double-precision calculations (`M-12`)**: `attention._rope_tables` calculates frequency exponents, inverse frequencies, and angles in `float64` when `dtype=torch.float64`, preventing numerical noise and precision degradation during double-precision attention evaluation.
+- **PosEmbed sequence length bounds validation (`M-12`)**: `PosEmbed.forward` validates that input sequence length does not exceed `max_len`, raising `HNDLError("E_CONSTRAINT")` instead of silently broadcasting position 0 across longer sequences.
+- **Dense Mixture of Experts reference oracle (`M-12`)**: `MixtureOfExperts._reference` provides an independent dense oracle computing functional linear projections and dense gate softmax weighting across all experts without sparse indexing or submodule dispatch.
+- **Builtin operator reference functions (`M-13`)**: All 19 non-pretrained operators lacking mathematical references (`adaptive_norm`, `add`, `chunk`, `cls_token`, `concat`, `conv`, `coordinate_grid`, `deconv`, `flatten`, `fourier_features`, `grid_sample`, `group_norm`, `leaky_relu`, `linear`, `pos_embed`, `relu`, `reshape`, `split`, `tanh`) now provide exact `reference=` implementations, achieving 100% reference coverage across all 68 non-pretrained builtin operators.
+- **Dedicated operator test modules (`M-13`)**: Added 15 comprehensive unit test suites in `tests/operators/` covering shape propagation, autograd gradients, numerical parity vs reference implementations, dtypes, and error cases for all previously missing operator modules.
+- **Chunk initialization cleanup (`L-07`)**: Removed dead `self.size` attribute and unused `*, input_shapes` parameter from `Chunk.__init__`, allowing direct instantiation without requiring dummy shape dictionaries.
+- **GridSample positional argument alignment (`L-07`)**: Optional arguments `mode`, `padding_mode`, and `align_corners` in `grid_sample` are configured with `positional=False` and provided with default parameter values in `GridSample.__init__`.
+- **Spatial operator and linear layer representations (`L-08`)**: Added comprehensive `extra_repr()` implementations to `CoordinateGrid`, `FourierFeatures`, `GridSample`, `EqualLinear`, and `Attention` (reporting `equalized={self.equalized}`).
+- **ResBlock channel divisibility validation (`L-08`)**: `ResBlock.__init__` validates that `out_channels % groups == 0` when `norm="group_norm"` raising `HNDLError("E_CONSTRAINT")`, and supports direct construction with arbitrary extra kwargs.
+- **TransformerBlock reference deduplication (`L-08`)**: `transformer_block._reference` deduplicates attention, normalization, and feed-forward math by delegating directly to the submodule reference implementations of `Attention`, `FeedForward`, `LayerNorm`, and `RMSNorm`.
+
 - **Line break normalization (`H-01`)**: Declarative configuration sources now normalize `\r\n` (CRLF) and bare `\r` (CR) line endings to `\n`, ensuring valid line reporting and preventing unhandled `IndexError` in AST location mapping.
 - **Token screener newline reset (`H-02`)**: Statement-level multi-output unpacking (e.g. `(a, b) = split(...)` or `[a, b] = split(...)`) across newlines no longer increments the operator nesting counter.
 - **Empty tuple target rejection and tensor tuple locations (`M-03`)**: Empty tuple assignments (`p = ()`) are rejected with `E_SYNTAX`, and tensor tuple arity errors (`E_OUTPUT_ARITY`) report precise source line, column, and loop iteration diagnostics.

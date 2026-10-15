@@ -4,6 +4,15 @@ from torch import nn
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 
 
+def _reference(module):
+    grid = module.grid
+
+    def coordinate_grid(x):
+        return grid.expand(x.shape[0], -1, -1, -1)
+
+    return coordinate_grid
+
+
 @operator(
     "coordinate_grid",
     summary="Emit a normalized 2D coordinate grid in (x, y) order.",
@@ -14,6 +23,7 @@ from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
         "width": Arg(int, dim="W", min=2, max=MAX_DIMENSION_LITERAL,
                      help="Grid columns, with centers spanning -1 to 1 inclusive."),
     },
+    reference=_reference,
     examples=[Example('coordinate_grid(4, 6)', ("B", 8), ("B", 4, 6, 2),
                       "A fixed rectangular coordinate grid; only the input batch size is used.",
                       input_dtype="int64")],
@@ -30,11 +40,18 @@ class CoordinateGrid(nn.Module):
     of the ``align_corners`` choice in a downstream sampler.
     """
 
-    def __init__(self, height, width):
+    def __init__(self, height=None, width=None, *, spatial_shape=None):
         super().__init__()
-        y, x = torch.meshgrid(torch.linspace(-1, 1, height),
-                              torch.linspace(-1, 1, width), indexing="ij")
+        if spatial_shape is not None:
+            height, width = spatial_shape
+        self.height = int(height)
+        self.width = int(width)
+        y, x = torch.meshgrid(torch.linspace(-1, 1, self.height),
+                              torch.linspace(-1, 1, self.width), indexing="ij")
         self.register_buffer("grid", torch.stack((x, y), dim=-1).unsqueeze(0))
 
     def forward(self, x):
         return self.grid.expand(x.shape[0], -1, -1, -1)
+
+    def extra_repr(self):
+        return f"height={self.height}, width={self.width}"

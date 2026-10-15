@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 
 from ..operator import Example, operator
@@ -12,6 +13,7 @@ def _relation(s):
     summary="Collapse every non-batch axis into one feature axis.",
     shape="x[B, ...] -> out[B, F]",
     relation=_relation,
+    reference=lambda module: (lambda x: torch.flatten(x, 1)),
     shape_text="F == prod(x[1:])",
     examples=[Example("flatten()\nlinear()", ("B", 3, 8, 8), ("B", 2))],
     category="shape",

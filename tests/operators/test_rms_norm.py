@@ -118,3 +118,25 @@ def test_width_flows_forward_and_backward_through_the_norm():
 def test_a_contradicting_width_is_a_constraint_error():
     with pytest.raises(HNDLError, match="E_CONSTRAINT"):
         resolve("rms_norm()", input_shape=("B", 8), output_shape=("B", 12))
+
+
+def test_float64_precision_preservation_against_functional_rms_norm(device):
+    """[H-06] RMSNorm.forward must preserve float64 precision against F.rms_norm (< 1e-12 error)."""
+    from torch.nn import functional as F
+
+    from hndl.operators.rms_norm import RMSNorm
+    norm = RMSNorm(eps=1e-5, affine=False, D=16).double().to(device)
+    x = torch.randn(2, 4, 16, dtype=torch.float64, device=device)
+    out = norm(x)
+    assert out.dtype is torch.float64
+    expected = F.rms_norm(x, (16,), eps=1e-5)
+    diff = (out - expected).abs().max().item()
+    assert diff < 1e-12, f"Float64 precision loss detected: diff={diff:.3e}"
+
+
+def test_float64_affine_gradcheck_double(device):
+    """[H-06] torch.autograd.gradcheck on RMSNorm with double precision."""
+    from hndl.operators.rms_norm import RMSNorm
+    norm = RMSNorm(eps=1e-5, affine=True, D=8).double().to(device)
+    x = torch.randn(2, 3, 8, dtype=torch.float64, device=device, requires_grad=True)
+    assert torch.autograd.gradcheck(norm, (x,), eps=1e-6, atol=1e-4)

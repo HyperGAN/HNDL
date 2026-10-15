@@ -1,14 +1,11 @@
-import math
-
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from ..operator import Arg, Example, operator
-from .attention import Attention
-from .feed_forward import ACTIVATIONS, FeedForward
-from .layer_norm import LayerNorm
-from .rms_norm import RMSNorm
+from .attention import Attention, _reference as _attention_reference
+from .feed_forward import ACTIVATIONS, FeedForward, _reference as _feed_forward_reference
+from .layer_norm import LayerNorm, _reference as _layer_norm_reference
+from .rms_norm import RMSNorm, _reference as _rms_norm_reference
 
 NORMS = ("layer_norm", "rms_norm")
 
@@ -24,45 +21,20 @@ def _relation(s):
             return
 
 
-def _normalize(norm, x):
-    """The functional form of whichever normalization the block was built with."""
-    if isinstance(norm, RMSNorm):
-        return F.rms_norm(x, norm.normalized_shape, norm.weight, norm.eps)
-    return F.layer_norm(x, norm.normalized_shape, norm.weight, norm.bias, norm.eps)
-
-
-def _attention(attn, x):
-    """``softmax(QK^T / sqrt(head_dim) + mask) V`` written out, with no fused kernel."""
-    batch, positions, width = x.shape
-    heads, head_dim = attn.heads, attn.head_dim
-
-    def split(projection):
-        return F.linear(x, projection.weight, projection.bias).view(
-            batch, positions, heads, head_dim).transpose(1, 2)
-
-    q, k, v = split(attn.q_proj), split(attn.k_proj), split(attn.v_proj)
-    scores = q @ k.transpose(-2, -1) / math.sqrt(head_dim)
-    if attn.causal:
-        blocked = torch.ones(positions, positions, device=x.device, dtype=torch.bool).triu(1)
-        scores = scores.masked_fill(blocked, float("-inf"))
-    merged = (scores.softmax(dim=-1) @ v).transpose(1, 2).reshape(batch, positions, width)
-    return F.linear(merged, attn.o_proj.weight, attn.o_proj.bias)
-
-
-def _feed_forward(ffn, x):
-    hidden = ACTIVATIONS[ffn.activation](F.linear(x, ffn.up.weight, ffn.up.bias))
-    if ffn.dropout.p:
-        hidden = F.dropout(hidden, ffn.dropout.p, ffn.training)
-    return F.linear(hidden, ffn.down.weight, ffn.down.bias)
-
-
 def _reference(module):
-    """A functional rebuild of the block from its own parameters, bypassing the submodules."""
+    """A functional rebuild of the block delegating to its submodules' reference implementations."""
+    norm_ref = _rms_norm_reference if module.norm_kind == "rms_norm" else _layer_norm_reference
+    norm1_ref = norm_ref(module.norm1)
+    attn_ref = _attention_reference(module.attn)
+    norm2_ref = norm_ref(module.norm2)
+    ffn_ref = _feed_forward_reference(module.ffn)
+
     def run(x):
-        branch = _attention(module.attn, _normalize(module.norm1, x))
+        branch = attn_ref(norm1_ref(x))
         x = x + (branch if module.gamma1 is None else branch * module.gamma1)
-        branch = _feed_forward(module.ffn, _normalize(module.norm2, x))
+        branch = ffn_ref(norm2_ref(x))
         return x + (branch if module.gamma2 is None else branch * module.gamma2)
+
     return run
 
 

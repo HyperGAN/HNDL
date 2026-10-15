@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 
 
@@ -15,11 +16,21 @@ def _relation(s):
                 f"pos_embed(max_len={max_len}) cannot address {positions} positions; raise max_len")
 
 
+def _reference(module):
+    weight = module.weight
+
+    def pos_embed(x):
+        return x + weight[:x.shape[1]]
+
+    return pos_embed
+
+
 @operator(
     "pos_embed",
     summary="Add a learned position vector to every position of a sequence.",
     shape="x[B, T, D] -> out[B, T, D]",
     relation=_relation,
+    reference=_reference,
     shape_text="out == x elementwise; T <= max_len",
     args={
         "max_len": Arg(int, min=1, max=MAX_DIMENSION_LITERAL,
@@ -64,6 +75,8 @@ class PosEmbed(nn.Module):
         nn.init.normal_(self.weight, mean=0.0, std=0.02)
 
     def forward(self, x):
+        if x.shape[1] > self.max_len:
+            raise HNDLError("E_CONSTRAINT", f"Sequence length T={x.shape[1]} exceeds max_len={self.max_len}")
         return x + self.weight[:x.shape[1]]
 
     def extra_repr(self):

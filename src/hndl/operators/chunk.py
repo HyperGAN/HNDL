@@ -81,12 +81,22 @@ def _relation(s):
     s.axis("x", dim, section * chunks)
 
 
+def _reference(module):
+    chunks, dim = module.chunks, module.dim
+
+    def chunk(x):
+        return tuple(torch.split(x, x.shape[dim] // chunks, dim=dim))
+
+    return chunk
+
+
 @operator(
     "chunk",
     summary="Cut one axis into a fixed number of equal sections.",
     shape="x -> out*",
     outputs_from="chunks",
     relation=_relation,
+    reference=_reference,
     batch="relation",
     shape_text="out_i[dim] == x[dim] / chunks for every i; all other axes equal",
     args={
@@ -134,13 +144,10 @@ class Chunk(nn.Module):
     section: the sections are views, not copies.
     """
 
-    def __init__(self, chunks, dim, *, input_shapes):
+    def __init__(self, chunks, dim):
         super().__init__()
         self.chunks = chunks
         self.dim = dim
-        # Non-batch extents are fixed by the plan; the batch axis is not, so
-        # its section size is computed per call from the tensor itself.
-        self.size = None if dim == 0 else input_shapes["x"][dim] // chunks
 
     def forward(self, x):
         size, remainder = divmod(x.shape[self.dim], self.chunks)

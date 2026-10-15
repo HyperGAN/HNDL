@@ -15,11 +15,21 @@ def _relation(s):
         s.axis("out", 1, x[1] + 1)
 
 
+def _reference(module):
+    token = module.token
+
+    def cls_token(x):
+        return torch.cat((token.expand(x.shape[0], -1, -1), x), dim=1)
+
+    return cls_token
+
+
 @operator(
     "cls_token",
     summary="Prepend one learned classification token to a sequence.",
     shape="x[B, T, D] -> out[B, T_plus, D]",
     relation=_relation,
+    reference=_reference,
     shape_text="T_plus == T + 1; the feature width D is unchanged",
     examples=[
         Example("cls_token()\nlinear(8)", ("B", 4, 6), ("B", 5, 8),

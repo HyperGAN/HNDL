@@ -4,6 +4,16 @@ from torch import nn
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 
 
+def _reference(module):
+    frequencies = module.frequencies
+
+    def fourier_features(x):
+        p = x @ frequencies.t()
+        return torch.cat((p.sin(), p.cos()), dim=-1)
+
+    return fourier_features
+
+
 @operator(
     "fourier_features",
     summary="Encode coordinates with a fixed random Fourier frequency table.",
@@ -14,6 +24,7 @@ from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
         "scale": Arg(float, 8.0, min=0, exclusive_min=True, positional=False,
                      help="Standard deviation of the fixed normal frequency table."),
     },
+    reference=_reference,
     examples=[Example('fourier_features(8, scale=8.0)', ("B", 16, 2), ("B", 16, 16),
                       "Encode 2D coordinates with eight sine and eight cosine features.")],
     category="sequence",
@@ -28,10 +39,16 @@ class FourierFeatures(nn.Module):
     split their features afterwards. Gradients flow to the coordinates.
     """
 
-    def __init__(self, num_frequencies, scale, *, D):
+    def __init__(self, num_frequencies, scale=8.0, *, D):
         super().__init__()
+        self.num_frequencies = int(num_frequencies)
+        self.scale = float(scale)
+        self.D = int(D)
         self.register_buffer("frequencies", torch.randn(num_frequencies, D) * scale)
 
     def forward(self, x):
         p = x @ self.frequencies.t()
         return torch.cat((p.sin(), p.cos()), dim=-1)
+
+    def extra_repr(self):
+        return f"num_frequencies={self.num_frequencies}, scale={self.scale}"

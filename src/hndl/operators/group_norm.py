@@ -1,4 +1,5 @@
 from torch import nn
+from torch.nn import functional as F
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 
@@ -10,11 +11,22 @@ def _relation(s):
         s.error("E_CONSTRAINT", f"num_groups={s.args['num_groups']} must divide channels={channels}")
 
 
+def _reference(module):
+    num_groups, eps = module.num_groups, module.eps
+    weight, bias = module.weight, module.bias
+
+    def group_norm(x):
+        return F.group_norm(x, num_groups, weight, bias, eps)
+
+    return group_norm
+
+
 @operator(
     "group_norm",
     summary="Normalize channel groups per example, with learned per-channel affine.",
     shape="x[B, C, ...] -> out[B, C, ...]",
     relation=_relation,
+    reference=_reference,
     args={
         "num_groups": Arg(int, min=1, help="Number of channel groups; must divide the channel count."),
         "num_channels": Arg(int, inferable=True, dim="C", min=1, max=MAX_DIMENSION_LITERAL, positional=False,

@@ -1,4 +1,5 @@
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.utils import parametrizations
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, PAIR, Policy, operator
@@ -33,12 +34,27 @@ def _relation(s):
             s.axis("x", axis, 2 * target)
 
 
+def _reference(module):
+    def apply(x):
+        training = module.training
+        module.eval()
+        try:
+            weight = module.weight
+        finally:
+            module.train(training)
+        return F.conv2d(x, weight, module.bias, stride=module.stride, padding=module.padding,
+                        dilation=module.dilation, groups=module.groups)
+
+    return apply
+
+
 @operator(
     "conv",
     identity="conv2d",
     summary="Two-dimensional convolution over [B, C, H, W] images.",
     shape="x[B, C_in, H_in, W_in] -> out[B, C_out, H_out, W_out]",
     relation=_relation,
+    reference=_reference,
     shape_text=("H_out = floor((H_in + 2*padding - dilation*(kernel_size - 1) - 1) / stride + 1), same for W; "
                 'policy="down2" additionally requires even input extents and H_out = H_in/2, W_out = W_in/2'),
     args={

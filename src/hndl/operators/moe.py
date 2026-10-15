@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
@@ -24,14 +25,25 @@ def _relation(s):
 
 
 def _reference(module):
-    """Dense mixture: run every expert on every token and weight by a scattered gate."""
+    """Dense reference oracle: evaluate router and all experts without sparse indexing."""
+    activation = {
+        "gelu": lambda h: F.gelu(h),
+        "gelu_tanh": lambda h: F.gelu(h, approximate="tanh"),
+        "relu": lambda h: F.relu(h),
+        "silu": lambda h: F.silu(h),
+    }[module.activation]
+
+    def expert_forward(expert, h):
+        return F.linear(activation(F.linear(h, expert.up.weight, expert.up.bias)), expert.down.weight, expert.down.bias)
+
     def run(x):
         flat = x.reshape(-1, module.d_model)
-        logits = module.router(flat)
+        logits = F.linear(flat, module.router.weight)
         values, indices = torch.topk(logits, module.top_k, dim=-1)
         gates = torch.zeros_like(logits).scatter(1, indices, torch.softmax(values, dim=-1))
-        stacked = torch.stack([expert(flat) for expert in module.experts], dim=-1)
-        return (stacked * gates.unsqueeze(1)).sum(dim=-1).reshape(x.shape)
+        expert_outputs = torch.stack([expert_forward(e, flat) for e in module.experts], dim=-1)
+        return (expert_outputs * gates.unsqueeze(1)).sum(dim=-1).reshape(x.shape)
+
     return run
 
 

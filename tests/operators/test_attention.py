@@ -479,3 +479,20 @@ def test_the_transgan_generator_call_resolves_and_runs():
     model = build(plan, device="cpu", initialization_seed=0)
     output = model(x=torch.randn(2, 256, 32))["output"]
     assert tuple(output.shape) == (2, 256, 32) and output.isfinite().all()
+
+
+def test_rope_tables_preserves_float64_numerical_precision(device):
+    """[M-12] attention._rope_tables must compute angles in float64 without truncation."""
+    from hndl.operators.attention import ROPE_BASE, _rope_tables
+    positions, head_dim = 16, 32
+    cos_f64, sin_f64 = _rope_tables(positions, head_dim, device=device, dtype=torch.float64)
+    assert cos_f64.dtype == torch.float64
+    assert sin_f64.dtype == torch.float64
+
+    # Compare against analytical double precision formula
+    exp = torch.arange(0, head_dim, 2, device=device, dtype=torch.float64) / head_dim
+    inv = torch.pow(torch.tensor(ROPE_BASE, device=device, dtype=torch.float64), -exp)
+    ang = torch.arange(positions, device=device, dtype=torch.float64)[:, None] * inv[None, :]
+    dup = torch.cat((ang, ang), dim=-1)
+    torch.testing.assert_close(cos_f64, dup.cos()[None, None], atol=1e-12, rtol=1e-12)
+    torch.testing.assert_close(sin_f64, dup.sin()[None, None], atol=1e-12, rtol=1e-12)

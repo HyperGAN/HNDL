@@ -84,3 +84,21 @@ def test_reduced_precision_build_on_cuda(dtype):
     assert output.dtype == torch_dtype and output.shape == (2, 6, 4)
     output.float().square().mean().backward()
     assert model["n0"].weight.grad.isfinite().all()
+
+
+def test_forward_rejects_sequence_longer_than_max_len_with_e_constraint():
+    """[M-12] PosEmbed.forward must raise HNDLError('E_CONSTRAINT') when T > max_len."""
+    from hndl.operators.pos_embed import PosEmbed
+
+    # max_len=1 edge case: previously silently broadcast pos 0 to all positions
+    pos_single = PosEmbed(max_len=1, D=16)
+    x = torch.randn(2, 4, 16)
+    with pytest.raises(HNDLError, match="E_CONSTRAINT.*exceeds max_len") as exc_info:
+        pos_single(x)
+    assert exc_info.value.code == "E_CONSTRAINT"
+
+    # general overflow
+    pos_multi = PosEmbed(max_len=8, D=16)
+    x_long = torch.randn(2, 12, 16)
+    with pytest.raises(HNDLError, match="E_CONSTRAINT.*exceeds max_len"):
+        pos_multi(x_long)

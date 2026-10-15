@@ -30,11 +30,21 @@ def _relation(s):
     s.arg("size", s.shape("first")[dim])
 
 
+def _reference(module):
+    sizes, dim = module.sizes, module.dim
+
+    def split(x):
+        return tuple(torch.split(x, sizes, dim=dim))
+
+    return split
+
+
 @operator(
     "split",
     summary="Cut one axis into a first section and the remainder.",
     shape="x -> first, rest",
     relation=_relation,
+    reference=_reference,
     shape_text="first[dim] == size; rest[dim] == x[dim] - size; all other axes equal",
     args={
         "size": Arg(int, inferable=True, min=1, max=MAX_DIMENSION_LITERAL,

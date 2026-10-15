@@ -68,11 +68,12 @@ def _rotate_half(tensor):
 
 def _rope_tables(positions, head_dim, device, dtype):
     """``cos``/``sin`` of shape ``[1, 1, T, head_dim]`` for the rotate-half convention."""
-    # The angles are built in float32 even for a float16 plan: 1 / base**(i/d)
-    # underflows and the position product loses resolution in half precision.
-    exponent = torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim
-    inverse_frequency = torch.pow(torch.tensor(ROPE_BASE, device=device, dtype=torch.float32), -exponent)
-    angles = torch.arange(positions, device=device, dtype=torch.float32)[:, None] * inverse_frequency[None, :]
+    # The angles are built in float32 for reduced-precision plans (1 / base**(i/d)
+    # underflows in half precision) and float64 when double precision is requested.
+    calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
+    exponent = torch.arange(0, head_dim, 2, device=device, dtype=calc_dtype) / head_dim
+    inverse_frequency = torch.pow(torch.tensor(ROPE_BASE, device=device, dtype=calc_dtype), -exponent)
+    angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
     duplicated = torch.cat((angles, angles), dim=-1)
     return duplicated.cos().to(dtype)[None, None], duplicated.sin().to(dtype)[None, None]
 
@@ -281,6 +282,7 @@ class Attention(nn.Module):
         self.dropout = float(dropout)
         self.rope = bool(rope)
         self.relative_position_bias = bool(relative_position_bias)
+        self.equalized = bool(equalized)
         height, width = (spatial_shape, spatial_shape) if type(spatial_shape) is int else tuple(spatial_shape)
         self.spatial_shape = (int(height), int(width))
         linear = EqualLinear if equalized else nn.Linear
@@ -333,5 +335,5 @@ class Attention(nn.Module):
     def extra_repr(self):
         grid = f", spatial_shape={self.spatial_shape}" if self.relative_position_bias else ""
         return (f"heads={self.heads}, head_dim={self.head_dim}, causal={self.causal}, "
-                f"dropout={self.dropout}, rope={self.rope}, "
+                f"dropout={self.dropout}, equalized={self.equalized}, rope={self.rope}, "
                 f"relative_position_bias={self.relative_position_bias}{grid}")

@@ -1,4 +1,5 @@
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.utils import parametrizations
 
 from ..errors import HNDLError
@@ -11,12 +12,28 @@ def _validate(args):
         raise HNDLError("E_ARGUMENT", "output_padding must be smaller than stride or dilation on each axis")
 
 
+def _reference(module):
+    def apply(x):
+        training = module.training
+        module.eval()
+        try:
+            weight = module.weight
+        finally:
+            module.train(training)
+        return F.conv_transpose2d(x, weight, module.bias, stride=module.stride, padding=module.padding,
+                                  output_padding=module.output_padding, groups=module.groups,
+                                  dilation=module.dilation)
+
+    return apply
+
+
 @operator(
     "deconv",
     identity="conv_transpose2d",
     summary="Transposed two-dimensional convolution, typically for upsampling.",
     shape="x[B, C_in, H_in, W_in] -> out[B, C_out, H_out, W_out]",
     relation=spatial("conv_transpose2d"),
+    reference=_reference,
     shape_text="H_out = (H_in - 1)*stride - 2*padding + dilation*(kernel_size - 1) + output_padding + 1, same for W",
     args={
         "out_channels": Arg(int, inferable=True, min=1, max=MAX_DIMENSION_LITERAL,

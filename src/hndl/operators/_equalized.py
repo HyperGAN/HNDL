@@ -26,3 +26,7 @@ class EqualLinear(nn.Linear):
         if not self.equalized:
             return super().forward(x)
         return F.linear(x, self.weight * (self.in_features ** -0.5), self.bias)
+
+    def extra_repr(self):
+        base = super().extra_repr()
+        return f"{base}, equalized={self.equalized}"

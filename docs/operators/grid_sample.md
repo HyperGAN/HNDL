@@ -20,9 +20,9 @@ x[B, C, H, W], grid[B, OH, OW, 2] -> out[B, C, OH, OW]
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `mode` (positional) | str | `"bilinear"` | one of `bilinear`, `nearest`, `bicubic` | Interpolation kernel. |
-| `padding_mode` (positional) | str | `"zeros"` | one of `zeros`, `border`, `reflection` | How samples outside the input are filled. |
-| `align_corners` (positional) | bool | `False` | — | Whether -1 and 1 refer to corner pixel centers. |
+| `mode` | str | `"bilinear"` | one of `bilinear`, `nearest`, `bicubic` | Interpolation kernel. |
+| `padding_mode` | str | `"zeros"` | one of `zeros`, `border`, `reflection` | How samples outside the input are filled. |
+| `align_corners` | bool | `False` | — | Whether -1 and 1 refer to corner pixel centers. |
 
 ## Description
 

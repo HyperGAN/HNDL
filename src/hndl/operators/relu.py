@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 
 from ..operator import Example, operator
@@ -7,6 +8,7 @@ from ..operator import Example, operator
     "relu",
     summary="Rectified linear unit, max(x, 0).",
     shape="x[B, ...] -> out[B, ...]",
+    reference=lambda module: torch.relu,
     examples=[Example("linear(64)\nrelu()\nlinear()", ("B", 128), ("B", 10))],
     category="activation",
 )

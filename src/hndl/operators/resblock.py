@@ -1,6 +1,7 @@
 import torch.nn.functional as F
 from torch import nn
 
+from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 
 KERNEL = 3
@@ -133,10 +134,13 @@ class ResBlock(nn.Module):
     does, so ``float16`` plans inherit the usual reduced-precision behavior.
     """
 
-    def __init__(self, out_channels, in_channels, stride, norm, groups):
+    def __init__(self, out_channels, in_channels, stride=1, norm="batch_norm", groups=8, **_extra):
+        if norm == "group_norm" and out_channels % groups != 0:
+            raise HNDLError("E_CONSTRAINT", f"groups={groups} must divide out_channels={out_channels} for group_norm")
         super().__init__()
         self.stride = stride
         self.norm = norm
+        self.groups = groups
         bias = norm == "none"
         self.conv1 = nn.Conv2d(in_channels, out_channels, KERNEL, stride=stride, padding=PADDING, bias=bias)
         self.norm1 = _norm(norm, out_channels, groups)
@@ -154,4 +158,5 @@ class ResBlock(nn.Module):
         return F.relu(out + self.shortcut(x))
 
     def extra_repr(self):
-        return f"stride={self.stride}, norm={self.norm!r}"
+        groups = f", groups={self.groups}" if self.norm == "group_norm" else ""
+        return f"stride={self.stride}, norm={self.norm!r}{groups}"

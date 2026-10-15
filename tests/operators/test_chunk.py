@@ -93,3 +93,15 @@ def test_both_frontends_unpack_the_same_sections():
 def test_invalid_graphs_report_their_code(source, input_shape, output_shape, code):
     with pytest.raises(HNDLError, match=code):
         resolve(source, input_shape=input_shape, output_shape=output_shape)
+
+
+def test_chunk_direct_instantiation_without_input_shapes():
+    """[L-07] Chunk can be instantiated directly with (chunks, dim) without input_shapes."""
+    from hndl.operators.chunk import Chunk
+    chunk = Chunk(chunks=2, dim=1)
+    assert not hasattr(chunk, "size")
+    x = torch.randn(3, 8, 4)
+    parts = chunk(x)
+    assert len(parts) == 2
+    assert tuple(parts[0].shape) == (3, 4, 4)
+    assert tuple(parts[1].shape) == (3, 4, 4)

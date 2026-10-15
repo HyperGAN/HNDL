@@ -74,7 +74,7 @@ class RMSNorm(nn.Module):
             self.register_parameter("weight", None)
 
     def forward(self, x):
-        statistic = x.float()
+        statistic = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
         scale = torch.rsqrt(statistic.square().mean(dim=-1, keepdim=True) + self.eps)
         out = (statistic * scale).to(x.dtype)
         return out if self.weight is None else out * self.weight

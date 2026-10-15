@@ -70,11 +70,21 @@ def _relation(s):
         s.axis(refs[missing[0]], axis, s.shape("out")[axis] - sum(size for size in sizes if size is not None))
 
 
+def _reference(module):
+    axis = module.axis
+
+    def concat(*xs):
+        return torch.cat(xs, dim=axis)
+
+    return concat
+
+
 @operator(
     "concat",
     summary="Join two or more tensors along one axis.",
     shape="x* -> out",
     relation=_relation,
+    reference=_reference,
     batch="relation",
     shape_text="out[axis] == sum(x_i[axis]); all other axes equal",
     args={
