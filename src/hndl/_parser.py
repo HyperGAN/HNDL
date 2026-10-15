@@ -164,10 +164,18 @@ class Validator:
         col = getattr(node, "col_offset", 0)
         line_idx = line - 1
         if 0 <= line_idx < len(self.lines):
-            prefix = self.lines[line_idx].encode("utf-8")[:col].decode("utf-8", "ignore")
+            line_str = self.lines[line_idx]
             offset = self.offsets[line_idx] if line_idx < len(self.offsets) else 0
+            if line_str.isascii():
+                return {"line": line, "column": col + 1 + offset}
+            prefix = line_str.encode("utf-8")[:col].decode("utf-8", "ignore")
             return {"line": line, "column": len(prefix) + 1 + offset}
         return {"line": line, "column": col + 1}
+
+    def _check_depth(self, node, depth):
+        if depth > MAX_AST_DEPTH:
+            raise HNDLError("E_RESOURCE", f"Source nests expressions more than {MAX_AST_DEPTH} levels deep",
+                            line=getattr(node, "lineno", None))
 
     def reject(self, message, node, code="E_SYNTAX"):
         location = self.location(node)
@@ -175,21 +183,22 @@ class Validator:
 
     # Statements -----------------------------------------------------------
 
-    def statements(self, body):
-        return [self.statement(node) for node in body]
+    def statements(self, body, depth=1):
+        return [self.statement(node, depth) for node in body]
 
-    def statement(self, node):
+    def statement(self, node, depth=1):
+        self._check_depth(node, depth)
         handler = self.STATEMENTS.get(type(node))
         if handler is None:
             self.reject(self.REJECTED.get(type(node), "Statement is outside the declarative Python subset"), node)
-        return handler(self, node)
+        return handler(self, node, depth)
 
-    def expr_statement(self, node):
+    def expr_statement(self, node, depth=1):
         if not isinstance(node.value, ast.Call):
             self.reject("Only registered calls may be expression statements", node)
-        return {"kind": "expr", "value": self.expression(node.value), "source": self.location(node)}
+        return {"kind": "expr", "value": self.expression(node.value, depth=depth + 1), "source": self.location(node)}
 
-    def assign_statement(self, node):
+    def assign_statement(self, node, depth=1):
         if len(node.targets) != 1:
             self.reject("Chained assignment is not permitted", node)
         target = node.targets[0]
@@ -205,9 +214,9 @@ class Validator:
         if LOOP_ITERATOR in names:
             self.reject(f"range cannot be rebound; it is only permitted as the loop iterator in {_LOOP_FORM}", node)
         return {"kind": "assign", "targets": names, "unpack": unpack,
-                "value": self.expression(node.value, assignment=True), "source": self.location(node)}
+                "value": self.expression(node.value, assignment=True, depth=depth + 1), "source": self.location(node)}
 
-    def for_statement(self, node):
+    def for_statement(self, node, depth=1):
         """``for _ in range(N):`` with a positive int literal; the body is unrolled N times."""
         if not isinstance(node.target, ast.Name) or node.target.id != LOOP_TARGET:
             self.reject(f"The loop target must be _, as in {_LOOP_FORM}; loops have no usable loop variable, "
@@ -228,7 +237,7 @@ class Validator:
             self.reject(f"Source nests loops more than {MAX_LOOP_DEPTH} levels deep", node, code="E_RESOURCE")
         self.loops += 1
         try:
-            body = self.statements(node.body)
+            body = self.statements(node.body, depth=depth + 1)
         finally:
             self.loops -= 1
         # The unrolled node count, checked against max_nodes before the
@@ -278,7 +287,8 @@ class Validator:
     COMPREHENSIONS = {ast.ListComp: "List comprehensions", ast.SetComp: "Set comprehensions",
                       ast.DictComp: "Dict comprehensions", ast.GeneratorExp: "Generator expressions"}
 
-    def expression(self, node, *, assignment=False, initializers=False):
+    def expression(self, node, *, assignment=False, initializers=False, depth=1):
+        self._check_depth(node, depth)
         self.reserved(node)
         if isinstance(node, ast.Name):
             if not _valid_name(node.id):
@@ -291,28 +301,30 @@ class Validator:
                 self.reject("Star argument expansion is not permitted", node)
             self.keywords(node)
             return {"kind": "call", "alias": node.func.id,
-                    "args": [self.expression(arg) for arg in node.args],
-                    "kwargs": [[keyword.arg, self.expression(keyword.value, initializers=keyword.arg == "init")]
+                    "args": [self.expression(arg, depth=depth + 1) for arg in node.args],
+                    "kwargs": [[keyword.arg, self.expression(keyword.value, initializers=keyword.arg == "init", depth=depth + 1)]
                                for keyword in node.keywords],
                     "source": self.location(node)}
         if assignment:
             if isinstance(node, ast.Tuple) and node.elts and all(isinstance(item, (ast.Name, ast.Call)) for item in node.elts):
-                return {"kind": "tensor_tuple", "items": [self.expression(item, assignment=True) for item in node.elts],
+                return {"kind": "tensor_tuple", "items": [self.expression(item, assignment=True, depth=depth + 1) for item in node.elts],
                         "source": self.location(node)}
             self.reject("Assignments must bind tensor expressions, not literal values", node)
-        return self.literal(node, initializers=initializers)
+        return self.literal(node, initializers=initializers, depth=depth + 1)
 
-    def initializer_call(self, node):
+    def initializer_call(self, node, depth=1):
         """One allowlisted initializer scheme; keyword-only, literal arguments."""
+        self._check_depth(node, depth)
         if node.args:
             self.reject("Initializer calls take keyword arguments only", node)
         if any(not _valid_name(name) for name in self.keywords(node)):
             self.reject("Invalid initializer keyword", node)
         return {"kind": "init_call", "name": node.func.id,
-                "kwargs": [[keyword.arg, self.literal(keyword.value)] for keyword in node.keywords],
+                "kwargs": [[keyword.arg, self.literal(keyword.value, depth=depth + 1)] for keyword in node.keywords],
                 "source": self.location(node)}
 
-    def literal(self, node, *, initializers=False, call=False):
+    def literal(self, node, *, initializers=False, call=False, depth=1):
+        self._check_depth(node, depth)
         self.reserved(node)
         if isinstance(node, ast.Call):
             # Only an init= mapping value may be a call, and only one of the
@@ -320,7 +332,7 @@ class Validator:
             if not call or not isinstance(node.func, ast.Name) or node.func.id not in SCHEME_NAMES:
                 self.reject("Arguments must be literal values or tensor expressions; containers cannot contain calls",
                             node)
-            return self.initializer_call(node)
+            return self.initializer_call(node, depth=depth + 1)
         if isinstance(node, ast.Constant):
             value = node.value
             if type(value) not in (int, float, bool, str, type(None)):
@@ -331,11 +343,11 @@ class Validator:
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
             if not isinstance(node.operand, ast.Constant) or type(node.operand.value) not in (int, float):
                 self.reject("Only a sign on a numeric literal is permitted", node)
-            value = self.literal(node.operand)["value"]
+            value = self.literal(node.operand, depth=depth + 1)["value"]
             return {"kind": "literal", "value": -value if isinstance(node.op, ast.USub) else value}
         if isinstance(node, (ast.List, ast.Tuple)):
             return {"kind": "tuple" if isinstance(node, ast.Tuple) else "list",
-                    "items": [self.literal(item) for item in node.elts]}
+                    "items": [self.literal(item, depth=depth + 1) for item in node.elts]}
         if isinstance(node, ast.Dict):
             pairs = []
             keys = set()
@@ -345,7 +357,7 @@ class Validator:
                 if key.value in keys:
                     self.reject("Duplicate literal dictionary key", key)
                 keys.add(key.value)
-                pairs.append([key.value, self.literal(value, call=initializers)])
+                pairs.append([key.value, self.literal(value, call=initializers, depth=depth + 1)])
             return {"kind": "dict", "items": pairs}
         self.reject("Arguments must be literal values or tensor expressions; containers cannot contain calls", node)
 
@@ -393,11 +405,4 @@ def parse(source, aliases):
     except (MemoryError, RecursionError):
         # How CPython's parser reports nesting the screen let through.
         raise HNDLError("E_RESOURCE", "Source is nested too deeply to parse") from None
-    pending = [(module, 0)]
-    while pending:
-        node, depth = pending.pop()
-        if depth > MAX_AST_DEPTH:
-            raise HNDLError("E_RESOURCE", f"Source nests expressions more than {MAX_AST_DEPTH} levels deep",
-                            line=getattr(node, "lineno", None))
-        pending.extend((child, depth + 1) for child in ast.iter_child_nodes(node))
     return {"statements": Validator(aliases, offsets, clean_lines).statements(module.body)}

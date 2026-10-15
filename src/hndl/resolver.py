@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from collections.abc import Mapping
+import heapq
 import keyword
 from math import prod
 import re
@@ -12,9 +13,10 @@ import warnings
 from .errors import HNDLError, source_location
 from .operator import COMPUTE_DTYPES, ELLIPSIS, INDEX_DTYPES, NodeView, SUPPORTED_RANKS, Sym
 from .registry import Registry, normalize_arguments
-from .settings import SCHEME_NAMES
+from .settings import (DEFAULT_INITIALIZATION, DEFAULT_TRAINABILITY, SCHEME_NAMES,
+                      validate_initialization, validate_trainability)
 from .types import (BATCH, EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, ResolvedNode, ResolvedPlan,
-                    batch_multiple)
+                    batch_multiple, format_shape)
 
 
 # Each default stops a real failure: an unbounded graph or port count, a typo
@@ -78,7 +80,7 @@ def _contract(shape, label, limits, *, multiples=False):
     return tuple(shape)
 
 
-def _ordered_nodes(graph, registry, limits):
+def _normalize_graph_nodes(graph, registry, limits):
     if len(graph.nodes) > limits["max_nodes"]:
         raise HNDLError("E_RESOURCE", "Graph exceeds max_nodes")
     lookup = {}
@@ -119,6 +121,10 @@ def _ordered_nodes(graph, registry, limits):
         lookup[node.id] = replace(node, args=args, source=source)
         specs[node.id] = spec
         declarations[node.id] = index
+    return lookup, specs, declarations
+
+
+def _topological_sort(graph, lookup, declarations):
     external = {f"input:{name}" for name in graph.inputs}
     refs = set(external)
     refs.update(f"node:{node.id}/{port}" for node in lookup.values() for port in node.outputs)
@@ -137,19 +143,23 @@ def _ordered_nodes(graph, registry, limits):
         dependencies[node.id] = deps
         for dep in deps:
             consumers[dep].append(node.id)
-    ready = [key for key, deps in dependencies.items() if not deps]
+    in_degrees = {k: len(deps) for k, deps in dependencies.items()}
+    heap = [(declarations[k], k) for k, deg in in_degrees.items() if deg == 0]
+    heapq.heapify(heap)
     ordered = []
-    pending = {key: set(deps) for key, deps in dependencies.items()}
-    while ready:
-        ready.sort(key=declarations.__getitem__)
-        key = ready.pop(0)
+    while heap:
+        _, key = heapq.heappop(heap)
         ordered.append(lookup[key])
         for consumer in consumers[key]:
-            pending[consumer].remove(key)
-            if not pending[consumer]:
-                ready.append(consumer)
+            in_degrees[consumer] -= 1
+            if in_degrees[consumer] == 0:
+                heapq.heappush(heap, (declarations[consumer], consumer))
     if len(ordered) != len(lookup):
         raise HNDLError("E_BINDING", "Graph contains a cycle")
+    return ordered, dependencies, external
+
+
+def _validate_reachability(graph, lookup, dependencies, external):
     reachable = set()
     queue = [entry["ref"][5:].split("/", 1)[0] for entry in graph.outputs.values()
              if entry["ref"] not in external]
@@ -168,6 +178,9 @@ def _ordered_nodes(graph, registry, limits):
     unused = [name for name in graph.inputs if f"input:{name}" not in used]
     if unused:
         raise HNDLError("E_BINDING", f"Declared inputs are never used: {', '.join(unused)}")
+
+
+def _propagate_dtypes(graph, ordered, specs):
     # Port dtypes are static per operator; check every edge once.
     dtypes = {f"input:{name}": entry["dtype"] for name, entry in graph.inputs.items()}
     for node in ordered:
@@ -180,6 +193,14 @@ def _ordered_nodes(graph, registry, limits):
         for port in node.outputs:
             declared = spec.port_dtype(port, graph.dtype)
             dtypes[f"node:{node.id}/{port}"] = graph.dtype if declared == "any" else declared
+    return dtypes
+
+
+def _ordered_nodes(graph, registry, limits):
+    lookup, specs, declarations = _normalize_graph_nodes(graph, registry, limits)
+    ordered, dependencies, external = _topological_sort(graph, lookup, declarations)
+    _validate_reachability(graph, lookup, dependencies, external)
+    dtypes = _propagate_dtypes(graph, ordered, specs)
     return ordered, specs, dtypes
 
 
@@ -217,6 +238,8 @@ class _Solver:
         self.intervals = {}
         for entry in graph.outputs.values():
             self.set_shape(entry["ref"], entry["shape"])
+        self.views = {node.id: NodeView(self, node, specs[node.id]) for node in nodes}
+        self.node_refs = {node.id: (None if specs[node.id].batch == "relation" else self.port_refs(node)) for node in nodes}
 
     def error(self, code, message):
         source = self.node.source if self.node and self.node.source else {}
@@ -258,6 +281,9 @@ class _Solver:
                     self.error(code, f"Batch {old[index]!r} at {ref} conflicts with required {value!r}")
                 else:
                     self.error(code, f"Dimension {index} at {ref}: {old[index]} conflicts with required {value}")
+        merged_known = [v for v in old[1:] if v is not None]
+        if prod(merged_known) > self.limits["max_elements"]:
+            self.error("E_RESOURCE", f"Tensor {ref} exceeds max_elements per example")
 
     def valid_batch(self, value):
         """Whether a batch entry is admissible for this plan.
@@ -296,6 +322,11 @@ class _Solver:
 
     def rank(self, ref, rank):
         shape = self.shapes.get(ref)
+        if shape is not None and len(shape) == rank:
+            if shape[0] is None and self.node_batch is not None:
+                shape[0] = self.node_batch
+                self.changed = True
+            return shape
         batch = self.node_batch if shape is None else shape[0]
         self.set_shape(ref, [batch] + [None] * (rank - 1))
         return self.shapes[ref]
@@ -303,6 +334,8 @@ class _Solver:
     def axis(self, ref, axis, value, code="E_CONSTRAINT"):
         shape = self.shapes.get(ref)
         if shape is None or value is None or not (0 <= axis < len(shape)):
+            return
+        if shape[axis] == value:
             return
         updated = [None] * len(shape)
         updated[0] = shape[0]
@@ -366,8 +399,8 @@ class _Solver:
     def apply(self, node):
         self.node = node
         spec = self.specs[node.id]
-        view = NodeView(self, node, spec)
-        refs = None if spec.batch == "relation" else self.port_refs(node)
+        view = self.views[node.id]
+        refs = self.node_refs[node.id]
         self.node_batch = None
         if refs is not None:
             self.share_batch(refs)
@@ -386,11 +419,11 @@ class _Solver:
         participate equally; every shared occurrence is an equation. An
         ellipsis stands for the same run of middle axes on every port using it.
         """
-        entries = [(port.name, port.pattern) for port in (*spec.inputs, *spec.outputs) if port.pattern is not None]
+        entries = spec._pattern_entries
         if not entries:
             return
         args = view.args
-        bound = {arg.dim: name for name, arg in spec.args.items() if arg.dim is not None}
+        bound = spec._dim_bound_args
         # Determine the shared ellipsis length from any port with a known rank.
         ellipsis_length = None
         for name, pattern in entries:
@@ -440,10 +473,13 @@ class _Solver:
                 view.arg(arg_name, values[symbol])
 
     def run(self):
-        for _ in range(self.limits["max_iterations"]):
+        for iteration in range(self.limits["max_iterations"]):
             self.changed = False
             for node in self.nodes:
                 self.apply(node)
+            if iteration > 0 and not self.changed:
+                break
+            self.changed = False
             for node in reversed(self.nodes):
                 self.apply(node)
             if not self.changed:
@@ -525,13 +561,14 @@ def resolve_graph(
         resolved = solver.run()
     leading_input = next(iter(inputs.values()))
     leading_output = next(iter(outputs.values()))
-    return ResolvedPlan(resolved, leading_input["shape"], leading_output["shape"], leading_output["ref"],
+    plan = ResolvedPlan(resolved, leading_input["shape"], leading_output["shape"], leading_output["ref"],
                         graph.dtype, graph.frontend, registry, input_dtype=leading_input["dtype"],
                         named_inputs=inputs, named_outputs=outputs)
+    object.__setattr__(plan, "_validated_stamp", (id(registry), tuple(sorted(limits.items()))))
+    return plan
 
 
-def _shape_text(shape):
-    return "[" + ", ".join(str(part) for part in shape) + "]"
+_shape_text = format_shape
 
 
 def _plan_differences(plan, verified, registry):
@@ -625,6 +662,7 @@ def validate_concrete_plan(
         raise HNDLError("E_SCHEMA", "Expected an immutable ResolvedPlan")
     registry = registry or plan.registry or Registry.builtins()
     bounds = _limits(limits)
+    stamp = (id(registry), tuple(sorted(bounds.items())))
     if (type(plan.schema_version) is not int or plan.schema_version != 1
             or type(plan.resolution_version) is not int or plan.resolution_version != 1):
         raise HNDLError("E_STATE_VERSION", "Expected plan schema 1 and resolution version 1")
@@ -634,6 +672,12 @@ def validate_concrete_plan(
             raise HNDLError("E_SCHEMA", "Saved port contracts are incomplete", node=node.id)
         for shape in (*node.input_shapes.values(), *node.output_shapes.values()):
             _contract(shape, f"{node.id} port", bounds, multiples=True)
+        if node.initialization is not DEFAULT_INITIALIZATION:
+            validate_initialization(node.initialization)
+        if node.trainability is not DEFAULT_TRAINABILITY:
+            validate_trainability(node.trainability)
+    if getattr(plan, "_validated_stamp", None) == stamp:
+        return plan
     graph = Graph(tuple(Node(node.id, node.op, node.args, node.inputs, node.outputs, node.source,
                              initialization=node.initialization, trainability=node.trainability) for node in plan.nodes),
                   plan.input_shape, plan.output_shape, plan.output_ref, plan.dtype, plan.frontend,
@@ -641,7 +685,9 @@ def validate_concrete_plan(
                   named_outputs=plan.named_outputs)
     verified = resolve_graph(graph, registry, bounds)
     if plan.semantic_digest == verified.semantic_digest:
-        return replace(plan, registry=registry)
+        res = replace(plan, registry=registry)
+        object.__setattr__(res, "_validated_stamp", stamp)
+        return res
     benign, conflicts = _plan_differences(plan, verified, registry)
     if conflicts or not benign:
         details = conflicts or ["the re-resolved plan differs in a field outside node arguments and port shapes"]
@@ -652,4 +698,6 @@ def validate_concrete_plan(
                   "already determines:\n  " + "\n  ".join(benign)
                   + f"\nIts semantic digest changes from {plan.semantic_digest} to {verified.semantic_digest}; "
                   "save it again to keep the completed form.", stacklevel=2)
-    return _completed(plan, verified, registry)
+    completed = _completed(plan, verified, registry)
+    object.__setattr__(completed, "_validated_stamp", stamp)
+    return completed

@@ -54,6 +54,12 @@ def _error(code, message, source=None, node=None):
     return HNDLError(code, message, node=node, **source_location(source))
 
 
+def _rethrow_with_source(exc, source, node_context):
+    if source is not None and exc.line is None:
+        raise _error(exc.code, exc.message, source, node=exc.node or node_context) from None
+    raise HNDLError(exc.code, exc.message, node=exc.node or node_context, **source_location(source)) from None
+
+
 def _foreign_operator(registry, op):
     if op.key in registry._identities:
         problem = "declares that identity with a different implementation"
@@ -116,36 +122,14 @@ class Capture:
             raise _error("E_CAPTURE", "Input must be a symbolic tensor from this capture", source, node=node)
         return value
 
-    def emit(
+    def _bind_inputs(
         self,
         op: Operator,
-        positional: Sequence[Any],
-        keyword: Mapping[str, Any],
-        *,
-        source: Mapping[str, Any] | None = None,
-    ) -> Symbol | tuple[Symbol, ...]:
-        # Factories carry exact identities, never whichever alias is newest.
-        # ``registry.ops`` binds a declaration when the attribute is read; it
-        # may run in any capture whose registry holds that very declaration,
-        # as every registry built from ``Registry.builtins()`` does for the
-        # built-ins, and nowhere else.
-        args = list(positional)
-        kwargs = dict(keyword)
-        name = kwargs.pop("name", _DEFAULT)
-        node_context = name if (name is not _DEFAULT and isinstance(name, str) and _NODE_ID.fullmatch(name)) else None
-        if self.registry._identities.get(op.key) is not op:
-            raise _error("E_CAPTURE", _foreign_operator(self.registry, op), source, node=node_context)
-        policy = kwargs.pop("policy", _DEFAULT)
-        construction = {key: kwargs.pop(key) for key in ("init", "trainable") if key in kwargs}
-        try:
-            initialization, trainability = normalize_settings(**construction)
-        except HNDLError as exc:
-            if source is not None and exc.line is None:
-                raise _error(exc.code, exc.message, source, node=exc.node or node_context) from None
-            raise HNDLError(exc.code, exc.message, node=exc.node or node_context, **source_location(source)) from None
-        if policy is not _DEFAULT and type(policy) is not str:
-            raise _error("E_ARGUMENT", "policy must be a registered policy name", source, node=node_context)
-        policy = None if policy is _DEFAULT else policy
+        args: list[Any],
+        kwargs: dict[str, Any],
+        source: Mapping[str, Any] | None,
+        node_context: str | None,
+    ) -> dict[str, Symbol]:
         ports = tuple(op.input_ports)
         bindings = {}
 
@@ -156,7 +140,7 @@ class Capture:
                 bindings[f"{prefix}{count}"] = self._symbol(args.pop(0), source, node=node_context)
                 count += 1
             for key in tuple(kwargs):
-                if re.fullmatch(re.escape(prefix) + r"[0-9]+", key):
+                if op._variadic_member(prefix, key):
                     if key in bindings:
                         raise _error("E_BINDING", f"Duplicate input binding {key}", source, node=node_context)
                     bindings[key] = self._symbol(kwargs.pop(key), source, node=node_context)
@@ -189,6 +173,38 @@ class Capture:
                 if port not in bindings:
                     raise _error("E_BINDING", f"Multi-input operation requires explicit port {port}", source, node=node_context)
 
+        return bindings
+
+    def emit(
+        self,
+        op: Operator,
+        positional: Sequence[Any],
+        keyword: Mapping[str, Any],
+        *,
+        source: Mapping[str, Any] | None = None,
+    ) -> Symbol | tuple[Symbol, ...]:
+        # Factories carry exact identities, never whichever alias is newest.
+        # ``registry.ops`` binds a declaration when the attribute is read; it
+        # may run in any capture whose registry holds that very declaration,
+        # as every registry built from ``Registry.builtins()`` does for the
+        # built-ins, and nowhere else.
+        args = list(positional)
+        kwargs = dict(keyword)
+        name = kwargs.pop("name", _DEFAULT)
+        node_context = name if (name is not _DEFAULT and isinstance(name, str) and _NODE_ID.fullmatch(name)) else None
+        if self.registry._identities.get(op.key) is not op:
+            raise _error("E_CAPTURE", _foreign_operator(self.registry, op), source, node=node_context)
+        policy = kwargs.pop("policy", _DEFAULT)
+        construction = {key: kwargs.pop(key) for key in ("init", "trainable") if key in kwargs}
+        try:
+            initialization, trainability = normalize_settings(**construction)
+        except HNDLError as exc:
+            _rethrow_with_source(exc, source, node_context)
+        if policy is not _DEFAULT and type(policy) is not str:
+            raise _error("E_ARGUMENT", "policy must be a registered policy name", source, node=node_context)
+        policy = None if policy is _DEFAULT else policy
+        bindings = self._bind_inputs(op, args, kwargs, source, node_context)
+
         if name is _DEFAULT:
             name = f"n{len(self.nodes)}"
         if type(name) is not str or _NODE_ID.fullmatch(name) is None:
@@ -204,9 +220,7 @@ class Capture:
         try:
             normalized = normalize_arguments(op, tuple(args), kwargs, policy=policy)
         except HNDLError as exc:
-            if source is not None and exc.line is None:
-                raise _error(exc.code, exc.message, source, node=exc.node or node_context) from None
-            raise HNDLError(exc.code, exc.message, node=exc.node or node_context, **source_location(source)) from None
+            _rethrow_with_source(exc, source, node_context)
         profile = op.policies[policy] if policy else None
         policy_fields = set(profile.requires) if profile else set()
         metadata = dict(source or {})

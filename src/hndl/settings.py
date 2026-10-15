@@ -10,6 +10,8 @@ from collections.abc import Mapping
 import math
 import re
 import struct
+from types import MappingProxyType
+from typing import Any
 
 from .errors import HNDLError
 
@@ -21,6 +23,9 @@ INITIALIZER = "torch_default@1"
 INITIALIZER_SCHEMES = "torch_default@2"
 INITIALIZER_VERSIONS = (INITIALIZER, INITIALIZER_SCHEMES)
 _SEGMENT = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)\Z")
+
+DEFAULT_INITIALIZATION: Mapping[str, Any] = MappingProxyType({"kind": INITIALIZER, "overrides": MappingProxyType({})})
+DEFAULT_TRAINABILITY: Mapping[str, Any] = MappingProxyType({"default": None, "overrides": MappingProxyType({})})
 
 # Random initializer schemes, one per ``torch.nn.init`` function, with torch's
 # own keyword names and defaults. Float fields round to float32 exactly like
@@ -136,7 +141,9 @@ def _validate_scheme(value, *, path):
 
 def normalize_initialization(init=UNSET):
     """Normalize raw author metadata; omission and an empty map are equal."""
-    overrides = {} if init is UNSET else _mapping(init, code="E_INITIALIZATION", label="init")
+    if init is UNSET:
+        return DEFAULT_INITIALIZATION
+    overrides = _mapping(init, code="E_INITIALIZATION", label="init")
     normalized, schemes = {}, False
     for path, value in overrides.items():
         if isinstance(value, Mapping):
@@ -153,7 +160,7 @@ def normalize_initialization(init=UNSET):
 def normalize_trainability(trainable=UNSET):
     """None in the canonical default preserves constructor requires_grad."""
     if trainable is UNSET:
-        return {"default": None, "overrides": {}}
+        return DEFAULT_TRAINABILITY
     if type(trainable) is bool:
         return {"default": trainable, "overrides": {}}
     overrides = _mapping(trainable, code="E_TRAINABILITY", label="trainable")
@@ -174,6 +181,8 @@ def validate_initialization(value):
     Both versions are accepted forever: ``torch_default@1`` carries constants
     only, ``torch_default@2`` adds scheme records and requires at least one.
     """
+    if value is DEFAULT_INITIALIZATION or value == DEFAULT_INITIALIZATION:
+        return DEFAULT_INITIALIZATION
     if not isinstance(value, Mapping) or len(value) != 2 or set(value) != {"kind", "overrides"}:
         raise HNDLError("E_INITIALIZATION", "Canonical initialization requires exactly kind and overrides")
     kind = value["kind"]
@@ -203,6 +212,8 @@ def validate_initialization(value):
 
 def validate_trainability(value):
     """Validate a canonical mask without changing its default or overrides."""
+    if value is DEFAULT_TRAINABILITY or value == DEFAULT_TRAINABILITY:
+        return DEFAULT_TRAINABILITY
     if not isinstance(value, Mapping) or len(value) != 2 or set(value) != {"default", "overrides"}:
         raise HNDLError("E_TRAINABILITY", "Canonical trainability requires exactly default and overrides")
     default = value["default"]

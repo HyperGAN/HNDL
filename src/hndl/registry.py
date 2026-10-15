@@ -1,5 +1,7 @@
 """Operator registries: exact alias/identity bindings and argument normalization."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -10,6 +12,7 @@ from .operator import Operator, make_operator
 from .settings import SCHEME_NAMES
 
 _ACTIVE = ContextVar("hndl_active_registry", default=None)
+_BUILTINS_TEMPLATE: Registry | None = None
 MAX_PROVIDER_NAME = 64
 
 
@@ -37,10 +40,16 @@ class Registry:
 
     @classmethod
     def builtins(cls):
-        from .operators import discover
+        global _BUILTINS_TEMPLATE
+        if _BUILTINS_TEMPLATE is None:
+            from .operators import discover
+            template = cls()
+            for spec in discover():
+                template._add(spec)
+            _BUILTINS_TEMPLATE = template
         registry = cls()
-        for spec in discover():
-            registry._add(spec)
+        registry._aliases = dict(_BUILTINS_TEMPLATE._aliases)
+        registry._identities = dict(_BUILTINS_TEMPLATE._identities)
         return registry
 
     def _add(self, spec):
@@ -198,13 +207,15 @@ def normalize_arguments(op, positional, kwargs, policy=None):
                 if actual != expected:
                     raise HNDLError("E_POLICY_CONFLICT", f"Explicit {name}={args[name]!r} conflicts with {policy} requirement {value}")
             args[name] = expected
+    normalized = {}
+    for name, value in args.items():
+        normalized[name] = op.args[name].validate(value, name)
     for name, arg in op.args.items():
-        if name not in args and arg.has_default:
-            args[name] = arg.default
-    for name in op.required:
-        if name not in args:
-            raise HNDLError("E_ARGUMENT", f"{op.alias} requires {name}; supply it or select an applicable policy")
-    normalized = {name: op.args[name].validate(value, name) for name, value in args.items()}
+        if name not in normalized:
+            if arg.has_default:
+                normalized[name] = arg.default
+            elif arg.required:
+                raise HNDLError("E_ARGUMENT", f"{op.alias} requires {name}; supply it or select an applicable policy")
     if op.validate is not None:
         op.validate(normalized)
     return normalized

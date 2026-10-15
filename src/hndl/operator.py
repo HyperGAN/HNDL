@@ -464,18 +464,18 @@ class Operator(Immutable):
                         "E_SCHEMA",
                         f"Argument {name!r} cannot be positional when positional_rest ({self.positional_rest!r}) is used",
                     )
+        object.__setattr__(self, "input_ports", tuple(port.name for port in self.inputs))
+        object.__setattr__(self, "output_ports", tuple(port.name for port in self.outputs))
+        pos_names = () if self.positional_rest is not None else tuple(name for name, arg in self.args.items() if arg.positional)
+        object.__setattr__(self, "positional_names", pos_names)
+        object.__setattr__(self, "required", tuple(name for name, arg in self.args.items() if arg.required))
+        object.__setattr__(self, "_port_dtypes", {p.name: p.dtype for p in (*self.inputs, *self.outputs)})
+        object.__setattr__(self, "_pattern_entries", tuple((port.name, port.pattern) for port in (*self.inputs, *self.outputs) if port.pattern is not None))
+        object.__setattr__(self, "_dim_bound_args", {arg.dim: name for name, arg in self.args.items() if arg.dim is not None})
 
     @property
     def key(self) -> str:
         return f"{self.identity}@{self.version}"
-
-    @property
-    def input_ports(self) -> tuple[str, ...]:
-        return tuple(port.name for port in self.inputs)
-
-    @property
-    def output_ports(self) -> tuple[str, ...]:
-        return tuple(port.name for port in self.outputs)
 
     @property
     def variadic(self) -> str | None:
@@ -520,22 +520,12 @@ class Operator(Immutable):
         elif self._variadic_member(self.variadic_output, port):
             declared = self.outputs[0].dtype
         else:
-            declared = next((p.dtype for p in (*self.inputs, *self.outputs) if p.name == port), "compute")
+            declared = self._port_dtypes.get(port, "compute")
         return compute if declared == "compute" else declared
-
-    @property
-    def positional_names(self) -> tuple[str, ...]:
-        if self.positional_rest is not None:
-            return ()
-        return tuple(name for name, arg in self.args.items() if arg.positional)
 
     @property
     def defaults(self) -> dict[str, Any]:
         return {name: arg.default for name, arg in self.args.items() if arg.has_default}
-
-    @property
-    def required(self):
-        return tuple(name for name, arg in self.args.items() if arg.required)
 
 
 def _check_init_signature(cls, args, symbols):

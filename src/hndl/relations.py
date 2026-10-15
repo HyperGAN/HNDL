@@ -116,20 +116,7 @@ def _extents(s, axis, x, out):
     return extents
 
 
-def conv_axis(s, *args, kernel=None, stride=1, padding=0, dilation=1, x="x", out="out", **kwargs):
-    """Relate one axis of ``x`` and ``out`` by :func:`conv_output`, in both directions.
-
-    A known input extent fixes the output extent. A known output extent
-    narrows the input to :func:`conv_input_range`; with ``stride > 1`` that
-    is an interval, which the resolver reports as ambiguous rather than
-    picking a value unless another relation fixes it. An output extent no
-    positive input reaches fails with ``E_CONSTRAINT``.
-
-    Call it once per strided axis from a ``relation=`` function. It does not
-    set ranks or touch other axes: pair it with ``s.rank`` and ``s.equal`` or
-    ``s.axis`` for the rest of the shape. A port whose rank has no ``axis``
-    fails with ``E_CONSTRAINT``.
-    """
+def _unpack_conv_axis_args(args, kwargs, kernel, stride, padding, dilation, x, out):
     if not args and "axis" not in kwargs:
         raise HNDLError("E_ARGUMENT", "conv_axis requires an axis argument")
 
@@ -153,6 +140,27 @@ def conv_axis(s, *args, kernel=None, stride=1, padding=0, dilation=1, x="x", out
 
     if "kernel" in kwargs:
         kernel = kwargs["kernel"]
+
+    return axis, kernel, stride, padding, dilation, x, out
+
+
+def conv_axis(s, *args, kernel=None, stride=1, padding=0, dilation=1, x="x", out="out", **kwargs):
+    """Relate one axis of ``x`` and ``out`` by :func:`conv_output`, in both directions.
+
+    A known input extent fixes the output extent. A known output extent
+    narrows the input to :func:`conv_input_range`; with ``stride > 1`` that
+    is an interval, which the resolver reports as ambiguous rather than
+    picking a value unless another relation fixes it. An output extent no
+    positive input reaches fails with ``E_CONSTRAINT``.
+
+    Call it once per strided axis from a ``relation=`` function. It does not
+    set ranks or touch other axes: pair it with ``s.rank`` and ``s.equal`` or
+    ``s.axis`` for the rest of the shape. A port whose rank has no ``axis``
+    fails with ``E_CONSTRAINT``.
+    """
+    axis, kernel, stride, padding, dilation, x, out = _unpack_conv_axis_args(
+        args, kwargs, kernel, stride, padding, dilation, x, out
+    )
 
     if s is None:
         if axis is None or not (0 <= axis < 4):

@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from .errors import HNDLError
-from .settings import (normalize_initialization, normalize_trainability,
+from .settings import (DEFAULT_INITIALIZATION, DEFAULT_TRAINABILITY,
                        validate_initialization, validate_trainability)
 
 if TYPE_CHECKING:
@@ -128,6 +128,18 @@ def digest(value):
     return sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def format_shape(shape: Any) -> str:
+    """Format a shape sequence into the canonical bracketed string '[B, 64]'."""
+    return "[" + ", ".join(str(part) for part in shape) + "]"
+
+
+def _validate_port_name(name: str, label: str) -> None:
+    if type(name) is not str or _PORT_NAME.fullmatch(name) is None:
+        raise HNDLError("E_SCHEMA", f"{label} names must match [a-z][a-z0-9_]*")
+    if keyword.iskeyword(name):
+        raise HNDLError("E_SCHEMA", f"{label} names must not be Python keywords")
+
+
 def named_contracts(value, label, default_name):
     """Accept one shape tuple or a mapping of named shapes; keep author order.
 
@@ -138,10 +150,7 @@ def named_contracts(value, label, default_name):
             raise HNDLError("E_SCHEMA", f"{label} must name between 1 and {MAX_EXTERNAL_PORTS} tensors")
         names = tuple(value)
         for name in names:
-            if type(name) is not str or _PORT_NAME.fullmatch(name) is None:
-                raise HNDLError("E_SCHEMA", f"{label} names must match [a-z][a-z0-9_]*")
-            if keyword.iskeyword(name):
-                raise HNDLError("E_SCHEMA", f"{label} names must not be Python keywords")
+            _validate_port_name(name, label)
         return {name: _shape(value[name], f"{label}[{name}]") for name in names}, True
     return {default_name: _shape(value, label)}, False
 
@@ -203,10 +212,7 @@ def _entries(mapping, label, required, optional):
     if not isinstance(mapping, Mapping) or not mapping or len(mapping) > MAX_EXTERNAL_PORTS:
         raise HNDLError("E_SCHEMA", f"Graph {label} must be a mapping of 1 to {MAX_EXTERNAL_PORTS} named contracts")
     for name, entry in mapping.items():
-        if type(name) is not str or _PORT_NAME.fullmatch(name) is None:
-            raise HNDLError("E_SCHEMA", f"External {label} names must match [a-z][a-z0-9_]*")
-        if keyword.iskeyword(name):
-            raise HNDLError("E_SCHEMA", f"External {label} names must not be Python keywords")
+        _validate_port_name(name, f"External {label}")
         if (not isinstance(entry, Mapping) or set(required) - set(entry)
                 or set(entry) - set(required) - set(optional)):
             raise HNDLError("E_SCHEMA", f"Each external {label[:-1]} declares {', '.join(required)}")
@@ -257,13 +263,10 @@ def _is_chain(plan: ResolvedPlan | Graph) -> bool:
 
 def contract_header(plan: ResolvedPlan | Graph, label: str) -> str:
     """The one-line contract header shared by plans and built modules."""
-    def shape(value: tuple[int | str, ...]) -> str:
-        return "[" + ", ".join(str(part) for part in value) + "]"
-
     def side(ports: Mapping[str, Any], default: str) -> str:
         if tuple(ports) == (default,):
-            return shape(ports[default]["shape"])
-        return ", ".join(f"{name}={shape(entry['shape'])}" for name, entry in ports.items())
+            return format_shape(ports[default]["shape"])
+        return ", ".join(f"{name}={format_shape(entry['shape'])}" for name, entry in ports.items())
 
     header = (f"{label}: {side(plan.inputs, EXTERNAL_INPUT)} -> "
               f"{side(plan.outputs, EXTERNAL_OUTPUT)}  dtype={plan.dtype}")
@@ -284,8 +287,8 @@ class Node(Immutable):
     inputs: Mapping[str, str] = field(default_factory=dict)
     outputs: tuple[str, ...] = ("out",)
     source: Mapping[str, Any] | None = None
-    initialization: Mapping[str, Any] = field(default_factory=normalize_initialization, kw_only=True)
-    trainability: Mapping[str, Any] = field(default_factory=normalize_trainability, kw_only=True)
+    initialization: Mapping[str, Any] = field(default=DEFAULT_INITIALIZATION, kw_only=True)
+    trainability: Mapping[str, Any] = field(default=DEFAULT_TRAINABILITY, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.args, Mapping):
@@ -300,8 +303,14 @@ class Node(Immutable):
         object.__setattr__(self, "inputs", freeze(self.inputs))
         object.__setattr__(self, "outputs", tuple(self.outputs))
         object.__setattr__(self, "source", freeze(self.source))
-        object.__setattr__(self, "initialization", freeze(validate_initialization(self.initialization)))
-        object.__setattr__(self, "trainability", freeze(validate_trainability(self.trainability)))
+        if self.initialization is DEFAULT_INITIALIZATION or self.initialization == DEFAULT_INITIALIZATION:
+            object.__setattr__(self, "initialization", DEFAULT_INITIALIZATION)
+        else:
+            object.__setattr__(self, "initialization", freeze(validate_initialization(self.initialization)))
+        if self.trainability is DEFAULT_TRAINABILITY or self.trainability == DEFAULT_TRAINABILITY:
+            object.__setattr__(self, "trainability", DEFAULT_TRAINABILITY)
+        else:
+            object.__setattr__(self, "trainability", freeze(validate_trainability(self.trainability)))
 
 
 @dataclass(frozen=True)
@@ -364,6 +373,8 @@ class ResolvedPlan(Immutable):
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         _external_ports(self)
+        object.__setattr__(self, "_semantic_digest", digest(self._data(semantic=True)))
+        object.__setattr__(self, "_validated_stamp", None)
 
     inputs = property(lambda self: self._inputs)
     outputs = property(lambda self: self._outputs)
@@ -394,13 +405,14 @@ class ResolvedPlan(Immutable):
 
     @property
     def semantic_digest(self) -> str:
-        return digest(self._data(semantic=True))
+        return self._semantic_digest
 
     def to_json(self) -> str:
         data = self._data()
-        data["semantic_digest"] = self.semantic_digest
-        data["artifact_digest"] = digest(data)
-        return canonical(data)
+        data["semantic_digest"] = self._semantic_digest
+        data_str = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        data["artifact_digest"] = sha256(data_str.encode("utf-8")).hexdigest()
+        return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
     @classmethod
     def from_json(
@@ -467,26 +479,7 @@ class ResolvedPlan(Immutable):
         return op.split("@")[0] if "@" in op else op
 
     def __repr__(self) -> str:
-        def shape(value: tuple[int | str, ...]) -> str:
-            return "[" + ", ".join(str(part) for part in value) + "]"
-
-        lines = [contract_header(self, "Network")]
-        chain = _is_chain(self)
-        rows = [("index", "name", "operation", "input shape", "output shape")
-                if chain else ("name", "operation", "input shapes", "output shapes")]
-        for index, node in enumerate(self.nodes):
-            op_name = self._operation_name(node.op)
-            if chain:
-                rows.append((str(index), node.id, op_name,
-                             shape(next(iter(node.input_shapes.values()))),
-                             shape(next(iter(node.output_shapes.values())))))
-            else:
-                inputs = ", ".join(f"{p}={node.inputs[p]}:{shape(s)}" for p, s in node.input_shapes.items())
-                outputs = ", ".join(f"{p}={shape(s)}" for p, s in node.output_shapes.items())
-                rows.append((node.id, op_name, inputs, outputs))
-        widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
-        lines.extend("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip() for row in rows)
-        return "\n".join(lines)
+        return format_plan_table(self, "Network")
 
     def describe(self) -> str:
         lines = [repr(self), f"Semantic digest: {self.semantic_digest}"]
@@ -494,3 +487,26 @@ class ResolvedPlan(Immutable):
             lines.append(f"{node.id}: " + ", ".join(f"{key}={plain(value)}" for key, value in node.provenance.items()))
             lines.append(f"  initialization={plain(node.initialization)}, trainability={plain(node.trainability)}")
         return "\n".join(lines)
+
+
+def format_plan_table(plan: ResolvedPlan, label: str) -> str:
+    """Render a formatted ASCII table representing a resolved plan."""
+    lines = [contract_header(plan, label)]
+    chain = _is_chain(plan)
+    rows = [("index", "name", "operation", "input shape", "output shape")
+            if chain else ("name", "operation", "input shapes", "output shapes")]
+    for index, node in enumerate(plan.nodes):
+        op_name = plan._operation_name(node.op) if hasattr(plan, "_operation_name") else (
+            node.op.split("@")[0] if "@" in node.op else node.op
+        )
+        if chain:
+            rows.append((str(index), node.id, op_name,
+                         format_shape(next(iter(node.input_shapes.values()))),
+                         format_shape(next(iter(node.output_shapes.values())))))
+        else:
+            inputs = ", ".join(f"{p}={node.inputs[p]}:{format_shape(s)}" for p, s in node.input_shapes.items())
+            outputs = ", ".join(f"{p}={format_shape(s)}" for p, s in node.output_shapes.items())
+            rows.append((node.id, op_name, inputs, outputs))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    lines.extend("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip() for row in rows)
+    return "\n".join(lines)
