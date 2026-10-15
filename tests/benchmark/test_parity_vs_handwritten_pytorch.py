@@ -86,14 +86,11 @@ TOLERANCE = 1.5
 #: show per-call overhead and whose ratio is dominated by machine noise.
 ARITHMETIC_TOLERANCE = 2.0
 
-DEVICE = "cpu"
-
-
 #: How many interleaved rounds each side is timed in; see :func:`_compare`.
 ROUNDS = 10
 
 
-def _compare(name, hndl_module, handwritten, inputs, min_run_time, tolerance=TOLERANCE):
+def _compare(name, hndl_module, handwritten, inputs, min_run_time, tolerance=TOLERANCE, device=None):
     """Time both modules on ``inputs``, print the pair, and assert the ratio.
 
     The two sides are timed in :data:`ROUNDS` interleaved rounds, alternating
@@ -103,12 +100,25 @@ def _compare(name, hndl_module, handwritten, inputs, min_run_time, tolerance=TOL
     ones it touched least, and interleaving keeps a burst of load from landing
     on one side's whole measurement.
     """
+    if device is None and inputs and hasattr(inputs[0], "device"):
+        device = inputs[0].device
+    device_label = f" [{device}]" if device is not None else ""
+
     hndl_module.eval()
     handwritten.eval()
     assert hndl_module is not handwritten
     sides = {"hndl": hndl_module, "handwritten": handwritten}
     rounds = {side: [] for side in sides}
     with torch.no_grad():
+        # Pre-measurement warmup to eliminate first-pass caching, signature
+        # validation, fast-program construction, and CUDA kernel compilation skew.
+        hndl_module(*inputs)
+        handwritten(*inputs)
+        if torch.cuda.is_available() and device is not None and (
+            str(device).startswith("cuda") or getattr(device, "type", None) == "cuda"
+        ):
+            torch.cuda.synchronize(device=device)
+
         for number in range(ROUNDS):
             for side in (sides if number % 2 == 0 else reversed(sides)):
                 module = sides[side]
@@ -117,11 +127,11 @@ def _compare(name, hndl_module, handwritten, inputs, min_run_time, tolerance=TOL
     hndl_measurement, handwritten_measurement = (min(rounds[side], key=lambda m: m.median) for side in sides)
     ratio = hndl_measurement.median / handwritten_measurement.median
     print()
-    print(format_measurement(f"{name} hndl", hndl_measurement))
-    print(format_measurement(f"{name} handwritten", handwritten_measurement))
-    print(f"{name} ratio: {ratio:.2f}x (tolerance {tolerance:.2f}x)")
+    print(format_measurement(f"{name}{device_label} hndl", hndl_measurement))
+    print(format_measurement(f"{name}{device_label} handwritten", handwritten_measurement))
+    print(f"{name}{device_label} ratio: {ratio:.2f}x (tolerance {tolerance:.2f}x)")
     assert ratio <= tolerance, (
-        f"{name}: hndl is {ratio:.2f}x hand-written PyTorch, over the {tolerance:.2f}x tolerance "
+        f"{name}{device_label}: hndl is {ratio:.2f}x hand-written PyTorch, over the {tolerance:.2f}x tolerance "
         f"({format_measurement('hndl', hndl_measurement)}; "
         f"{format_measurement('handwritten', handwritten_measurement)})"
     )
@@ -149,7 +159,7 @@ def test_mlp_matches_handwritten_sequential(benchmark_min_time, device):
     # Batch 256: large enough that the fixed per-call validation cost is
     # amortized rather than being the whole measurement (see the module docstring).
     x = torch.randn(256, 64, device=device)
-    _compare("mlp", built, handwritten, (x,), benchmark_min_time)
+    _compare("mlp", built, handwritten, (x,), benchmark_min_time, device=device)
 
 
 CONV_SOURCE = """
@@ -194,7 +204,7 @@ def test_conv_stack_matches_handwritten_module(benchmark_min_time, device):
                                output_shape=("B", 10), device=device)
     handwritten = HandwrittenConvStack().to(device)
     x = torch.randn(16, 3, 32, 32, device=device)
-    _compare("conv_stack", built, handwritten, (x,), benchmark_min_time, tolerance=ARITHMETIC_TOLERANCE)
+    _compare("conv_stack", built, handwritten, (x,), benchmark_min_time, tolerance=ARITHMETIC_TOLERANCE, device=device)
 
 
 TRANSFORMER_SOURCE = "transformer_block(4)"
@@ -250,5 +260,5 @@ def test_transformer_block_matches_handwritten_block(benchmark_min_time, device)
     built = hndl.torch.network(TRANSFORMER_SOURCE, input_shape=shape, output_shape=shape, device=device)
     handwritten = HandwrittenTransformerBlock().to(device)
     x = torch.randn(8, 16, TRANSFORMER_WIDTH, device=device)
-    _compare("transformer_block", built, handwritten, (x,), benchmark_min_time)
+    _compare("transformer_block", built, handwritten, (x,), benchmark_min_time, device=device)
 

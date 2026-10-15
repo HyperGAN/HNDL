@@ -19,13 +19,12 @@ import pytest
 import torch
 
 from hndl import resolve
-from hndl.torch import DTYPES, build
-from tests._network_examples import load, names
+from hndl.torch import build
+from tests._network_examples import load, names, random_inputs
 from tests.benchmark._timing import format_measurement, measure
 
 pytestmark = pytest.mark.benchmark
 
-DEVICE = "cpu"
 BATCH = 2
 
 
@@ -38,25 +37,11 @@ def _build_eval_model(name, device="cpu"):
     return plan, model
 
 
-def _random_inputs(plan, generator, device="cpu"):
-    """Random tensors matching ``plan.inputs``, mirroring test_network_examples."""
-    inputs = {}
-    for port, entry in plan.inputs.items():
-        shape = (BATCH, *entry["shape"][1:])
-        if entry["dtype"] in ("int64", "int32"):
-            inputs[port] = torch.randint(0, 8, shape, device=device, generator=generator,
-                                         dtype=getattr(torch, entry["dtype"]))
-        else:
-            inputs[port] = torch.randn(shape, device=device, generator=generator,
-                                       dtype=DTYPES[plan.dtype])
-    return inputs
-
-
 @pytest.mark.parametrize("name", names())
 def test_example_network_inference_latency(name, benchmark_min_time, device):
     plan, model = _build_eval_model(name, device=device)
     generator = torch.Generator(device=device).manual_seed(1)
-    inputs = _random_inputs(plan, generator, device=device)
+    inputs = random_inputs(plan, device=device, batch_size=BATCH, generator=generator)
     outputs = {}
 
     def forward():

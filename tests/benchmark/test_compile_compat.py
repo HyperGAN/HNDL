@@ -20,8 +20,8 @@ import torch
 import torch._dynamo
 
 from hndl import resolve
-from hndl.torch import DTYPES, build
-from tests._network_examples import load, names
+from hndl.torch import build
+from tests._network_examples import load, names, random_inputs
 
 from ._timing import format_measurement, measure
 
@@ -39,18 +39,6 @@ CUDA_TOLERANCE = {"rtol": 1e-3, "atol": 1e-3}
 MAX_REASON = 400
 
 
-def _random_inputs(plan, device="cpu"):
-    """One batch of random inputs matching ``plan.inputs``, batch size 2."""
-    inputs = {}
-    for name, entry in plan.inputs.items():
-        shape = (2, *entry["shape"][1:])
-        if entry["dtype"] in ("int64", "int32"):
-            inputs[name] = torch.randint(0, 8, shape, device=device, dtype=getattr(torch, entry["dtype"]))
-        else:
-            inputs[name] = torch.randn(shape, device=device, dtype=DTYPES[plan.dtype])
-    return inputs
-
-
 def _truncate(text):
     text = " ".join(str(text).split())
     return text if len(text) <= MAX_REASON else text[:MAX_REASON] + "..."
@@ -65,8 +53,7 @@ def test_torch_compile_matches_eager(name, benchmark_min_time, device):
     source, _meta, kwargs = load(name)
     plan = resolve(source, **kwargs)
     model = build(plan, device=device, initialization_seed=1).eval()
-    inputs = _random_inputs(plan, device=device)
-
+    inputs = random_inputs(plan, device=device, batch_size=2)
 
     with torch.no_grad():
         eager_output = model(**inputs)
@@ -76,7 +63,7 @@ def test_torch_compile_matches_eager(name, benchmark_min_time, device):
         with torch.no_grad():
             compiled_output = compiled(**inputs)
     except Exception as exc:  # noqa: BLE001 - any dynamo/inductor failure is a "no"
-        print(f"\n{name}: compiles: no ({type(exc).__name__})")
+        print(f"\n{name} [{device}]: compiles: no ({type(exc).__name__})")
         pytest.skip(f"torch.compile unsupported for {name}: {_truncate(exc)}")
 
     tol = CUDA_TOLERANCE if str(device).startswith("cuda") else TOLERANCE
@@ -93,6 +80,6 @@ def test_torch_compile_matches_eager(name, benchmark_min_time, device):
 
     speedup = eager.mean / compiled_timing.mean
     print()
-    print(format_measurement(f"{name} eager   ", eager))
-    print(format_measurement(f"{name} compiled", compiled_timing))
-    print(f"{name}: compiles: yes, speedup: {speedup:.2f}x")
+    print(format_measurement(f"{name} [{device}] eager   ", eager))
+    print(format_measurement(f"{name} [{device}] compiled", compiled_timing))
+    print(f"{name} [{device}]: compiles: yes, speedup: {speedup:.2f}x")
