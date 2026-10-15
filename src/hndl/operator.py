@@ -9,16 +9,20 @@ documentation generator renders it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field, KW_ONLY
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import KW_ONLY, dataclass, field
 import inspect
 import keyword
 import math
 import re
 from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from .errors import HNDLError
 from .types import Immutable
+
+if TYPE_CHECKING:
+    from torch import nn
 
 REQUIRED = object()
 ELLIPSIS = "..."
@@ -44,11 +48,11 @@ _PORT_SPEC = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)(\*?)\s*(?:\[([^\]]*)\])?\s
 _DTYPES = ("compute", "any") + COMPUTE_DTYPES + INDEX_DTYPES
 
 
-def _registry_error(message):
+def _registry_error(message: str) -> None:
     raise HNDLError("E_REGISTRY", message)
 
 
-def _integer_in_range(value, name, minimum, maximum):
+def _integer_in_range(value: Any, name: str, minimum: int | None, maximum: int | None) -> int:
     if type(value) is not int:
         raise HNDLError("E_ARGUMENT", f"{name} must have type int")
     if abs(value) > MAX_INTEGER_ARGUMENT:
@@ -79,19 +83,19 @@ class Arg(Immutable):
     as they did before it existed, and saved plans without it still load.
     """
 
-    type: object
-    default: object = field(default=REQUIRED, repr=False)
+    type: type | str
+    default: Any = field(default=REQUIRED, repr=False)
     _: KW_ONLY
-    min: object = None
-    max: object = None
+    min: int | float | None = None
+    max: int | float | None = None
     exclusive_min: bool = False
     exclusive_max: bool = False
     help: str = ""
     inferable: bool = False
-    dim: object = None
+    dim: str | None = None
     positional: bool = True
-    choices: object = None
-    since: object = None
+    choices: Sequence[str] | None = None
+    since: str | None = None
 
     def __post_init__(self):
         if self.type not in _TYPES:
@@ -245,7 +249,7 @@ class Sym(Immutable):
 @dataclass(frozen=True)
 class Port(Immutable):
     name: str
-    pattern: object = None   # tuple of "B" | Sym | int | ELLIPSIS, or None when unconstrained
+    pattern: tuple[str | Sym | int | None, ...] | None = None
     dtype: str = "compute"
     variadic: bool = False
 
@@ -255,9 +259,9 @@ class Policy(Immutable):
     """A named construction profile: hard requirements that fill omitted fields."""
 
     identity: str
-    requires: Mapping
+    requires: Mapping[str, Any]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if type(self.identity) is not str or not self.identity:
             _registry_error("Policy identity must be a non-empty string")
         if not isinstance(self.requires, Mapping) or not self.requires:
@@ -275,10 +279,10 @@ class Example(Immutable):
     """
 
     source: str
-    input_shape: tuple
-    output_shape: tuple
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]]
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]]
     note: str = ""
-    input_dtype: object = None
+    input_dtype: str | None = None
     network: bool = False
 
     def __post_init__(self):
@@ -431,55 +435,62 @@ class Operator(Immutable):
     summary: str
     doc: str
     category: str
-    inputs: tuple
-    outputs: tuple
-    args: Mapping
-    symbols: frozenset
+    inputs: tuple[Port, ...]
+    outputs: tuple[Port, ...]
+    args: Mapping[str, Arg]
+    symbols: frozenset[str]
     shape_text: str
-    relation: object = None
+    relation: Callable[[Any], None] | None = None
     relation_text: str = ""
-    examples: tuple = ()
-    module: object = None
-    positional_rest: object = None
-    outputs_from: object = None
+    examples: tuple[Example, ...] = ()
+    module: type[nn.Module] | None = None
+    positional_rest: str | None = None
+    outputs_from: str | None = None
     batch: str = "shared"
-    policies: Mapping = field(default_factory=dict)
-    validate: object = None
-    finalize: object = None
-    reference: object = None
-    init_symbols: tuple = ()
-    init_shapes: tuple = ()
+    policies: Mapping[str, Policy] = field(default_factory=dict)
+    validate: Callable[..., None] | None = None
+    finalize: Callable[..., Any] | None = None
+    reference: Callable[..., Any] | None = None
+    init_symbols: tuple[str, ...] = ()
+    init_shapes: tuple[str, ...] = ()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         object.__setattr__(self, "args", MappingProxyType(dict(self.args)))
         object.__setattr__(self, "policies", MappingProxyType(dict(self.policies)))
+        if self.positional_rest is not None:
+            for name, arg in self.args.items():
+                if name != self.positional_rest and getattr(arg, "positional", False):
+                    raise HNDLError(
+                        "E_SCHEMA",
+                        f"Argument {name!r} cannot be positional when positional_rest ({self.positional_rest!r}) is used",
+                    )
 
     @property
-    def key(self):
+    def key(self) -> str:
         return f"{self.identity}@{self.version}"
 
     @property
-    def input_ports(self):
+    def input_ports(self) -> tuple[str, ...]:
         return tuple(port.name for port in self.inputs)
 
     @property
-    def output_ports(self):
+    def output_ports(self) -> tuple[str, ...]:
         return tuple(port.name for port in self.outputs)
 
     @property
-    def variadic(self):
+    def variadic(self) -> str | None:
         return self.inputs[0].name if self.inputs and self.inputs[0].variadic else None
 
     @property
-    def variadic_output(self):
+    def variadic_output(self) -> str | None:
         return self.outputs[0].name if self.outputs and self.outputs[0].variadic else None
 
-    def input_ports_for(self, args):
+    def input_ports_for(self, args: Mapping[str, Any]) -> tuple[str, ...]:
         if self.variadic is None:
             return self.input_ports
         return tuple(f"{self.variadic}{i}" for i in range(args["input_count"]))
 
-    def output_ports_for(self, args):
+    def output_ports_for(self, args: Mapping[str, Any]) -> tuple[str, ...]:
         """The output ports of one node: ``out0, out1, ...`` for a variadic output.
 
         The count comes from the argument named by ``outputs_from``: the length
@@ -494,15 +505,15 @@ class Operator(Immutable):
         count = value if type(value) is int else len(value or ())
         return self.output_ports if count == 0 else tuple(f"{prefix}{i}" for i in range(count))
 
-    def returns_tuple(self, args):
+    def returns_tuple(self, args: Mapping[str, Any]) -> bool:
         """Whether a call produces a tuple of tensors, which clears current."""
         ports = self.output_ports_for(args)
         return len(ports) > 1 or ports != self.output_ports
 
-    def _variadic_member(self, prefix, port):
+    def _variadic_member(self, prefix: str | None, port: str) -> bool:
         return prefix is not None and port.startswith(prefix) and port[len(prefix):].isdigit()
 
-    def port_dtype(self, port, compute):
+    def port_dtype(self, port: str, compute: str) -> str:
         """The concrete dtype name of a port given the plan's compute dtype."""
         if self._variadic_member(self.variadic, port):
             declared = self.inputs[0].dtype
@@ -513,11 +524,13 @@ class Operator(Immutable):
         return compute if declared == "compute" else declared
 
     @property
-    def positional_names(self):
+    def positional_names(self) -> tuple[str, ...]:
+        if self.positional_rest is not None:
+            return ()
         return tuple(name for name, arg in self.args.items() if arg.positional)
 
     @property
-    def defaults(self):
+    def defaults(self) -> dict[str, Any]:
         return {name: arg.default for name, arg in self.args.items() if arg.has_default}
 
     @property
@@ -553,9 +566,27 @@ def _check_init_signature(cls, args, symbols):
     return tuple(requested_symbols), tuple(requested_shapes)
 
 
-def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=None, examples=(),
-                  category="other", relation=None, shape_text=None, positional_rest=None, policies=None,
-                  validate=None, finalize=None, reference=None, outputs_from=None, batch="shared"):
+def make_operator(
+    cls: type[nn.Module],
+    alias: str,
+    *,
+    identity: str | None = None,
+    version: int = 1,
+    summary: str = "",
+    category: str = "other",
+    relation: Callable[[Any], None] | None = None,
+    shape_text: str | None = None,
+    positional_rest: str | None = None,
+    policies: Mapping[str, Policy] | None = None,
+    validate: Callable[..., None] | None = None,
+    finalize: Callable[..., Any] | None = None,
+    reference: Callable[..., Any] | None = None,
+    args: Mapping[str, Arg] | None = None,
+    shape: str = "",
+    examples: Sequence[Example | tuple[Any, ...]] = (),
+    outputs_from: str | None = None,
+    batch: str = "shared",
+) -> Operator:
     if not isinstance(alias, str) or not alias.isidentifier() or alias in ("x", "out") or alias.startswith("_"):
         _registry_error("Operator alias must be an identifier other than x/out without a leading underscore")
     if keyword.iskeyword(alias):
@@ -599,6 +630,11 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
     if positional_rest is not None:
         if positional_rest not in checked or checked[positional_rest].type is not INTS:
             _registry_error("positional_rest must name an 'ints' argument")
+        for name, arg in checked.items():
+            if name != positional_rest and arg.positional:
+                _registry_error(
+                    f"Argument {name!r} cannot be positional when positional_rest ({positional_rest!r}) is used"
+                )
     variadic = inputs[0].variadic if inputs else False
     if variadic and ("input_count" not in checked or checked["input_count"].type is not int):
         _registry_error("A variadic operator must declare an int argument named input_count")
@@ -646,7 +682,7 @@ def make_operator(cls, alias, *, identity=None, version=1, summary, shape, args=
     )
 
 
-def operator(alias, **declaration):
+def operator(alias: str, **declaration: Any) -> Callable[[type[nn.Module]], type[nn.Module]]:
     """Declare an operation on the ``nn.Module`` class that implements it.
 
     The decorated class gains an ``__hndl_operator__`` attribute. Classes in

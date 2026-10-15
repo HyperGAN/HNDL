@@ -1,12 +1,16 @@
 """PyTorch construction and execution for concrete HNDL plans."""
 
+from __future__ import annotations
+
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 import copy
 import itertools
 import operator
+import os
 from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 import weakref
 
 import torch
@@ -15,7 +19,11 @@ from torch.nn.modules import module as _torch_module
 
 from .errors import HNDLError, describe_iterations
 from .settings import MATRIX_SCHEMES
-from .types import batch_multiple, contract_header
+from .types import _is_chain, batch_multiple, contract_header
+
+if TYPE_CHECKING:
+    from .registry import Registry
+    from .types import ResolvedPlan
 
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
@@ -191,22 +199,8 @@ class _NodeModules(nn.ModuleDict):
         super().__delattr__(name)
 
 
-def _shape_text(shape):
+def _shape_text(shape: Sequence[Any]) -> str:
     return "[" + ", ".join(map(str, shape)) + "]"
-
-
-def _is_chain(plan):
-    """A chain has one external input feeding one unary node after another."""
-    if len(plan.inputs) != 1 or len(plan.outputs) != 1:
-        return False
-    previous = f"input:{next(iter(plan.inputs))}"
-    for node in plan.nodes:
-        if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
-                or len(node.outputs) != 1
-                or (node.outputs[0].startswith("out") and node.outputs[0][3:].isdigit())):
-            return False
-        previous = f"node:{node.id}/{node.outputs[0]}"
-    return plan.output_ref == previous
 
 
 class GraphModule(nn.Module):
@@ -907,10 +901,10 @@ class GraphModule(nn.Module):
             raise HNDLError("E_BINDING", expected)
         return bound
 
-    def forward(self, **inputs):
+    def forward(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         return self._execute(self._bind((), inputs))
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str | int | slice) -> nn.Module:
         if isinstance(key, str):
             try:
                 return self.nodes[f"n_{key}"]
@@ -928,7 +922,7 @@ class GraphModule(nn.Module):
             return layers[key]
         raise TypeError("Layer index must be an integer, slice, or node name")
 
-    def __len__(self):
+    def __len__(self) -> int:
         if not self._chain:
             raise TypeError("Branched graphs support node-name lookup only")
         return len(self.plan.nodes)
@@ -938,14 +932,14 @@ class GraphModule(nn.Module):
             raise TypeError("Branched graphs support node-name lookup only")
         return iter(self.nodes.values())
 
-    def _alias(self, op):
+    def _alias(self, op: str) -> str:
         registry = self.plan.registry
         try:
             return registry.by_identity(op).alias if registry is not None else op.split("@")[0]
         except HNDLError:
             return op.split("@")[0]
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         lines = [contract_header(self.plan, type(self).__name__)]
         rows = [("index", "name", "operation", "input shape", "output shape")
                 if self._chain else ("name", "operation", "input shapes", "output shapes")]
@@ -968,7 +962,7 @@ class GraphModule(nn.Module):
 class Network(GraphModule):
     """Tensor facade over the graph: one tensor out, or a dict of named outputs."""
 
-    def forward(self, *inputs, **named):
+    def forward(self, *inputs: torch.Tensor, **named: torch.Tensor) -> torch.Tensor | dict[str, torch.Tensor]:
         results = self._execute(self._bind(inputs, named))
         if len(results) == 1:
             return next(iter(results.values()))
@@ -1052,11 +1046,15 @@ def _state_bytes(module, compute_dtype=None):
     return sum(storages.values())
 
 
-def parameter_counts(plan, *, registry=None):
+def parameter_counts(
+    plan: ResolvedPlan,
+    *,
+    registry: Registry | None = None,
+) -> dict[str, int | None]:
     """Per-node parameter counts from an allocation-free meta-device construction."""
     from .registry import Registry
     registry = registry if registry is not None else plan.registry or Registry.builtins()
-    counts = {}
+    counts: dict[str, int | None] = {}
     for node in plan.nodes:
         spec = registry.by_identity(node.op)
         try:
@@ -1262,13 +1260,31 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     return cls(plan, modules, device, receipt, port_orders)
 
 
-def build(plan, *, device, initialization_seed=None, registry=None, limits=None):
+def build(
+    plan: ResolvedPlan,
+    *,
+    device: str | torch.device,
+    initialization_seed: int | None = None,
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+) -> GraphModule:
     """Build a concrete plan; forward accepts named inputs and returns a dict."""
     return _build(plan, device=device, initialization_seed=initialization_seed, registry=registry, limits=limits)
 
 
-def _network(resolve_name, source, *, input_shape, output_shape, device,
-             dtype="float32", registry=None, initialization_seed=None, limits=None, input_dtype=None):
+def _network(
+    resolve_name: str,
+    source: Any,
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    device: str | torch.device,
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    initialization_seed: int | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> Network:
     import hndl
     resolve = getattr(hndl, resolve_name)
     plan = resolve(source, input_shape=input_shape, output_shape=output_shape,
@@ -1277,24 +1293,54 @@ def _network(resolve_name, source, *, input_shape, output_shape, device,
                   registry=registry, facade=True, limits=limits)
 
 
-def network(source, *, input_shape, output_shape, device, dtype="float32",
-            registry=None, initialization_seed=None, limits=None, input_dtype=None):
+def network(
+    source: str,
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    device: str | torch.device,
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    initialization_seed: int | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> Network:
     """Resolve declarative source and return a tensor-in/tensor-out module."""
     return _network("resolve", source, input_shape=input_shape, output_shape=output_shape,
                     device=device, dtype=dtype, registry=registry,
                     initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
 
 
-def network_file(path, *, input_shape, output_shape, device, dtype="float32",
-                 registry=None, initialization_seed=None, limits=None, input_dtype=None):
+def network_file(
+    path: str | os.PathLike[str],
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    device: str | torch.device,
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    initialization_seed: int | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> Network:
     """Read declarative UTF-8 source and construct its resolved network."""
     return _network("resolve_file", path, input_shape=input_shape, output_shape=output_shape,
                     device=device, dtype=dtype, registry=registry,
                     initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
 
 
-def network_from_callable(fn, *, input_shape, output_shape, device, dtype="float32",
-                          registry=None, initialization_seed=None, limits=None, input_dtype=None):
+def network_from_callable(
+    fn: Callable[..., Any],
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    device: str | torch.device,
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    initialization_seed: int | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> Network:
     """Capture trusted Python exactly once, then construct the resolved network."""
     return _network("resolve_callable", fn, input_shape=input_shape, output_shape=output_shape,
                     device=device, dtype=dtype, registry=registry,

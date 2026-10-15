@@ -794,3 +794,37 @@ def test_a_string_sequence_argument_validates_its_entries():
     for tags in ("xy", 3, ("x", 4), (b"x",), ["x"] * 33):
         with pytest.raises(HNDLError, match="E_ARGUMENT|E_RESOURCE"):
             normalize_arguments(entry, (), {"tags": tags})
+
+
+def test_positional_rest_conflicts_with_positional_arg():
+    from hndl.operator import make_operator
+
+    with pytest.raises(HNDLError, match="E_REGISTRY|positional_rest"):
+        make_operator(
+            Identity,
+            "dummy",
+            identity="tests.dummy",
+            summary="dummy summary",
+            shape="x[B, F] -> out[B, F]",
+            args={"a": Arg(int, help="a", positional=True), "b": Arg(int, help="b")},
+            positional_rest="rest",
+        )
+
+
+def test_positional_rest_operator_positional_names_is_empty():
+    from hndl.operator import make_operator
+
+    op = make_operator(
+        Identity,
+        "dummy",
+        identity="tests.dummy",
+        summary="dummy summary",
+        shape="x[B, F] -> out[B, F]",
+        args={"rest": Arg("ints", help="An arg", positional=False)},
+        positional_rest="rest",
+    )
+    assert op.positional_names == ()
+
+
+
+

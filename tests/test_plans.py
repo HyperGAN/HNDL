@@ -206,3 +206,23 @@ def test_node_container_type_validation():
     with pytest.raises(TypeError, match="All output ports must be strings"):
         Node("n0", "linear@1", outputs=(1, 2))
 
+
+def test_resolved_plan_repr_chain():
+    plan = resolve("linear(16)\nrelu()\nlinear(4)", input_shape=("B", 8), output_shape=("B", 4))
+    r = repr(plan)
+    assert "index" in r
+    assert "n0" in r
+    assert "input shape" in r
+    assert "output shape" in r
+
+
+def test_resolved_plan_repr_branched():
+    source = "stem = linear(16, name='stem')\nleft = linear(stem, 8, name='l')\nright = linear(stem, 8, name='r')\nconcat(left, right, axis=1)"
+    plan = resolve(source, input_shape=("B", 16), output_shape=("B", 16))
+    r = repr(plan)
+    assert "index" not in r
+    assert "input shapes" in r
+    assert "output shapes" in r
+    assert "node:stem/out" in r
+
+

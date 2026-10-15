@@ -1,5 +1,7 @@
 """Bounded, monotone tensor-shape resolution without importing torch."""
 
+from __future__ import annotations
+
 from dataclasses import replace
 from collections.abc import Mapping
 import keyword
@@ -481,7 +483,11 @@ class _Solver:
         return tuple(resolved)
 
 
-def resolve_graph(graph, registry=None, limits=None):
+def resolve_graph(
+    graph: Graph,
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+) -> ResolvedPlan:
     if not isinstance(graph, Graph):
         raise HNDLError("E_SCHEMA", "resolve_graph requires a captured Graph")
     registry = Registry.builtins() if registry is None else registry
@@ -599,7 +605,12 @@ def _completed(plan, verified, registry):
     return replace(plan, nodes=tuple(nodes), registry=registry)
 
 
-def validate_concrete_plan(plan, *, registry=None, limits=None):
+def validate_concrete_plan(
+    plan: ResolvedPlan,
+    *,
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+) -> ResolvedPlan:
     """Verify saved concrete equations, never re-run source/callable/policy choice.
 
     The saved arguments are resolved again as explicit values against the

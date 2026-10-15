@@ -1,5 +1,7 @@
 """Immutable, torch-free graph records and portable resolved plans."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -8,10 +10,14 @@ import keyword
 import math
 import re
 from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from .errors import HNDLError
 from .settings import (normalize_initialization, normalize_trainability,
                        validate_initialization, validate_trainability)
+
+if TYPE_CHECKING:
+    from .registry import Registry
 
 
 EXTERNAL_INPUT = "x"
@@ -28,7 +34,7 @@ _CORRUPTED = ("Saved plan is corrupted or was edited by hand: its {field} does n
               "Python and save it with to_json().")
 
 
-def batch_multiple(value):
+def batch_multiple(value: Any) -> int | None:
     """How many plan batches a symbolic batch entry stands for, or ``None``.
 
     Batch is the one dimension that stays symbolic after resolution. ``"B"`` is
@@ -49,14 +55,14 @@ def batch_multiple(value):
     return multiple if 2 <= multiple <= MAX_BATCH_MULTIPLE else None
 
 
-def batch_symbol(multiple):
+def batch_symbol(multiple: Any) -> str | None:
     """The canonical spelling of ``multiple`` plan batches, or ``None``."""
     if type(multiple) is not int or not 1 <= multiple <= MAX_BATCH_MULTIPLE:
         return None
     return BATCH if multiple == 1 else f"{multiple}*B"
 
 
-def batch_units(value):
+def batch_units(value: Any) -> int | None:
     """The batch count a batch entry carries: ``k`` for ``"k*B"``, the literal
     itself for a fixed integer batch, or ``None`` when it is neither."""
     if type(value) is int:
@@ -227,12 +233,26 @@ def _frozen_ports(mapping):
     return MappingProxyType({name: MappingProxyType(dict(entry)) for name, entry in mapping.items()})
 
 
-def contract_header(plan, label):
+def _is_chain(plan: ResolvedPlan | Graph) -> bool:
+    """A chain has one external input feeding one unary node after another."""
+    if len(plan.inputs) != 1 or len(plan.outputs) != 1:
+        return False
+    previous = f"input:{next(iter(plan.inputs))}"
+    for node in plan.nodes:
+        if (len(node.inputs) != 1 or tuple(node.inputs.values()) != (previous,)
+                or len(node.outputs) != 1
+                or (node.outputs[0].startswith("out") and node.outputs[0][3:].isdigit())):
+            return False
+        previous = f"node:{node.id}/{node.outputs[0]}"
+    return plan.output_ref == previous
+
+
+def contract_header(plan: ResolvedPlan | Graph, label: str) -> str:
     """The one-line contract header shared by plans and built modules."""
-    def shape(value):
+    def shape(value: tuple[int | str, ...]) -> str:
         return "[" + ", ".join(str(part) for part in value) + "]"
 
-    def side(ports, default):
+    def side(ports: Mapping[str, Any], default: str) -> str:
         if tuple(ports) == (default,):
             return shape(ports[default]["shape"])
         return ", ".join(f"{name}={shape(entry['shape'])}" for name, entry in ports.items())
@@ -252,14 +272,14 @@ def contract_header(plan, label):
 class Node(Immutable):
     id: str
     op: str
-    args: Mapping = field(default_factory=dict)
-    inputs: Mapping = field(default_factory=dict)
-    outputs: tuple = ("out",)
-    source: object = None
-    initialization: Mapping = field(default_factory=normalize_initialization, kw_only=True)
-    trainability: Mapping = field(default_factory=normalize_trainability, kw_only=True)
+    args: Mapping[str, Any] = field(default_factory=dict)
+    inputs: Mapping[str, str] = field(default_factory=dict)
+    outputs: tuple[str, ...] = ("out",)
+    source: Mapping[str, Any] | None = None
+    initialization: Mapping[str, Any] = field(default_factory=normalize_initialization, kw_only=True)
+    trainability: Mapping[str, Any] = field(default_factory=normalize_trainability, kw_only=True)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isinstance(self.args, Mapping):
             raise TypeError(f"Node args must be a Mapping, got {type(self.args).__name__}")
         if not isinstance(self.inputs, Mapping):
@@ -278,17 +298,17 @@ class Node(Immutable):
 
 @dataclass(frozen=True)
 class Graph(Immutable):
-    nodes: tuple
-    input_shape: tuple
-    output_shape: tuple
+    nodes: tuple[Node, ...]
+    input_shape: tuple[int | str, ...]
+    output_shape: tuple[int | str, ...]
     output_ref: str
     dtype: str = "float32"
     frontend: str = "python_config@1"
-    input_dtype: object = None
-    named_inputs: object = None
-    named_outputs: object = None
+    input_dtype: str | Mapping[str, str] | None = None
+    named_inputs: Mapping[str, Any] | None = None
+    named_outputs: Mapping[str, Any] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         _external_ports(self)
 
@@ -298,17 +318,17 @@ class Graph(Immutable):
 
 @dataclass(frozen=True)
 class ResolvedNode(Node):
-    input_shapes: Mapping = field(default_factory=dict)
-    output_shapes: Mapping = field(default_factory=dict)
-    provenance: Mapping = field(default_factory=dict)
+    input_shapes: Mapping[str, tuple[int | str, ...]] = field(default_factory=dict)
+    output_shapes: Mapping[str, tuple[int | str, ...]] = field(default_factory=dict)
+    provenance: Mapping[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__post_init__()
         object.__setattr__(self, "input_shapes", freeze(self.input_shapes))
         object.__setattr__(self, "output_shapes", freeze(self.output_shapes))
         object.__setattr__(self, "provenance", freeze(self.provenance))
 
-    def to_dict(self, *, semantic=False):
+    def to_dict(self, *, semantic: bool = False) -> dict[str, Any]:
         result = {key: plain(getattr(self, key)) for key in (
             "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
             "initialization", "trainability"
@@ -320,20 +340,20 @@ class ResolvedNode(Node):
 
 @dataclass(frozen=True)
 class ResolvedPlan(Immutable):
-    nodes: tuple
-    input_shape: tuple
-    output_shape: tuple
+    nodes: tuple[ResolvedNode, ...]
+    input_shape: tuple[int | str, ...]
+    output_shape: tuple[int | str, ...]
     output_ref: str
     dtype: str = "float32"
     frontend: str = "python_config@1"
-    registry: object = field(default=None, repr=False, compare=False)
+    registry: Registry | None = field(default=None, repr=False, compare=False)
     schema_version: int = 1
     resolution_version: int = 1
-    input_dtype: object = None
-    named_inputs: object = None
-    named_outputs: object = None
+    input_dtype: str | Mapping[str, str] | None = None
+    named_inputs: Mapping[str, Any] | None = None
+    named_outputs: Mapping[str, Any] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         _external_ports(self)
 
@@ -361,17 +381,27 @@ class ResolvedPlan(Immutable):
         return data
 
     @property
-    def semantic_digest(self):
+    def _chain(self) -> bool:
+        return _is_chain(self)
+
+    @property
+    def semantic_digest(self) -> str:
         return digest(self._data(semantic=True))
 
-    def to_json(self):
+    def to_json(self) -> str:
         data = self._data()
         data["semantic_digest"] = self.semantic_digest
         data["artifact_digest"] = digest(data)
         return canonical(data)
 
     @classmethod
-    def from_json(cls, source, *, registry=None, limits=None):
+    def from_json(
+        cls,
+        source: str,
+        *,
+        registry: Registry | None = None,
+        limits: Mapping[str, int] | None = None,
+    ) -> ResolvedPlan:
         if not isinstance(source, str):
             raise HNDLError("E_SCHEMA", "Saved plan must be a JSON string")
         def unique_pairs(pairs):
@@ -420,28 +450,37 @@ class ResolvedPlan(Immutable):
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError, OverflowError) as error:
             raise HNDLError("E_SCHEMA", f"Invalid saved plan: {error}") from error
 
-    def _operation_name(self, op):
+    def _operation_name(self, op: str) -> str:
         if self.registry is not None:
             try:
                 return self.registry.by_identity(op).alias
             except HNDLError:
                 pass
-        return op
+        return op.split("@")[0] if "@" in op else op
 
-    def __repr__(self):
-        def shape(value):
+    def __repr__(self) -> str:
+        def shape(value: tuple[int | str, ...]) -> str:
             return "[" + ", ".join(str(part) for part in value) + "]"
+
         lines = [contract_header(self, "Network")]
-        rows = [("index", "name", "operation", "input shapes", "output shapes")]
+        chain = _is_chain(self)
+        rows = [("index", "name", "operation", "input shape", "output shape")
+                if chain else ("name", "operation", "input shapes", "output shapes")]
         for index, node in enumerate(self.nodes):
-            inputs = ", ".join(f"{key}={shape(value)}" for key, value in node.input_shapes.items())
-            outputs = ", ".join(f"{key}={shape(value)}" for key, value in node.output_shapes.items())
-            rows.append((str(index), node.id, self._operation_name(node.op), inputs, outputs))
+            op_name = self._operation_name(node.op)
+            if chain:
+                rows.append((str(index), node.id, op_name,
+                             shape(next(iter(node.input_shapes.values()))),
+                             shape(next(iter(node.output_shapes.values())))))
+            else:
+                inputs = ", ".join(f"{p}={node.inputs[p]}:{shape(s)}" for p, s in node.input_shapes.items())
+                outputs = ", ".join(f"{p}={shape(s)}" for p, s in node.output_shapes.items())
+                rows.append((node.id, op_name, inputs, outputs))
         widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
         lines.extend("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip() for row in rows)
         return "\n".join(lines)
 
-    def describe(self):
+    def describe(self) -> str:
         lines = [repr(self), f"Semantic digest: {self.semantic_digest}"]
         for node in self.nodes:
             lines.append(f"{node.id}: " + ", ".join(f"{key}={plain(value)}" for key, value in node.provenance.items()))

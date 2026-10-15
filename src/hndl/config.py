@@ -6,11 +6,18 @@ statement records; this module interprets those records against a capture.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import os
+from typing import TYPE_CHECKING
+
 from .capture import Capture, Symbol, _DEFAULT, _error
 from .errors import HNDLError
 from .registry import Registry
 from .settings import initializer
 from ._parser import MAX_SOURCE_BYTES, parse as _parse
+
+if TYPE_CHECKING:
+    from .types import Graph, ResolvedPlan
 
 
 class _Interpreter:
@@ -160,8 +167,16 @@ def _interpret(program, capture):
     return capture.finish(locals_.get("out", _DEFAULT))
 
 
-def capture_config(source, *, input_shape, output_shape, dtype="float32", registry=None, limits=None,
-                   input_dtype=None):
+def capture_config(
+    source: str,
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> Graph:
     registry = Registry.builtins() if registry is None else registry
     program = _parse(source, registry.aliases)
     with Capture(input_shape=input_shape, output_shape=output_shape, dtype=dtype,
@@ -169,7 +184,16 @@ def capture_config(source, *, input_shape, output_shape, dtype="float32", regist
         return _interpret(program, capture)
 
 
-def resolve(source, *, input_shape, output_shape, dtype="float32", registry=None, limits=None, input_dtype=None):
+def resolve(
+    source: str,
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> ResolvedPlan:
     from .resolver import resolve_graph
 
     registry = Registry.builtins() if registry is None else registry
@@ -178,7 +202,16 @@ def resolve(source, *, input_shape, output_shape, dtype="float32", registry=None
     return resolve_graph(graph, registry=registry, limits=limits)
 
 
-def resolve_file(path, *, input_shape, output_shape, dtype="float32", registry=None, limits=None, input_dtype=None):
+def resolve_file(
+    path: str | os.PathLike[str],
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> ResolvedPlan:
     with open(path, "rb") as source_file:
         raw = source_file.read(MAX_SOURCE_BYTES + 1)
     if len(raw) > MAX_SOURCE_BYTES:

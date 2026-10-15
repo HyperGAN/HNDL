@@ -1,16 +1,23 @@
 """Stable, source-aware errors shared by the pure core and backends."""
 
+from __future__ import annotations
 
-def describe_iterations(iterations):
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+
+def describe_iterations(iterations: Sequence[Sequence[int]] | None) -> str:
     """``iteration 3 of 8``, or ``iteration 1 of 2, 3 of 4`` outermost first.
 
     Indices count from 0, like ``range`` and like the suffix a loop appends to
     a node name, so ``block3`` is ``iteration 3 of 8``.
     """
+    if not iterations:
+        return ""
     return "iteration " + ", ".join(f"{index} of {count}" for index, count in iterations)
 
 
-def source_location(source):
+def source_location(source: Mapping[str, Any] | None) -> dict[str, Any]:
     """The ``line``, ``column`` and ``iterations`` a frontend recorded, as HNDLError keywords."""
     if not source:
         return {}
@@ -18,7 +25,23 @@ def source_location(source):
 
 
 class HNDLError(ValueError):
-    def __init__(self, code, message, *, node=None, line=None, column=None, iterations=None):
+    code: str
+    message: str
+    node: str | None
+    line: int | None
+    column: int | None
+    iterations: tuple[tuple[int, int], ...] | None
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        node: str | None = None,
+        line: int | None = None,
+        column: int | None = None,
+        iterations: Sequence[Sequence[int]] | None = None,
+    ) -> None:
         self.code = code
         self.message = message
         self.node = node

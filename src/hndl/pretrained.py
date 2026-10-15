@@ -19,6 +19,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -32,11 +33,11 @@ _HEX = "0123456789abcdef"
 _MAX_LISTED_MODULES = 40
 
 
-def _fail(message):
+def _fail(message: str) -> None:
     raise HNDLError("E_PRETRAINED", message)
 
 
-def _require(module_name):
+def _require(module_name: str) -> Any:
     try:
         return __import__(module_name)
     except ImportError:
@@ -50,7 +51,7 @@ class Source(Immutable):
     kind: str            # "hf", "directory", "file", or "state_dict"
     location: str        # repo id, directory, safetensors file, or .pth file path
     revision: str        # commit hash for hf; content digest otherwise
-    config: dict         # parsed config.json, or {"provider", "sha256"} for a .pth file
+    config: dict[str, Any]  # parsed config.json, or {"provider", "sha256"} for a .pth file
     config_path: str     # where config.json was read from ("" for a .pth file)
     provider: str        # "transformers", "timm", or "local"
 
@@ -69,7 +70,7 @@ def _digest(*parts):
 _file_digests = {}
 
 
-def file_sha256(path):
+def file_sha256(path: str | os.PathLike[str]) -> str:
     """The full hex digest of a file, memoized while its size and mtime hold."""
     path = Path(path)
     try:
@@ -237,7 +238,12 @@ def _cached_resolve_local(source, config_path, provider, checksum, meta):
     _fail(f"{source!r} is not an hf:// repository, a checkpoint directory, or a .safetensors file")
 
 
-def resolve_source(source, config_path="", provider="", checksum=""):
+def resolve_source(
+    source: str,
+    config_path: str = "",
+    provider: str = "",
+    checksum: str = "",
+) -> Source:
     """Locate a checkpoint and read its configuration without loading weights."""
     if type(source) is not str or not source:
         _fail("source must be a non-empty string: a local path or hf://repo[@revision]")
@@ -720,5 +726,5 @@ output_shape.cache_clear = output_shapes.cache_clear = _traced_output_shapes.cac
 output_shape.cache_info = output_shapes.cache_info = _traced_output_shapes.cache_info
 
 
-def is_offline():
+def is_offline() -> bool:
     return os.environ.get("HF_HUB_OFFLINE", "") not in ("", "0")

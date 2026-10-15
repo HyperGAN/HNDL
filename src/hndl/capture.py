@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 import re
+from typing import TYPE_CHECKING, Any
 
 from .errors import HNDLError, source_location
 from .registry import Registry, normalize_arguments
@@ -12,6 +13,10 @@ from .resolver import _limits, _validate_port_reservations
 from .settings import normalize_settings
 from .types import (EXTERNAL_INPUT, EXTERNAL_OUTPUT, Graph, Node, named_contracts,
                     named_dtypes)
+
+if TYPE_CHECKING:
+    from .operator import Operator
+    from .types import ResolvedPlan
 
 
 _ACTIVE: ContextVar[Capture | None] = ContextVar("hndl_capture", default=None)
@@ -67,8 +72,17 @@ def _foreign_operator(registry, op):
 class Capture:
     """One scoped authoring transaction, shared by the two frontends."""
 
-    def __init__(self, *, input_shape, output_shape, dtype="float32", registry=None,
-                 frontend="python_callable@1", limits=None, input_dtype=None):
+    def __init__(
+        self,
+        *,
+        input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+        output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+        dtype: str = "float32",
+        registry: Registry | None = None,
+        frontend: str = "python_callable@1",
+        limits: Mapping[str, int] | None = None,
+        input_dtype: str | Mapping[str, str] | None = None,
+    ) -> None:
         self.registry = Registry.builtins() if registry is None else registry
         shapes, self.named_inputs = named_contracts(input_shape, "input_shape", EXTERNAL_INPUT)
         dtypes = named_dtypes(input_dtype, tuple(shapes))
@@ -89,11 +103,11 @@ class Capture:
         self.max_nodes = _limits(limits)["max_nodes"]
         self._token = None
 
-    def __enter__(self):
+    def __enter__(self) -> Capture:
         self._token = _ACTIVE.set(self)
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: Any) -> None:
         _ACTIVE.reset(self._token)
         self._token = None
 
@@ -102,7 +116,14 @@ class Capture:
             raise _error("E_CAPTURE", "Input must be a symbolic tensor from this capture", source, node=node)
         return value
 
-    def emit(self, op, positional, keyword, *, source=None):
+    def emit(
+        self,
+        op: Operator,
+        positional: Sequence[Any],
+        keyword: Mapping[str, Any],
+        *,
+        source: Mapping[str, Any] | None = None,
+    ) -> Symbol | tuple[Symbol, ...]:
         # Factories carry exact identities, never whichever alias is newest.
         # ``registry.ops`` binds a declaration when the attribute is read; it
         # may run in any capture whose registry holds that very declaration,
@@ -212,7 +233,7 @@ class Capture:
         self.current = outputs[0]
         return outputs[0]
 
-    def finish(self, selected=_DEFAULT):
+    def finish(self, selected: Any = _DEFAULT) -> Graph:
         if self.named_outputs:
             if not isinstance(selected, Mapping):
                 raise HNDLError("E_OUTPUT", "Named outputs require one symbolic tensor per declared name: "
@@ -262,13 +283,13 @@ class OperatorNamespace:
     built-in catalog, and calling a factory there fails with ``E_CAPTURE``.
     """
 
-    def __init__(self, registry=None):
+    def __init__(self, registry: Registry | None = None) -> None:
         self._registry = registry
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "hndl.ops" if self._registry is None else f"<operators of {self._registry!r}>"
 
-    def __getattr__(self, alias):
+    def __getattr__(self, alias: str) -> Callable[..., Any]:
         if alias.startswith("_"):
             raise AttributeError(alias)
         if self._registry is not None:
@@ -279,8 +300,8 @@ class OperatorNamespace:
         return self._late(alias)
 
     @staticmethod
-    def _bound(alias, op):
-        def operation(*args, **kwargs):
+    def _bound(alias: str, op: Operator) -> Callable[..., Any]:
+        def operation(*args: Any, **kwargs: Any) -> Any:
             capture = _ACTIVE.get()
             if capture is None:
                 raise HNDLError("E_CAPTURE", "Symbolic operations require an active authoring capture")
@@ -290,8 +311,8 @@ class OperatorNamespace:
         return operation
 
     @staticmethod
-    def _late(alias):
-        def operation(*args, **kwargs):
+    def _late(alias: str) -> Callable[..., Any]:
+        def operation(*args: Any, **kwargs: Any) -> Any:
             capture = _ACTIVE.get()
             if capture is None:
                 raise HNDLError("E_CAPTURE", "Symbolic operations require an active authoring capture")
@@ -303,11 +324,19 @@ class OperatorNamespace:
         return operation
 
 
-ops = OperatorNamespace()
+ops: OperatorNamespace = OperatorNamespace()
 
 
-def capture_callable(fn, *, input_shape, output_shape, dtype="float32", registry=None, limits=None,
-                     input_dtype=None):
+def capture_callable(
+    fn: Callable[..., Any],
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> Graph:
     """Invoke trusted Python exactly once and return its finite author graph."""
     if not callable(fn):
         raise TypeError("resolve_callable requires a callable, not source text")
@@ -321,8 +350,16 @@ def capture_callable(fn, *, input_shape, output_shape, dtype="float32", registry
         return capture.finish(_DEFAULT if result is None else result)
 
 
-def resolve_callable(fn, *, input_shape, output_shape, dtype="float32", registry=None, limits=None,
-                     input_dtype=None):
+def resolve_callable(
+    fn: Callable[..., Any],
+    *,
+    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],
+    dtype: str = "float32",
+    registry: Registry | None = None,
+    limits: Mapping[str, int] | None = None,
+    input_dtype: str | Mapping[str, str] | None = None,
+) -> ResolvedPlan:
     from .resolver import resolve_graph
 
     registry = Registry.builtins() if registry is None else registry
