@@ -21,6 +21,7 @@ x[B, ..., D] -> out[B, ..., D]
 | --- | --- | --- | --- | --- |
 | `eps` | float | `1e-06` | > 0 | Added to the mean square before the reciprocal square root; must be positive. |
 | `affine` | bool | `True` | — | Learn a per-feature gain of width D. When false the layer has no parameters. |
+| `zero_centered` | bool | `False` | — | Initialize weight to 0.0 and evaluate as (1 + weight) * rms_norm(x). |
 
 ## Description
 
@@ -46,8 +47,8 @@ the gain is applied, so the layer's inputs, outputs and parameters stay
 in the plan dtype.
 
 The single parameter is ``weight`` of shape ``[D]``, initialized to ones
-and present only when ``affine`` is true. There are no running
-statistics, so train and eval behave identically.
+(or zeros when ``zero_centered=True``) and present only when ``affine`` is
+true. There are no running statistics, so train and eval behave identically.
 
 ## Examples
 
@@ -116,3 +117,25 @@ index  name  operation  input shape  output shape
 ```
 
 Parameters: 68
+
+### Example 4
+
+Gemma-style zero-centered RMSNorm with weight initialized to 0.0.
+
+```python
+linear(64)
+rms_norm(zero_centered=True)
+linear()
+```
+
+Input `['B', 32]` → output `['B', 10]`.
+
+```text
+Network: [B, 32] -> [B, 10]  dtype=float32
+index  name  operation  input shape  output shape
+0      n0    linear     [B, 32]      [B, 64]
+1      n1    rms_norm   [B, 64]      [B, 64]
+2      n2    linear     [B, 64]      [B, 10]
+```
+
+Parameters: 2,826

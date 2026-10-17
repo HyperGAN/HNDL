@@ -1,20 +1,20 @@
 # `matmul`
 
-Batched matrix product of two rank-3 tensors.
+Batched matrix product of tensors with arbitrary leading batch dimensions.
 
 **Category:** arithmetic · **Identity:** `matmul@1`
 
 ## Shape
 
 ```text
-a[B, N, K], b[B, K, M] -> out[B, N, M]
+a[B, ..., N, K], b[B, ..., K, M] -> out[B, ..., N, M]
 ```
 
 | Port | Direction | Pattern | dtype |
 | --- | --- | --- | --- |
-| `a` | input | `a[B, N, K]` | compute |
-| `b` | input | `b[B, K, M]` | compute |
-| `out` | output | `out[B, N, M]` | compute |
+| `a` | input | `a[B, ..., N, K]` | compute |
+| `b` | input | `b[B, ..., K, M]` | compute |
+| `out` | output | `out[B, ..., N, M]` | compute |
 
 ## Arguments
 

@@ -25,7 +25,7 @@ Relation: `input contract and output shape come from the checkpoint's configurat
 | `output` | str | `"features"` | — | Which tensor to return: "features" (last hidden state), "pooled", "logits", "embeds" (projected CLIP-style embeddings), or a raw output attribute name. |
 | `component` | str | `""` | — | Tower of a multi-modal checkpoint such as CLIP: "vision" or "text". |
 | `config` | str | `""` | — | Path to config.json when source is a bare .safetensors file. |
-| `provider` | str | `""` | — | Name of an architecture builder the host registered with registry.pretrained_provider(name, build); required for a local .pth state dict. |
+| `provider` | str | `""` | — | Name of an architecture builder the host registered with registry.pretrained_provider(name, build, ...); required for a local .pth state dict. |
 | `sha256` | str | `""` | — | The 64 hex character digest of a local .pth file, verified before it is loaded. |
 | `layer` | str | `""` | — | Dotted named_modules() path of the provider submodule whose output the node returns, such as "features.16"; empty returns the model's own output. |
 | `layers` | strs | `()` | — | Dotted named_modules() paths of several provider submodules, such as ("layer1", "layer2", "layer3"); the node returns one output per entry, in that order, from a single forward pass. Mutually exclusive with layer= and readout=. |
@@ -67,9 +67,10 @@ file at resolution and again before loading, and the weights are read with
 must match exactly (``strict=True``). ``layer`` names a submodule by its
 dotted ``named_modules()`` path and returns that submodule's output through
 a forward hook, stopping the pass there; omitted, the node returns the
-model's own output. Provider checkpoints declare no input contract, so the
-graph input shape is whatever the module accepts (floating point); the
-meta-device trace checks it.
+model's own output. A registered provider defaults to consuming floating-point
+tensors, but may declare ``contract="ids"`` (rank 2 ``[B, T]`` ``int64`` token IDs)
+to consume integer sequences, and may register an optional ``shape_fn`` callback
+to resolve output shapes directly without meta-device tracing.
 
 ``layers=("layer1", "layer2", "layer3")`` returns several intermediates
 from *one* forward pass. The node gains one output port per entry ---

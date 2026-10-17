@@ -31,7 +31,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`clamp`](clamp.md) | Saturate every element into the closed interval [min, max]. |
 | [`constant`](constant.md) | Emit a tensor of a fixed shape filled with one constant value. |
 | [`learned_scale`](learned_scale.md) | Multiply a tensor by one learned scalar. |
-| [`matmul`](matmul.md) | Batched matrix product of two rank-3 tensors. |
+| [`matmul`](matmul.md) | Batched matrix product of tensors with arbitrary leading batch dimensions. |
 | [`mul`](mul.md) | Elementwise product of two tensors with identical shapes. |
 | [`scale`](scale.md) | Multiply a tensor by a fixed scalar. |
 | [`sub`](sub.md) | Elementwise difference of two tensors with identical shapes. |
@@ -41,13 +41,15 @@ are generated from those declarations by `python -m hndl.docs`.
 | Operator | Summary |
 | --- | --- |
 | [`conv`](conv.md) | Two-dimensional convolution over [B, C, H, W] images. |
-| [`conv1d`](conv1d.md) | One-dimensional convolution over [B, C, L] signals. |
+| [`conv1d`](conv1d.md) | One-dimensional convolution over [B, C, L] or [B, T, C] signals. |
 | [`deconv`](deconv.md) | Transposed two-dimensional convolution, typically for upsampling. |
+| [`deconv1d`](deconv1d.md) | Transposed one-dimensional convolution for waveform synthesis and upsampling. |
 
 ## core
 
 | Operator | Summary |
 | --- | --- |
+| [`cast`](cast.md) | Explicit dtype conversion across graph edges. |
 | [`linear`](linear.md) | Fully connected layer: a learned affine map on the last axis. |
 
 ## memory
@@ -60,10 +62,13 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
+| [`adaln_zero`](adaln_zero.md) | Rank-3 adaptive LayerNorm-Zero conditioning modulation for Diffusion Transformers. |
 | [`adaptive_norm`](adaptive_norm.md) | Instance-normalize features, then apply a per-example learned scale and bias. |
 | [`batch_norm`](batch_norm.md) | Normalize each channel over the batch and spatial axes, tracking running statistics. |
+| [`grn`](grn.md) | Global Response Normalization (GRN) for ConvNeXt-V2. |
 | [`group_norm`](group_norm.md) | Normalize channel groups per example, with learned per-channel affine. |
 | [`instance_norm`](instance_norm.md) | Normalize every channel of every example over its own spatial positions. |
+| [`l2_norm`](l2_norm.md) | Parameter-free L2 normalization along a specified axis. |
 | [`layer_norm`](layer_norm.md) | Normalize the last axis of every position with a learned scale and bias. |
 | [`rms_norm`](rms_norm.md) | Scale the last axis by its root-mean-square, with a learned per-feature gain. |
 
@@ -89,10 +94,14 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`embedding`](embedding.md) | Look up a learned vector for every integer token id. |
 | [`feed_forward`](feed_forward.md) | Transformer feed-forward block: widen, activate, project back. |
 | [`fourier_features`](fourier_features.md) | Encode coordinates with a fixed random Fourier frequency table. |
+| [`gated_delta_attention`](gated_delta_attention.md) | Kimi Delta Attention (KDA) and Gated DeltaNet with chunkwise parallel WY evaluation. |
 | [`gather_token`](gather_token.md) | Select the token of a sequence at the position holding the largest id. |
+| [`latent_attention`](latent_attention.md) | Multi-Head Latent Attention (MLA) with compressed KV cache and decoupled RoPE. |
 | [`moe`](moe.md) | Sparse mixture of experts: route every token to its top-k feed-forward experts. |
 | [`pool_tokens`](pool_tokens.md) | Reduce a [B, T, D] sequence to one [B, D] vector per example. |
 | [`pos_embed`](pos_embed.md) | Add a learned position vector to every position of a sequence. |
+| [`rope`](rope.md) | Standalone rotary position embedding over a [B, T, D] sequence. |
+| [`sinusoidal_embed`](sinusoidal_embed.md) | Deterministic log-spaced sinusoidal timestep embeddings. |
 | [`swiglu`](swiglu.md) | SwiGLU feed-forward block: a SiLU-gated projection folded back to the input width. |
 | [`transformer_block`](transformer_block.md) | Pre-norm transformer block: residual self-attention followed by a residual feed-forward. |
 

@@ -74,7 +74,7 @@ def _reference(module):
                 'features = reshape(64, 4, 4, name="seed")\nstyle = linear(w, name="style", init={"weight": 0, "bias": 0})\n'
                 'adaptive_norm(features, style, name="norm")', ("B", 128), ("B", 64, 4, 4),
                 "A mapping network fans out into a projection and a zero-initialized style affine."),
-        Example("tokens = linear(32)\nstyle = linear(64)\nadaptive_norm(tokens, style)",
+        Example("tokens = linear(32)\nstyle = pool_tokens(linear(64), 'mean')\nadaptive_norm(tokens, style)",
                 ("B", 16, 16), ("B", 16, 32),
                 "Sequence modulation: 32 feature channels require 64 style parameters."),
     ],

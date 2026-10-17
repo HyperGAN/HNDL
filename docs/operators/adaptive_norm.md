@@ -7,14 +7,16 @@ Instance-normalize features, then apply a per-example learned scale and bias.
 ## Shape
 
 ```text
-x[B, C, H, W], params[B, 2*C] -> out[B, C, H, W]
+x, params -> out
 ```
+
+Relation: `x[B, C, H, W] or x[B, T, C]; params[B, 2*C]; out matches x`
 
 | Port | Direction | Pattern | dtype |
 | --- | --- | --- | --- |
-| `x` | input | `x[B, C, H, W]` | compute |
-| `params` | input | `params[B, 2*C]` | compute |
-| `out` | output | `out[B, C, H, W]` | compute |
+| `x` | input | `x` | compute |
+| `params` | input | `params` | compute |
+| `out` | output | `out` | compute |
 
 ## Arguments
 
@@ -29,8 +31,9 @@ Population instance normalization followed by a learned affine that the
 with one value of each per channel.
 
 ```text
-normalized = (x - mean(x, HW)) / sqrt(var(x, HW) + eps)
-out = (1 + delta_gamma)[:, :, None, None] * normalized + beta[:, :, None, None]
+normalized = (x - mean(x, HW)) / sqrt(var(x, HW) + eps)      # rank 4
+normalized = (x - mean(x, C)) / sqrt(var(x, C) + eps)        # rank 3
+out = (1 + delta_gamma) * normalized + beta
 ```
 
 A zero ``params`` vector yields the normalized features. There are no
@@ -89,3 +92,26 @@ norm     adaptive_norm  x=node:seed/out:[B, 64, 4, 4], params=node:style/out:[B,
 ```
 
 Parameters: 329,088
+
+### Example 3
+
+Sequence modulation: 32 feature channels require 64 style parameters.
+
+```python
+tokens = linear(32)
+style = pool_tokens(linear(64), 'mean')
+adaptive_norm(tokens, style)
+```
+
+Input `['B', 16, 16]` → output `['B', 16, 32]`.
+
+```text
+Network: [B, 16, 16] -> [B, 16, 32]  dtype=float32
+name  operation      input shapes                                           output shapes
+n0    linear         x=input:x:[B, 16, 16]                                  out=[B, 16, 32]
+n1    linear         x=node:n0/out:[B, 16, 32]                              out=[B, 16, 64]
+n2    pool_tokens    x=node:n1/out:[B, 16, 64]                              out=[B, 64]
+n3    adaptive_norm  x=node:n0/out:[B, 16, 32], params=node:n2/out:[B, 64]  out=[B, 16, 32]
+```
+
+Parameters: 2,656

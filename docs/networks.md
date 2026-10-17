@@ -97,6 +97,61 @@ logits            linear      x=node:features/out:[B, 6272]                     
 
 Parameters: 148,337. Mirza & Osindero, "Conditional Generative Adversarial Nets" (2014), in the usual DCGAN form; 10·784+784 + 2·64·4·4+64 + 64·128·4·4 + 2·128 + 6272+1 = 148,337 parameters.
 
+## Tiny ConvNeXt Vision Classifier
+
+A ConvNeXt-style convolutional vision network: 4×4 patchifying convolution, 2 stages of 7×7 depthwise convolutions with GroupNorm, inverted 1×1 pointwise convolutions (4× expansion), and learned residual scale, followed by global average pooling and a linear classifier.
+
+`examples/networks/convnext_tiny.hndl`
+
+```python
+# ConvNeXt-style stage at 32x32 scale: 4x4 patchify stem, 7x7 depthwise
+# convolutions, inverted 4x pointwise bottleneck, and learned residual scaling.
+
+conv(64, kernel_size=4, stride=4, name="patch_stem")
+x = group_norm(1, name="stem_norm")
+
+for _ in range(2):
+    h = conv(x, 64, kernel_size=7, padding=3, groups=64, name="dwconv")
+    h = group_norm(h, 1, name="norm")
+    h = conv(h, 256, kernel_size=1, name="pwconv1")
+    h = gelu(h)
+    h = conv(h, 64, kernel_size=1, name="pwconv2")
+    h = learned_scale(h, init_value=1e-6, name="gamma")
+    x = add(x, h, name="residual")
+
+global_avg_pool(x)
+layer_norm(name="head_norm")
+linear(name="head")
+```
+
+Input `['B', 3, 32, 32]` → output `['B', 10]`.
+
+```text
+Network: [B, 3, 32, 32] -> [B, 10]  dtype=float32
+name        operation        input shapes                                                         output shapes
+patch_stem  conv             x=input:x:[B, 3, 32, 32]                                             out=[B, 64, 8, 8]
+stem_norm   group_norm       x=node:patch_stem/out:[B, 64, 8, 8]                                  out=[B, 64, 8, 8]
+dwconv0     conv             x=node:stem_norm/out:[B, 64, 8, 8]                                   out=[B, 64, 8, 8]
+norm0       group_norm       x=node:dwconv0/out:[B, 64, 8, 8]                                     out=[B, 64, 8, 8]
+pwconv10    conv             x=node:norm0/out:[B, 64, 8, 8]                                       out=[B, 256, 8, 8]
+n5          gelu             x=node:pwconv10/out:[B, 256, 8, 8]                                   out=[B, 256, 8, 8]
+pwconv20    conv             x=node:n5/out:[B, 256, 8, 8]                                         out=[B, 64, 8, 8]
+gamma0      learned_scale    x=node:pwconv20/out:[B, 64, 8, 8]                                    out=[B, 64, 8, 8]
+residual0   add              a=node:stem_norm/out:[B, 64, 8, 8], b=node:gamma0/out:[B, 64, 8, 8]  out=[B, 64, 8, 8]
+dwconv1     conv             x=node:residual0/out:[B, 64, 8, 8]                                   out=[B, 64, 8, 8]
+norm1       group_norm       x=node:dwconv1/out:[B, 64, 8, 8]                                     out=[B, 64, 8, 8]
+pwconv11    conv             x=node:norm1/out:[B, 64, 8, 8]                                       out=[B, 256, 8, 8]
+n12         gelu             x=node:pwconv11/out:[B, 256, 8, 8]                                   out=[B, 256, 8, 8]
+pwconv21    conv             x=node:n12/out:[B, 256, 8, 8]                                        out=[B, 64, 8, 8]
+gamma1      learned_scale    x=node:pwconv21/out:[B, 64, 8, 8]                                    out=[B, 64, 8, 8]
+residual1   add              a=node:residual0/out:[B, 64, 8, 8], b=node:gamma1/out:[B, 64, 8, 8]  out=[B, 64, 8, 8]
+n16         global_avg_pool  x=node:residual1/out:[B, 64, 8, 8]                                   out=[B, 64]
+head_norm   layer_norm       x=node:n16/out:[B, 64]                                               out=[B, 64]
+head        linear           x=node:head_norm/out:[B, 64]                                         out=[B, 10]
+```
+
+Parameters: 76,876. Architecture follows Liu et al. 2022, "A ConvNet for the 2020s" (ConvNeXt, CVPR 2022, arXiv:2201.03545) and Woo et al. 2023, "ConvNeXt V2" (arXiv:2301.00808); parameter count checked against plain PyTorch: patch_stem 64·3·4·4+64 = 3,136, stem_norm 64·2 = 128, 2 blocks each (dwconv 64·1·7·7+64 = 3,200, norm 64·2 = 128, pwconv1 256·64·1·1+256 = 16,640, pwconv2 64·256·1·1+64 = 16,448, gamma 1; block total 36,417) = 72,834, head_norm 64·2 = 128, head 64·10+10 = 650; total 3,136 + 128 + 72,834 + 128 + 650 = 76,876.
+
 ## DCGAN discriminator
 
 The DCGAN discriminator for 64×64 RGB images: four "down2" convolutions with leaky ReLU, batch-normalized after the first stage, reduce the image to a 512×4×4 map that is flattened and projected to a single logit. The output is a raw score — apply a sigmoid, or use BCEWithLogitsLoss, in the loss rather than in the network.
@@ -212,6 +267,152 @@ index  name       operation   input shape       output shape
 
 Parameters: 12,658,435. Radford, Metz & Chintala 2015 (DCGAN), figure 1: project and reshape to 4×4×1024, then 8×8×512, 16×16×256, 32×32×128, 64×64×3. The count was checked by building the same stack in plain torch — Linear(100, 16384, bias=False), four ConvTranspose2d(kernel 4, stride 2, padding 1) with bias=False under each of the four BatchNorm2d layers and bias=True on the final RGB stage — which also gives 12,658,435. The PyTorch DCGAN tutorial differs: it starts from a 100×1×1 ConvTranspose2d rather than a linear projection, and its ngf=64 feature maps make the stack 512/256/128/64/3 instead of the paper's 1024/512/256/128/3.
 
+## Tiny DeepSeekMoE Causal Decoder
+
+A 32-token hybrid shared and routed mixture-of-experts causal decoder: learned token embeddings, 2 transformer layers pairing pre-RMSNorm and RoPE attention with parallel shared SwiGLU and top-2-of-4 routed experts, a final RMSNorm, and an untied vocabulary head whose width comes from the output contract.
+
+`examples/networks/deepseek_moe_tiny.hndl`
+
+```python
+# Hybrid Shared + Routed Mixture-of-Experts causal decoder (DeepSeekMoE / Qwen-MoE style).
+
+h = embedding(256, 128, name="tok_emb")
+
+for _ in range(2):
+    a = attention(rms_norm(h, name="attn_norm"), 4, causal=True, rope=True, bias=False, name="attn")
+    h = add(h, a, name="attn_res")
+    n = rms_norm(h, name="ffn_norm")
+    shared = swiglu(n, 256, bias=False, name="shared_expert")
+    routed = moe(n, 4, 256, top_k=2, activation="silu", name="routed_experts")
+    combined = add(shared, routed, name="moe_sum")
+    h = add(h, combined, name="ffn_res")
+
+rms_norm(h, name="final_norm")
+linear(bias=False, name="lm_head")
+```
+
+Input `['B', 32]` (`input_dtype="int64"`) → output `['B', 32, 256]`.
+
+```text
+Network: [B, 32] -> [B, 32, 256]  dtype=float32  input_dtype=int64
+name             operation  input shapes                                                                     output shapes
+tok_emb          embedding  ids=input:x:[B, 32]                                                              out=[B, 32, 128]
+attn_norm0       rms_norm   x=node:tok_emb/out:[B, 32, 128]                                                  out=[B, 32, 128]
+attn0            attention  x=node:attn_norm0/out:[B, 32, 128]                                               out=[B, 32, 128]
+attn_res0        add        a=node:tok_emb/out:[B, 32, 128], b=node:attn0/out:[B, 32, 128]                   out=[B, 32, 128]
+ffn_norm0        rms_norm   x=node:attn_res0/out:[B, 32, 128]                                                out=[B, 32, 128]
+shared_expert0   swiglu     x=node:ffn_norm0/out:[B, 32, 128]                                                out=[B, 32, 128]
+routed_experts0  moe        x=node:ffn_norm0/out:[B, 32, 128]                                                out=[B, 32, 128]
+moe_sum0         add        a=node:shared_expert0/out:[B, 32, 128], b=node:routed_experts0/out:[B, 32, 128]  out=[B, 32, 128]
+ffn_res0         add        a=node:attn_res0/out:[B, 32, 128], b=node:moe_sum0/out:[B, 32, 128]              out=[B, 32, 128]
+attn_norm1       rms_norm   x=node:ffn_res0/out:[B, 32, 128]                                                 out=[B, 32, 128]
+attn1            attention  x=node:attn_norm1/out:[B, 32, 128]                                               out=[B, 32, 128]
+attn_res1        add        a=node:ffn_res0/out:[B, 32, 128], b=node:attn1/out:[B, 32, 128]                  out=[B, 32, 128]
+ffn_norm1        rms_norm   x=node:attn_res1/out:[B, 32, 128]                                                out=[B, 32, 128]
+shared_expert1   swiglu     x=node:ffn_norm1/out:[B, 32, 128]                                                out=[B, 32, 128]
+routed_experts1  moe        x=node:ffn_norm1/out:[B, 32, 128]                                                out=[B, 32, 128]
+moe_sum1         add        a=node:shared_expert1/out:[B, 32, 128], b=node:routed_experts1/out:[B, 32, 128]  out=[B, 32, 128]
+ffn_res1         add        a=node:attn_res1/out:[B, 32, 128], b=node:moe_sum1/out:[B, 32, 128]              out=[B, 32, 128]
+final_norm       rms_norm   x=node:ffn_res1/out:[B, 32, 128]                                                 out=[B, 32, 128]
+lm_head          linear     x=node:final_norm/out:[B, 32, 128]                                               out=[B, 32, 256]
+```
+
+Parameters: 922,240. Architecture follows Dai et al. 2024, "DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models" (arXiv:2401.06066); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 2 layers with (RMSNorm 128 + 4·(128·128) attention + RMSNorm 128 + 3·(128·256) shared SwiGLU + router 128·4 + 4·(128·256+256 + 256·128+128) routed experts) = 2·428,288 = 856,576, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 856,576 + 128 + 32,768 = 922,240.
+
+## Tiny Diffusion Transformer (DiT)
+
+A 32×32 Diffusion Transformer: 4×4 patchifying convolution stem, 2 DiT blocks pairing adaptive LayerNorm-Zero (AdaLN-Zero) conditioning modulation with QK-normalized self-attention and SwiGLU feed-forward networks, followed by an AdaLN-Zero final modulation, 1×1 unpatchify projection, and 4× pixel_shuffle.
+
+`examples/networks/dit_tiny.hndl`
+
+```python
+# Diffusion Transformer (DiT) at 32x32 scale: 4x4 patchify stem, 2 DiT blocks
+# with AdaLN-Zero conditioning modulation, self-attention with QK-norm,
+# SwiGLU feed-forward networks, and 4x4 sub-pixel unpatchify head.
+
+x = patch_embed(x, 128, 4, name="patch_stem")
+x = pos_embed(x, 64, name="pos_emb")
+
+for _ in range(2):
+    normed_attn, gate_attn = adaln_zero(x, cond, name="attn_adaln")
+    a = attention(normed_attn, 4, qk_norm="rms_norm", name="attn")
+    x = add(x, broadcast_mul(a, gate_attn), name="attn_res")
+
+    normed_ffn, gate_ffn = adaln_zero(x, cond, name="ffn_adaln")
+    f = swiglu(normed_ffn, 384, bias=False, name="ffn")
+    x = add(x, broadcast_mul(f, gate_ffn), name="ffn_res")
+
+normed_out, _ = adaln_zero(x, cond, name="final_adaln")
+reshape(normed_out, 128, 8, 8, name="to_spatial")
+conv(48, kernel_size=1, name="unpatchify")
+pixel_shuffle(4, name="to_pixels")
+```
+
+Input `x=['B', 3, 32, 32]`, `cond=['B', 128]` → output `['B', 3, 32, 32]`.
+
+```text
+Network: x=[B, 3, 32, 32], cond=[B, 128] -> [B, 3, 32, 32]  dtype=float32
+name         operation      input shapes                                                         output shapes
+patch_stem   patch_embed    x=input:x:[B, 3, 32, 32]                                             out=[B, 64, 128]
+pos_emb      pos_embed      x=node:patch_stem/out:[B, 64, 128]                                   out=[B, 64, 128]
+attn_adaln0  adaln_zero     x=node:pos_emb/out:[B, 64, 128], cond=input:cond:[B, 128]            out=[B, 64, 128], gate=[B, 64, 128]
+attn0        attention      x=node:attn_adaln0/out:[B, 64, 128]                                  out=[B, 64, 128]
+n4           broadcast_mul  a=node:attn0/out:[B, 64, 128], b=node:attn_adaln0/gate:[B, 64, 128]  out=[B, 64, 128]
+attn_res0    add            a=node:pos_emb/out:[B, 64, 128], b=node:n4/out:[B, 64, 128]          out=[B, 64, 128]
+ffn_adaln0   adaln_zero     x=node:attn_res0/out:[B, 64, 128], cond=input:cond:[B, 128]          out=[B, 64, 128], gate=[B, 64, 128]
+ffn0         swiglu         x=node:ffn_adaln0/out:[B, 64, 128]                                   out=[B, 64, 128]
+n8           broadcast_mul  a=node:ffn0/out:[B, 64, 128], b=node:ffn_adaln0/gate:[B, 64, 128]    out=[B, 64, 128]
+ffn_res0     add            a=node:attn_res0/out:[B, 64, 128], b=node:n8/out:[B, 64, 128]        out=[B, 64, 128]
+attn_adaln1  adaln_zero     x=node:ffn_res0/out:[B, 64, 128], cond=input:cond:[B, 128]           out=[B, 64, 128], gate=[B, 64, 128]
+attn1        attention      x=node:attn_adaln1/out:[B, 64, 128]                                  out=[B, 64, 128]
+n12          broadcast_mul  a=node:attn1/out:[B, 64, 128], b=node:attn_adaln1/gate:[B, 64, 128]  out=[B, 64, 128]
+attn_res1    add            a=node:ffn_res0/out:[B, 64, 128], b=node:n12/out:[B, 64, 128]        out=[B, 64, 128]
+ffn_adaln1   adaln_zero     x=node:attn_res1/out:[B, 64, 128], cond=input:cond:[B, 128]          out=[B, 64, 128], gate=[B, 64, 128]
+ffn1         swiglu         x=node:ffn_adaln1/out:[B, 64, 128]                                   out=[B, 64, 128]
+n16          broadcast_mul  a=node:ffn1/out:[B, 64, 128], b=node:ffn_adaln1/gate:[B, 64, 128]    out=[B, 64, 128]
+ffn_res1     add            a=node:attn_res1/out:[B, 64, 128], b=node:n16/out:[B, 64, 128]       out=[B, 64, 128]
+final_adaln  adaln_zero     x=node:ffn_res1/out:[B, 64, 128], cond=input:cond:[B, 128]           out=[B, 64, 128], gate=[B, 64, 128]
+to_spatial   reshape        x=node:final_adaln/out:[B, 64, 128]                                  out=[B, 128, 8, 8]
+unpatchify   conv           x=node:to_spatial/out:[B, 128, 8, 8]                                 out=[B, 48, 8, 8]
+to_pixels    pixel_shuffle  x=node:unpatchify/out:[B, 48, 8, 8]                                  out=[B, 3, 32, 32]
+```
+
+Parameters: 695,472. Architecture follows Peebles & Xie 2023, "Scalable Diffusion Models with Transformers" (DiT, ICCV 2023, arXiv:2212.09748); parameter count checked against plain PyTorch: patch_stem 128·3·4·4+128 = 6,272, pos_emb 64·128 = 8,192, 2 DiT blocks each (attn_adaln 128·384+384 = 49,536, attn 4·(128·128+128)+64 = 66,112, ffn_adaln 128·384+384 = 49,536, SwiGLU 3·(128·384) = 147,456; block total 312,640) = 625,280, final_adaln 49,536, unpatchify 48·128·1·1+48 = 6,192, pixel_shuffle 0; total 6,272 + 8,192 + 625,280 + 49,536 + 6,192 = 695,472.
+
+## ESPCN 2x Super-Resolution Network
+
+An Efficient Sub-Pixel Convolutional Neural Network for 2× image super-resolution: feature extraction convolutions at low resolution followed by a sub-pixel convolution layer with pixel_shuffle(2) where output channel width (12 = 3 × 2²) is automatically inferred backward by HNDL's constraint solver.
+
+`examples/networks/espcn_super_res.hndl`
+
+```python
+# ESPCN (Shi et al. 2016) 2x image super-resolution network: feature maps stay
+# at 16x16 and the final conv channel count (12) is inferred backward from
+# pixel_shuffle(2) and the [B, 3, 32, 32] output contract.
+
+conv(64, kernel_size=5, padding=2, name="conv1")
+tanh()
+conv(32, kernel_size=3, padding=1, name="conv2")
+tanh()
+conv(kernel_size=3, padding=1, name="subpixel_conv")
+pixel_shuffle(2, name="upscale")
+```
+
+Input `['B', 3, 16, 16]` → output `['B', 3, 32, 32]`.
+
+```text
+Network: [B, 3, 16, 16] -> [B, 3, 32, 32]  dtype=float32
+index  name           operation      input shape      output shape
+0      conv1          conv           [B, 3, 16, 16]   [B, 64, 16, 16]
+1      n1             tanh           [B, 64, 16, 16]  [B, 64, 16, 16]
+2      conv2          conv           [B, 64, 16, 16]  [B, 32, 16, 16]
+3      n3             tanh           [B, 32, 16, 16]  [B, 32, 16, 16]
+4      subpixel_conv  conv           [B, 32, 16, 16]  [B, 12, 16, 16]
+5      upscale        pixel_shuffle  [B, 12, 16, 16]  [B, 3, 32, 32]
+```
+
+Parameters: 26,796. Architecture follows Shi et al. 2016, "Real-Time Single Image and Video Super-Resolution Using an Efficient Sub-Pixel Convolutional Neural Network" (CVPR 2016, arXiv:1609.05158); parameter count checked against plain PyTorch: conv1 64·3·5·5+64 = 4,864, conv2 32·64·3·3+32 = 18,464, subpixel_conv 12·32·3·3+12 = 3,468, pixel_shuffle 0; total 4,864 + 18,464 + 3,468 = 26,796.
+
 ## Tiny GPT
 
 A 64-token GPT-2-style decoder: learned token and position embeddings, four causal pre-norm transformer blocks with a tanh-approximated GELU feed-forward, a final layer norm, and an untied language-model head whose width is inferred from the output contract.
@@ -293,6 +494,66 @@ index  name    operation  input shape     output shape
 
 Parameters: 109,962. Hopfield layer of Ramsauer et al., "Hopfield Networks is All You Need" (2020), whose only parameter is the stored-pattern matrix; 784·128+128 + 64·128 + 128·10+10 = 109,962 parameters.
 
+## Tiny Kimi Linear Hybrid 3:1 Decoder
+
+A 64-token Kimi Linear hybrid language model: learned token embeddings, 3 Kimi Delta Attention (KDA) layers with fine-grained channel-wise decay, causal short conv1d, per-head L2 normalization and SwiGLU FFNs, interleaved with 1 global NoPE Multi-Head Latent Attention (MLA) layer with compressed KV latent caching, followed by final RMSNorm and linear head.
+
+`examples/networks/kimi_linear_tiny.hndl`
+
+```python
+# Kimi Linear 3:1 hybrid causal decoder: 3 Kimi Delta Attention (KDA) layers
+# with channel-wise decay and causal short conv1d, interleaved with 1 global
+# NoPE Multi-Head Latent Attention (MLA) layer and SwiGLU feed-forward blocks.
+
+h = embedding(256, 128, name="tok_emb")
+
+for _ in range(3):
+    h = add(h, gated_delta_attention(rms_norm(h, name="kda_norm"), 4, decay_kind="channel", conv_size=4, name="kda"))
+    h = add(h, swiglu(rms_norm(h, name="ffn_norm"), 384, bias=False, name="ffn"))
+
+h = add(h, latent_attention(rms_norm(h, name="mla_norm"), 4, kv_lora_rank=32, qk_rope_head_dim=0, causal=True, name="mla"))
+h = add(h, swiglu(rms_norm(h, name="mla_ffn_norm"), 384, bias=False, name="mla_ffn"))
+
+rms_norm(h, name="final_norm")
+linear(bias=False, name="lm_head")
+```
+
+Input `['B', 64]` (`input_dtype="int64"`) → output `['B', 64, 256]`.
+
+```text
+Network: [B, 64] -> [B, 64, 256]  dtype=float32  input_dtype=int64
+name          operation              input shapes                                                   output shapes
+tok_emb       embedding              ids=input:x:[B, 64]                                            out=[B, 64, 128]
+kda_norm0     rms_norm               x=node:tok_emb/out:[B, 64, 128]                                out=[B, 64, 128]
+kda0          gated_delta_attention  x=node:kda_norm0/out:[B, 64, 128]                              out=[B, 64, 128]
+n3            add                    a=node:tok_emb/out:[B, 64, 128], b=node:kda0/out:[B, 64, 128]  out=[B, 64, 128]
+ffn_norm0     rms_norm               x=node:n3/out:[B, 64, 128]                                     out=[B, 64, 128]
+ffn0          swiglu                 x=node:ffn_norm0/out:[B, 64, 128]                              out=[B, 64, 128]
+n6            add                    a=node:n3/out:[B, 64, 128], b=node:ffn0/out:[B, 64, 128]       out=[B, 64, 128]
+kda_norm1     rms_norm               x=node:n6/out:[B, 64, 128]                                     out=[B, 64, 128]
+kda1          gated_delta_attention  x=node:kda_norm1/out:[B, 64, 128]                              out=[B, 64, 128]
+n9            add                    a=node:n6/out:[B, 64, 128], b=node:kda1/out:[B, 64, 128]       out=[B, 64, 128]
+ffn_norm1     rms_norm               x=node:n9/out:[B, 64, 128]                                     out=[B, 64, 128]
+ffn1          swiglu                 x=node:ffn_norm1/out:[B, 64, 128]                              out=[B, 64, 128]
+n12           add                    a=node:n9/out:[B, 64, 128], b=node:ffn1/out:[B, 64, 128]       out=[B, 64, 128]
+kda_norm2     rms_norm               x=node:n12/out:[B, 64, 128]                                    out=[B, 64, 128]
+kda2          gated_delta_attention  x=node:kda_norm2/out:[B, 64, 128]                              out=[B, 64, 128]
+n15           add                    a=node:n12/out:[B, 64, 128], b=node:kda2/out:[B, 64, 128]      out=[B, 64, 128]
+ffn_norm2     rms_norm               x=node:n15/out:[B, 64, 128]                                    out=[B, 64, 128]
+ffn2          swiglu                 x=node:ffn_norm2/out:[B, 64, 128]                              out=[B, 64, 128]
+n18           add                    a=node:n15/out:[B, 64, 128], b=node:ffn2/out:[B, 64, 128]      out=[B, 64, 128]
+mla_norm      rms_norm               x=node:n18/out:[B, 64, 128]                                    out=[B, 64, 128]
+mla           latent_attention       x=node:mla_norm/out:[B, 64, 128]                               out=[B, 64, 128]
+n21           add                    a=node:n18/out:[B, 64, 128], b=node:mla/out:[B, 64, 128]       out=[B, 64, 128]
+mla_ffn_norm  rms_norm               x=node:n21/out:[B, 64, 128]                                    out=[B, 64, 128]
+mla_ffn       swiglu                 x=node:mla_ffn_norm/out:[B, 64, 128]                           out=[B, 64, 128]
+n24           add                    a=node:n21/out:[B, 64, 128], b=node:mla_ffn/out:[B, 64, 128]   out=[B, 64, 128]
+final_norm    rms_norm               x=node:n24/out:[B, 64, 128]                                    out=[B, 64, 128]
+lm_head       linear                 x=node:final_norm/out:[B, 64, 128]                             out=[B, 64, 256]
+```
+
+Parameters: 955,808. Architecture follows Moonshot AI 2025, "Kimi Linear: An Expressive, Efficient Attention Architecture" (arXiv:2510.26692) and DeepSeek-AI 2024, "DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model" (arXiv:2405.04434); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 3 KDA blocks each (RMSNorm 128 + KDA 84,736 + RMSNorm 128 + SwiGLU 147,456 = 232,448) = 697,344, 1 MLA block (RMSNorm 128 + MLA 45,088 + RMSNorm 128 + SwiGLU 147,456 = 192,800), final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 697,344 + 192,800 + 128 + 32,768 = 955,808.
+
 ## LeNet-5
 
 The classic convolutional digit classifier: two 5×5 convolution and 2×2 average-pooling stages, then 120- and 84-unit tanh layers. The final width is inferred from the output contract.
@@ -344,6 +605,64 @@ index  name    operation  input shape      output shape
 ```
 
 Parameters: 61,706. LeCun et al., "Gradient-Based Learning Applied to Document Recognition" (Proc. IEEE, 1998), in the usual modern reading with fully connected C5/F6 layers; checked against the equivalent torch.nn stack: 156 + 2,416 + 48,120 + 10,164 + 850 = 61,706 parameters.
+
+## Tiny LLaMA Causal Decoder
+
+A 64-token LLaMA-style causal language model: learned token embeddings, 4 transformer layers pairing pre-RMSNorm and 4-head RoPE causal attention with bias-free SwiGLU feed-forward networks, a final RMSNorm, and an untied vocabulary head whose width is inferred from the output contract.
+
+`examples/networks/llama_tiny.hndl`
+
+```python
+# LLaMA-style causal decoder at toy scale: pre-RMSNorm, rotary position
+# embeddings, bias-free attention, and SwiGLU feed-forward blocks.
+
+h = embedding(256, 128, name="tok_emb")
+
+for _ in range(4):
+    a = attention(rms_norm(h, name="attn_norm"), 4, causal=True, rope=True, bias=False, name="attn")
+    h = add(h, a, name="attn_res")
+    f = swiglu(rms_norm(h, name="ffn_norm"), 384, bias=False, name="ffn")
+    h = add(h, f, name="ffn_res")
+
+rms_norm(h, name="final_norm")
+linear(bias=False, name="lm_head")
+```
+
+Input `['B', 64]` (`input_dtype="int64"`) → output `['B', 64, 256]`.
+
+```text
+Network: [B, 64] -> [B, 64, 256]  dtype=float32  input_dtype=int64
+name        operation  input shapes                                                     output shapes
+tok_emb     embedding  ids=input:x:[B, 64]                                              out=[B, 64, 128]
+attn_norm0  rms_norm   x=node:tok_emb/out:[B, 64, 128]                                  out=[B, 64, 128]
+attn0       attention  x=node:attn_norm0/out:[B, 64, 128]                               out=[B, 64, 128]
+attn_res0   add        a=node:tok_emb/out:[B, 64, 128], b=node:attn0/out:[B, 64, 128]   out=[B, 64, 128]
+ffn_norm0   rms_norm   x=node:attn_res0/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn0        swiglu     x=node:ffn_norm0/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn_res0    add        a=node:attn_res0/out:[B, 64, 128], b=node:ffn0/out:[B, 64, 128]  out=[B, 64, 128]
+attn_norm1  rms_norm   x=node:ffn_res0/out:[B, 64, 128]                                 out=[B, 64, 128]
+attn1       attention  x=node:attn_norm1/out:[B, 64, 128]                               out=[B, 64, 128]
+attn_res1   add        a=node:ffn_res0/out:[B, 64, 128], b=node:attn1/out:[B, 64, 128]  out=[B, 64, 128]
+ffn_norm1   rms_norm   x=node:attn_res1/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn1        swiglu     x=node:ffn_norm1/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn_res1    add        a=node:attn_res1/out:[B, 64, 128], b=node:ffn1/out:[B, 64, 128]  out=[B, 64, 128]
+attn_norm2  rms_norm   x=node:ffn_res1/out:[B, 64, 128]                                 out=[B, 64, 128]
+attn2       attention  x=node:attn_norm2/out:[B, 64, 128]                               out=[B, 64, 128]
+attn_res2   add        a=node:ffn_res1/out:[B, 64, 128], b=node:attn2/out:[B, 64, 128]  out=[B, 64, 128]
+ffn_norm2   rms_norm   x=node:attn_res2/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn2        swiglu     x=node:ffn_norm2/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn_res2    add        a=node:attn_res2/out:[B, 64, 128], b=node:ffn2/out:[B, 64, 128]  out=[B, 64, 128]
+attn_norm3  rms_norm   x=node:ffn_res2/out:[B, 64, 128]                                 out=[B, 64, 128]
+attn3       attention  x=node:attn_norm3/out:[B, 64, 128]                               out=[B, 64, 128]
+attn_res3   add        a=node:ffn_res2/out:[B, 64, 128], b=node:attn3/out:[B, 64, 128]  out=[B, 64, 128]
+ffn_norm3   rms_norm   x=node:attn_res3/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn3        swiglu     x=node:ffn_norm3/out:[B, 64, 128]                                out=[B, 64, 128]
+ffn_res3    add        a=node:attn_res3/out:[B, 64, 128], b=node:ffn3/out:[B, 64, 128]  out=[B, 64, 128]
+final_norm  rms_norm   x=node:ffn_res3/out:[B, 64, 128]                                 out=[B, 64, 128]
+lm_head     linear     x=node:final_norm/out:[B, 64, 128]                               out=[B, 64, 256]
+```
+
+Parameters: 918,656. Architecture follows Touvron et al. 2023, "LLaMA: Open and Efficient Foundation Language Models" (arXiv:2302.13971) and Touvron et al. 2023, "Llama 2: Open Foundation and Fine-Tuned Chat Models" (arXiv:2307.09288); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 4 layers with (RMSNorm 128 + 4·(128·128) attention + RMSNorm 128 + 3·(128·384) SwiGLU) = 4·213,248 = 852,992, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 852,992 + 128 + 32,768 = 918,656.
 
 ## Multilayer perceptron
 
@@ -440,6 +759,46 @@ lm_head               linear      x=node:final_norm/out:[B, 32, 64]             
 ```
 
 Parameters: 181,888. Top-k expert routing follows Shazeer et al. 2017 ("Outrageously Large Neural Networks") and the Switch Transformer (Fedus et al. 2021); the count was checked against an equivalent plain-PyTorch build: embedding 100·64 = 6,400, positions 32·64 = 2,048, five layer norms 5·128 = 640, two attentions 2·4·(64·64+64) = 33,280, two MoE layers 2·(4·64 + 4·(128·64+128 + 64·128+64)) = 133,120, head 100·64 = 6,400, total 181,888.
+
+## Tiny Qwen3 GQA QK-Norm Causal Decoder
+
+A 64-token Qwen3-style causal language model: learned token embeddings, 4 transformer blocks combining pre-RMSNorm, Grouped-Query Attention (4 query heads, 2 key/value heads), per-head QK-RMSNorm, high-frequency RoPE (theta = 1,000,000), and bias-free SwiGLU feed-forward networks, followed by a final RMSNorm and vocabulary head.
+
+`examples/networks/qwen3_gqa_qknorm.hndl`
+
+```python
+# Qwen3-style causal decoder: pre-RMSNorm, Grouped-Query Attention (GQA, 4 q-heads,
+# 2 kv-heads), per-head QK-RMSNorm, high-theta RoPE (1,000,000), and SwiGLU.
+
+embedding(256, 128, name="tok_emb")
+
+for _ in range(4):
+    transformer_block(
+        4, kv_heads=2, hidden=384, ffn_kind="swiglu",
+        norm="rms_norm", qk_norm="rms_norm",
+        causal=True, rope=True, rope_theta=1000000.0, bias=False,
+        name="block",
+    )
+
+rms_norm(name="final_norm")
+linear(bias=False, name="lm_head")
+```
+
+Input `['B', 64]` (`input_dtype="int64"`) → output `['B', 64, 256]`.
+
+```text
+Network: [B, 64] -> [B, 64, 256]  dtype=float32  input_dtype=int64
+index  name        operation          input shape   output shape
+0      tok_emb     embedding          [B, 64]       [B, 64, 128]
+1      block0      transformer_block  [B, 64, 128]  [B, 64, 128]
+2      block1      transformer_block  [B, 64, 128]  [B, 64, 128]
+3      block2      transformer_block  [B, 64, 128]  [B, 64, 128]
+4      block3      transformer_block  [B, 64, 128]  [B, 64, 128]
+5      final_norm  rms_norm           [B, 64, 128]  [B, 64, 128]
+6      lm_head     linear             [B, 64, 128]  [B, 64, 256]
+```
+
+Parameters: 853,376. Architecture follows Qwen Team 2024/2025, "Qwen2.5 Technical Report" (arXiv:2412.15115); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 4 blocks with (norm1 128 + q_proj 128·128 + k_proj 128·64 + v_proj 128·64 + q_norm 32 + k_norm 32 + o_proj 128·128 + norm2 128 + SwiGLU 3·(128·384)) = 4·196,928 = 787,712, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 787,712 + 128 + 32,768 = 853,376.
 
 ## ResNet-18
 
@@ -675,3 +1034,60 @@ index  name        operation          input shape     output shape
 ```
 
 Parameters: 1,803,850. Dosovitskiy et al. 2020, "An Image Is Worth 16x16 Words" (ViT), in the ViT-Tiny configuration (width 192, 3 heads, mlp_ratio 4) at depth 4 with a 4×4 patch stem on 32×32 inputs; checked against an equivalent plain-PyTorch build: 9,408 stem + 192 class token + 12,480 positions + 4·444,864 blocks + 384 final norm + 1,930 head = 1,803,850.
+
+## Tiny Whisper Audio Seq2Seq Model
+
+A speech-to-text sequence-to-sequence model: 2-layer 1D convolutional audio stem downsampling 40-channel log-mel spectrogram frames by 2x, a 64-width transformer encoder, and a 16-token causal decoder with self-attention, acoustic cross-attention, and SwiGLU feed-forward networks.
+
+`examples/networks/whisper_seq2seq_tiny.hndl`
+
+```python
+# Whisper-style speech-to-token encoder-decoder: 2-layer Conv1d acoustic stem
+# downsampling spectrogram frames by 2x, bidirectional encoder, and causal
+# decoder attending to acoustic features via cross_attention.
+
+conv1d(x, 64, kernel_size=3, padding=1, name="stem1")
+gelu()
+conv1d(64, kernel_size=3, stride=2, padding=1, name="stem2")
+gelu()
+enc = transpose(1, 2, name="to_seq")
+enc = pos_embed(enc, 32, name="enc_pos")
+enc = transformer_block(enc, 4, norm="rms_norm", name="enc_block")
+
+dec = embedding(tokens, 128, 64, name="dec_emb")
+dec = pos_embed(dec, 16, name="dec_pos")
+dec = add(dec, attention(rms_norm(dec, name="self_norm"), 4, causal=True, rope=True, bias=False, name="self_attn"))
+dec = add(dec, cross_attention(rms_norm(dec, name="cross_norm"), enc, 4, bias=False, name="cross_attn"))
+dec = add(dec, swiglu(rms_norm(dec, name="ffn_norm"), 192, bias=False, name="ffn"))
+rms_norm(dec, name="out_norm")
+linear(bias=False, name="head")
+```
+
+Input `x=['B', 40, 64]`, `tokens=['B', 16]` (`input_dtype="{'tokens': 'int64'}"`) → output `['B', 16, 128]`.
+
+```text
+Network: x=[B, 40, 64], tokens=[B, 16] -> [B, 16, 128]  dtype=float32  input_dtype=tokens=int64
+name        operation          input shapes                                                               output shapes
+stem1       conv1d             x=input:x:[B, 40, 64]                                                      out=[B, 64, 64]
+n1          gelu               x=node:stem1/out:[B, 64, 64]                                               out=[B, 64, 64]
+stem2       conv1d             x=node:n1/out:[B, 64, 64]                                                  out=[B, 64, 32]
+n3          gelu               x=node:stem2/out:[B, 64, 32]                                               out=[B, 64, 32]
+to_seq      transpose          x=node:n3/out:[B, 64, 32]                                                  out=[B, 32, 64]
+enc_pos     pos_embed          x=node:to_seq/out:[B, 32, 64]                                              out=[B, 32, 64]
+enc_block   transformer_block  x=node:enc_pos/out:[B, 32, 64]                                             out=[B, 32, 64]
+dec_emb     embedding          ids=input:tokens:[B, 16]                                                   out=[B, 16, 64]
+dec_pos     pos_embed          x=node:dec_emb/out:[B, 16, 64]                                             out=[B, 16, 64]
+self_norm   rms_norm           x=node:dec_pos/out:[B, 16, 64]                                             out=[B, 16, 64]
+self_attn   attention          x=node:self_norm/out:[B, 16, 64]                                           out=[B, 16, 64]
+n11         add                a=node:dec_pos/out:[B, 16, 64], b=node:self_attn/out:[B, 16, 64]           out=[B, 16, 64]
+cross_norm  rms_norm           x=node:n11/out:[B, 16, 64]                                                 out=[B, 16, 64]
+cross_attn  cross_attention    x=node:cross_norm/out:[B, 16, 64], context=node:enc_block/out:[B, 32, 64]  out=[B, 16, 64]
+n14         add                a=node:n11/out:[B, 16, 64], b=node:cross_attn/out:[B, 16, 64]              out=[B, 16, 64]
+ffn_norm    rms_norm           x=node:n14/out:[B, 16, 64]                                                 out=[B, 16, 64]
+ffn         swiglu             x=node:ffn_norm/out:[B, 16, 64]                                            out=[B, 16, 64]
+n17         add                a=node:n14/out:[B, 16, 64], b=node:ffn/out:[B, 16, 64]                     out=[B, 16, 64]
+out_norm    rms_norm           x=node:n17/out:[B, 16, 64]                                                 out=[B, 16, 64]
+head        linear             x=node:out_norm/out:[B, 16, 64]                                            out=[B, 16, 128]
+```
+
+Parameters: 159,296. Architecture follows Radford et al. 2022, "Robust Speech Recognition via Large-Scale Weak Supervision" (Whisper, arXiv:2212.04356); parameter count checked against plain PyTorch: encoder (stem1 64·40·3+64 = 7,744, stem2 64·64·3+64 = 12,352, pos 32·64 = 2,048, block 64 + 4·(64·64+64) + 64 + 64·256+256 + 256·64+64 = 49,856; total 72,000) + decoder (emb 128·64 = 8,192, pos 16·64 = 1,024, self_norm 64, self_attn 4·(64·64) = 16,384, cross_norm 64, cross_attn 4·(64·64) = 16,384, ffn_norm 64, ffn 3·(64·192) = 36,864, out_norm 64, head 64·128 = 8,192; total 87,296); total 72,000 + 87,296 = 159,296.

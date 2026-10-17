@@ -28,6 +28,13 @@ x[B, T, D] -> out[B, T, D]
 | `layer_scale` | bool | `False` | — | Scale each residual branch by a learned per-feature gain of width D. |
 | `layer_scale_init` | float | `1e-05` | >= 0 | Value the layer-scale gains start at; ignored when layer_scale is false. |
 | `eps` | float | `1e-05` | > 0 | Epsilon of both normalizations; must be positive. |
+| `ffn_kind` | str | `"mlp"` | one of `mlp`, `swiglu` | Feed-forward architecture: "mlp" or "swiglu". |
+| `hidden` | int | `0` | >= 0 | Explicit inner width of the feed-forward; 0 means mlp_ratio * D. |
+| `rope` | bool | `False` | — | Enable rotary position embeddings in self-attention. |
+| `rope_theta` | float | `10000.0` | > 1.0 | Base frequency for rotary embeddings. |
+| `kv_heads` | int | `0` | >= 0 | Number of key/value heads for GQA in self-attention; 0 means heads. |
+| `qk_norm` | str | `"none"` | one of `none`, `rms_norm`, `l2_norm` | Query/key normalization in self-attention. |
+| `bias` | bool | `True` | — | Add learned biases to projections and normalizations. |
 
 ## Description
 

@@ -1,21 +1,21 @@
 # `conv1d`
 
-One-dimensional convolution over [B, C, L] signals.
+One-dimensional convolution over [B, C, L] or [B, T, C] signals.
 
 **Category:** convolution · **Identity:** `conv1d@1`
 
 ## Shape
 
 ```text
-x[B, C_in, L_in] -> out[B, C_out, L_out]
+x -> out
 ```
 
-Relation: `L_out = floor((L_in + 2*padding - dilation*(kernel_size - 1) - 1) / stride + 1)`
+Relation: `x[B, C_in, L_in] -> out[B, C_out, L_out] (or x[B, L_in, C_in] -> out[B, L_out, C_out] when channels_last=True)`
 
 | Port | Direction | Pattern | dtype |
 | --- | --- | --- | --- |
-| `x` | input | `x[B, C_in, L_in]` | compute |
-| `out` | output | `out[B, C_out, L_out]` | compute |
+| `x` | input | `x` | compute |
+| `out` | output | `out` | compute |
 
 ## Arguments
 
@@ -30,6 +30,8 @@ Relation: `L_out = floor((L_in + 2*padding - dilation*(kernel_size - 1) - 1) / s
 | `groups` | int | `1` | >= 1 | Channel groups; must divide input and output channels. |
 | `bias` | bool | `True` | — | Add a learned per-channel bias. |
 | `spectral_norm` | bool | `False` | — | Divide the weight by its largest singular value, estimated by power iteration. |
+| `causal` | bool | `False` | — | Left-only causal padding; when stride=1 establishes bijective L_out == L_in. |
+| `channels_last` | bool | `False` | — | Sequence layout [B, T, C] instead of [B, C, L]. |
 
 ## Description
 
@@ -42,45 +44,11 @@ out[b, co, l] = bias[co] + sum_{ci, k} weight[co, ci, k] * x[b, ci, l*stride - p
 
 ## Axis convention
 
-The input is `[B, C, L]`: channels at axis 1, positions at axis 2. The
-kernel slides along the length axis only. A `[B, T, D]` sequence carries
-its features on the last axis instead, so transpose it to `[B, D, T]`
-before this operator and back afterwards; `conv1d` never reinterprets the
-axes for you.
-
-With `groups > 1` the channels split into that many independent groups,
-each convolved with its own kernels; `groups == in_channels ==
-out_channels` is a depthwise convolution. Both channel counts must be
-divisible by `groups`.
-
-The output length is
-`floor((L_in + 2*padding - dilation*(kernel_size - 1) - 1) / stride + 1)`.
-Because that formula is not injective, inferring the input length from a
-known output length generally leaves an interval of valid values; the
-resolver reports the ambiguity rather than choosing one.
-
-Parameters are `weight` of shape `[out_channels, in_channels / groups,
-kernel_size]` and, when enabled, `bias` of shape `[out_channels]`.
-Behavior is identical in train and eval mode unless `spectral_norm` is
-enabled, and the computation stays in the input dtype.
-
-## Spectral normalization
-
-With `spectral_norm=True` the weight is reparametrized as `weight /
-sigma(weight)`, where `sigma` is the largest singular value of the weight
-viewed as an `[out_channels, -1]` matrix, estimated by one power iteration
-per forward pass
-(`torch.nn.utils.parametrizations.spectral_norm`). The layer is then
-1-Lipschitz, the standard constraint for a GAN discriminator.
-
-The parametrization renames the registered state: the learned tensor
-becomes `parametrizations.weight.original` and `weight` turns into a
-computed attribute, with persistent buffers
-`parametrizations.weight.0._u` and `parametrizations.weight.0._v` holding
-the power-iteration vectors. `init` and `trainable` overrides must
-therefore target `parametrizations.weight.original` instead of `weight`;
-`bias` is unaffected. The power iteration refreshes the buffers in
-training mode only, so evaluation is a pure function of the stored state.
+The default input is `[B, C, L]`: channels at axis 1, positions at axis 2.
+With `channels_last=True`, the input layout is `[B, T, C]`.
+With `causal=True`, left-padding of `dilation * (kernel_size - 1)` is applied
+so each position attends only to past and present positions.
+When `causal=True` and `stride=1`, `L_out == L_in` forms a bijective relation.
 
 ## Examples
 
@@ -167,3 +135,39 @@ index  name  operation   input shape  output shape
 ```
 
 Parameters: 2,160
+
+### Example 5
+
+Causal convolution preserves sequence length bijectively when stride=1.
+
+```python
+conv1d(32, kernel_size=4, causal=True)
+```
+
+Input `['B', 16, 64]` → output `['B', 32, 64]`.
+
+```text
+Network: [B, 16, 64] -> [B, 32, 64]  dtype=float32
+index  name  operation  input shape  output shape
+0      n0    conv1d     [B, 16, 64]  [B, 32, 64]
+```
+
+Parameters: 2,080
+
+### Example 6
+
+Causal convolution directly on [B, T, C] sequence layout.
+
+```python
+conv1d(32, kernel_size=4, causal=True, channels_last=True)
+```
+
+Input `['B', 64, 16]` → output `['B', 64, 32]`.
+
+```text
+Network: [B, 64, 16] -> [B, 64, 32]  dtype=float32
+index  name  operation  input shape  output shape
+0      n0    conv1d     [B, 64, 16]  [B, 64, 32]
+```
+
+Parameters: 2,080

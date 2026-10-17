@@ -23,6 +23,13 @@ x[B, T, D], context[B, S, D_ctx] -> out[B, T, D]
 | `heads` (positional) | int | required | >= 1 | Number of attention heads; must divide the query width D. |
 | `bias` | bool | `True` | — | Add a learned bias to the four projections. |
 | `dropout` | float | `0.0` | >= 0; < 1 | Dropout probability on the attention weights while training; 0 disables it. |
+| `qkv_bias` | bool | `True` | — | Narrow bias for Q/K/V projections; carries bias when bias and qkv_bias are true. |
+| `out_bias` | bool | `True` | — | Narrow bias for output projection; carries bias when bias and out_bias are true. |
+| `kv_heads` | int | `0` | >= 0 | Number of key/value heads for GQA/MQA; 0 means kv_heads == heads. Must divide heads. |
+| `head_dim` | int | `0` | >= 0 | Per-head dimension override; 0 means D // heads. |
+| `qk_norm` | str | `"none"` | one of `none`, `rms_norm`, `l2_norm` | Per-head query/key normalization. |
+| `logit_softcap` | float | `0.0` | >= 0.0 | Logit soft-capping value C; 0.0 means disabled. |
+| `eps` | float | `1e-06` | > 0 | Epsilon for QK normalization. |
 
 ## Description
 

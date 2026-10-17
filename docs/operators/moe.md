@@ -23,6 +23,9 @@ x[B, ..., D] -> out[B, ..., D]
 | `hidden` (positional) | int | required | >= 1; <= 2147483647 | Inner width of every expert's feed-forward. |
 | `top_k` | int | `2` | >= 1 | Experts each token is routed to; must not exceed experts. |
 | `activation` | str | `"gelu"` | one of `gelu`, `gelu_tanh`, `relu`, `silu`, `quick_gelu` | Nonlinearity inside each expert: "gelu", "gelu_tanh", "relu" or "silu". |
+| `expert_kind` | str | `"mlp"` | one of `mlp`, `swiglu` | Expert architecture: "mlp" (2-layer) or "swiglu" (3-projection gated). |
+| `bias` | bool | `True` | — | Enable learned biases in expert projections. |
+| `scoring` | str | `"softmax"` | one of `softmax`, `sigmoid` | Routing gate affinity normalization: "softmax" or "sigmoid". |
 
 ## Description
 
@@ -33,31 +36,14 @@ one position of one example) is a *token* and is routed independently.
 ```text
 logits  = router(x)                        # [N, experts], bias-free linear
 v, idx  = topk(logits, top_k)              # the top_k experts per token
-w       = softmax(v)                       # renormalized over the selection
+w       = softmax(v) or sigmoid(v)/sum     # renormalized over the selection
 out     = sum_k w[:, k] * expert[idx[:, k]](x)
 ```
 
-Each expert is ``down(activation(up(x)))`` with ``up`` of shape
-``[hidden, D]`` and ``down`` of shape ``[D, hidden]``, both with a bias.
-The experts live in an ``nn.ModuleList`` named ``experts``, so their
-parameters are ``experts.<i>.up.weight``, ``experts.<i>.up.bias``,
-``experts.<i>.down.weight`` and ``experts.<i>.down.bias``; the router is
-``router.weight``. Because the gate weights are a softmax over only the
-selected logits, they sum to one per token, and ``top_k == experts`` makes
-the layer a dense softmax-weighted mixture.
-
-Dispatch is a loop over the experts with a boolean row mask, chosen for
-clarity over throughput: cost grows with the number of experts even when
-each one sees few tokens. The router, the softmax and the experts all
-compute in the plan's compute dtype; nothing is upcast. Behavior is
-identical in train and eval mode, and routing is deterministic given the
-parameters (no noise, no capacity limit, so no token is ever dropped).
-
-Limitation: this operator emits no auxiliary load-balancing loss, so
-nothing pushes the router toward using its experts evenly. A host that
-wants one can recompute it from the router logits, for example as
-``experts * sum_e fraction_of_tokens_to_e * mean_softmax_prob_e``, by
-reading ``router`` out of the built model.
+Each expert is either ``down(activation(up(x)))`` (for ``expert_kind="mlp"``)
+or ``down(silu(gate(x)) * up(x))`` (for ``expert_kind="swiglu"``).
+The experts live in an ``nn.ModuleList`` named ``experts``; the router is
+``router.weight``.
 
 ## Examples
 
@@ -120,3 +106,39 @@ index  name  operation  input shape  output shape
 ```
 
 Parameters: 1,872
+
+### Example 4
+
+Four bias-free SwiGLU experts routed with top-2 softmax gating.
+
+```python
+moe(4, 32, expert_kind="swiglu", bias=False)
+```
+
+Input `['B', 8]` → output `['B', 8]`.
+
+```text
+Network: [B, 8] -> [B, 8]  dtype=float32
+index  name  operation  input shape  output shape
+0      n0    moe        [B, 8]       [B, 8]
+```
+
+Parameters: 3,104
+
+### Example 5
+
+Top-2 routing with sigmoid affinity scoring normalized over selected experts.
+
+```python
+moe(4, 32, scoring="sigmoid")
+```
+
+Input `['B', 8]` → output `['B', 8]`.
+
+```text
+Network: [B, 8] -> [B, 8]  dtype=float32
+index  name  operation  input shape  output shape
+0      n0    moe        [B, 8]       [B, 8]
+```
+
+Parameters: 2,240

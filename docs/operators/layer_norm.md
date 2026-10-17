@@ -21,6 +21,7 @@ x[B, ..., D] -> out[B, ..., D]
 | --- | --- | --- | --- | --- |
 | `eps` | float | `1e-05` | > 0 | Added to the variance before the square root; must be positive. |
 | `affine` | bool | `True` | — | Learn a per-feature scale and bias of width D. When false the layer has no parameters. |
+| `bias` | bool | `True` | — | Add a learned per-feature bias of width D. When false only the scale weight is learned. |
 
 ## Description
 
@@ -40,10 +41,11 @@ relation but would be normalized over ``W`` alone, which is almost never
 what is wanted; reach for `group_norm` on images. The examples below
 therefore cover only ranks 2 and 3.
 
-Parameters are ``weight`` (initialized to ones) and ``bias``
-(initialized to zeros), both of shape ``[D]``, and exist only when
-``affine`` is true. There are no running statistics, so train and eval
-behave identically. The computation runs in the plan's compute dtype.
+Parameters are ``weight`` (initialized to ones) and, when ``bias`` is
+true, ``bias`` (initialized to zeros), both of shape ``[D]``, and exist
+only when ``affine`` is true. There are no running statistics, so train
+and eval behave identically. The computation runs in the plan's compute
+dtype.
 
 ## Examples
 
@@ -112,3 +114,25 @@ index  name  operation   input shape  output shape
 ```
 
 Parameters: 68
+
+### Example 4
+
+A bias-free LayerNorm carrying learned scale weight but no bias parameter.
+
+```python
+linear(64)
+layer_norm(bias=False)
+linear()
+```
+
+Input `['B', 32]` → output `['B', 10]`.
+
+```text
+Network: [B, 32] -> [B, 10]  dtype=float32
+index  name  operation   input shape  output shape
+0      n0    linear      [B, 32]      [B, 64]
+1      n1    layer_norm  [B, 64]      [B, 64]
+2      n2    linear      [B, 64]      [B, 10]
+```
+
+Parameters: 2,826
