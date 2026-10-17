@@ -390,11 +390,13 @@ def test_vulnerability_moe_sigmoid_float16_underflow_causes_nan():
         dtype="float16",
     )
     model = build(plan, device="cpu")
-    x = torch.ones(2, 8, dtype=torch.float16)
+    x = torch.ones(2, 8, dtype=torch.float16, requires_grad=True)
     model["n0"].router.weight.data.fill_(-50.0)
     out = model(x=x)["output"]
-    # This currently evaluates to False (contains NaNs), failing the assertion
     assert out.isfinite().all(), "Expected finite outputs from MoE with negative router logits"
+    loss = out.sum()
+    loss.backward()
+    assert x.grad.isfinite().all(), "Expected finite backward gradients from MoE with negative router logits"
 
 
 def test_vulnerability_gda_alpha_underflow_causes_nan():

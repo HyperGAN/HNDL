@@ -31,7 +31,7 @@ def _reference(module):
         values, indices = torch.topk(logits, module.top_k, dim=-1)
         if module.scoring == "sigmoid":
             scores = torch.sigmoid(values)
-            weights = scores / (scores.sum(dim=-1, keepdim=True).clamp(min=1e-7))
+            weights = scores / (scores.sum(dim=-1, keepdim=True).clamp(min=1e-4))
         else:
             weights = torch.softmax(values, dim=-1)
         gates = torch.zeros_like(logits).scatter(1, indices, weights)
@@ -142,7 +142,7 @@ class MixtureOfExperts(nn.Module):
         values, indices = torch.topk(logits, self.top_k, dim=-1)
         if self.scoring == "sigmoid":
             scores = torch.sigmoid(values)
-            weights = scores / (scores.sum(dim=-1, keepdim=True).clamp(min=1e-7))
+            weights = scores / (scores.sum(dim=-1, keepdim=True).clamp(min=1e-4))
         else:
             weights = torch.softmax(values, dim=-1)
 

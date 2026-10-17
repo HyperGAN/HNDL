@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **MoE float16 backward autograd stability**: Clamped router score summation denominator to `1e-4` in `moe` sigmoid scoring, preventing reciprocal overflow to `+inf` and subsequent `NaN` gradients during float16 backward backpropagation.
 - **Numerical stability in MoE and Gated Delta Attention**: Fixed float16 underflow in `moe` sigmoid scoring router and `gated_delta_attention` cumulative decay, preventing `NaN` outputs during reduced-precision evaluation.
 - **Authored SOTA network recipes**: Added 8 frontier neural network recipes with complete `.hndl` declarations and `.json` sidecars in `examples/networks/`:
   - `llama_tiny`: 64-token LLaMA-style causal language model with pre-RMSNorm, 4-head RoPE causal attention, and bias-free SwiGLU feed-forward networks (918,656 parameters, 27 nodes).

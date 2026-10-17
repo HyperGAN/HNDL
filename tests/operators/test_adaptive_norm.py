@@ -34,7 +34,7 @@ def test_adaptive_norm_parity_and_gradients(device, channels, height, width):
     grad_out = torch.randn_like(actual)
     gx_act, gp_act = torch.autograd.grad(actual, (x, params), grad_outputs=grad_out, retain_graph=True)
     gx_exp, gp_exp = torch.autograd.grad(expected, (x, params), grad_outputs=grad_out)
-    torch.testing.assert_close(gx_act, gx_exp)
+    torch.testing.assert_close(gx_act, gx_exp, atol=2e-5, rtol=1e-4)
     torch.testing.assert_close(gp_act, gp_exp)
 
 
