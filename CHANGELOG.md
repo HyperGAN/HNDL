@@ -16,6 +16,7 @@
 - **`deconv1d` operator**: Added `conv_transpose1d@1` (alias `deconv1d`, `convolution` category) with `up2` policy and bidirectional `conv_transpose_axis` length resolution.
 - **`adaln_zero` operator**: Added `adaln_zero@1` (`normalization` category) providing rank-3 adaptive LayerNorm-Zero conditioning modulation for Diffusion Transformers with zero-initialized linear projections.
 - **`rope` operator**: Added `rope@1` (`sequence` category) providing standalone rotary position embeddings for sequence tensors with configurable `heads` and base frequency `theta`.
+- **`latent_attention` operator**: Added `latent_attention@1` (`sequence` category) implementing DeepSeek and Kimi Multi-Head Latent Attention (MLA) with low-rank KV compression, decoupled RoPE, and position-free NoPE mode.
 
 ## 0.8.2 (2026-10-15)
 
