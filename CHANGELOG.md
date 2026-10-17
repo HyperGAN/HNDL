@@ -14,6 +14,7 @@
 - **`grn` operator**: Added `grn@1` (`normalization` category) implementing ConvNeXt-V2 Global Response Normalization with spatial L2 channel pooling and zero-initialized recalibration parameters.
 - **`sinusoidal_embed` operator**: Added `sinusoidal_embed@1` (`sequence` category) providing deterministic log-spaced sinusoidal timestep and coordinate embeddings.
 - **`deconv1d` operator**: Added `conv_transpose1d@1` (alias `deconv1d`, `convolution` category) with `up2` policy and bidirectional `conv_transpose_axis` length resolution.
+- **`adaln_zero` operator**: Added `adaln_zero@1` (`normalization` category) providing rank-3 adaptive LayerNorm-Zero conditioning modulation for Diffusion Transformers with zero-initialized linear projections.
 
 ## 0.8.2 (2026-10-15)
 
