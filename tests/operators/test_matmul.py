@@ -6,7 +6,7 @@ import torch
 from hndl import HNDLError, resolve
 from hndl.torch import build
 
-# (source, input_shape, output_shape, reference) for the rank-3 layouts.
+# (source, input_shape, output_shape, reference) for the rank-3 and rank-4 layouts.
 CASES = [
     pytest.param("b = transpose(x, 1, 2)\nmatmul(x, b)", ("B", 6, 4), ("B", 6, 6),
                  lambda x: x @ x.transpose(1, 2), id="square"),
@@ -16,6 +16,11 @@ CASES = [
     pytest.param("k = transpose(x, 1, 2)\ne = matmul(x, k)\na = softmax(e, -1)\nmatmul(a, x)",
                  ("B", 5, 3), ("B", 5, 3),
                  lambda x: torch.softmax(x @ x.transpose(1, 2), dim=-1) @ x, id="attention"),
+    pytest.param("b = transpose(x, 2, 3)\nmatmul(x, b)", ("B", 4, 8, 16), ("B", 4, 8, 8),
+                 lambda x: x @ x.transpose(2, 3), id="rank4_multihead"),
+    pytest.param("a, b = split(8, dim=2)\nt = transpose(b, 2, 3)\nmatmul(a, t)",
+                 ("B", 2, 12, 16), ("B", 2, 8, 4),
+                 lambda x: x[:, :, :8] @ x[:, :, 8:].transpose(2, 3), id="rank4_rectangular"),
 ]
 
 
@@ -34,14 +39,19 @@ def test_matches_torch_on_every_supported_layout(source, input_shape, output_sha
     torch.testing.assert_close(x.grad, mirror.grad)
 
 
-def test_the_module_is_torch_bmm_and_carries_no_parameters(device):
+def test_the_module_is_torch_matmul_and_carries_no_parameters(device):
     plan = resolve("b = transpose(x, 1, 2)\nmatmul(x, b)", input_shape=("B", 6, 4), output_shape=("B", 6, 6))
     model = build(plan, device=device)
     module = model["n1"]
     assert list(module.parameters()) == [] and list(module.buffers()) == []
     a = torch.randn(2, 6, 4, device=device)
     b = torch.randn(2, 4, 6, device=device)
-    torch.testing.assert_close(module(a, b), torch.bmm(a, b))
+    torch.testing.assert_close(module(a, b), torch.matmul(a, b))
+
+    # Also verify rank-4 on the module
+    a4 = torch.randn(2, 3, 6, 4, device=device)
+    b4 = torch.randn(2, 3, 4, 6, device=device)
+    torch.testing.assert_close(module(a4, b4), torch.matmul(a4, b4))
 
 
 def test_the_product_is_not_commutative(device):
@@ -84,11 +94,8 @@ def test_the_product_shape_flows_forward_into_the_consumer():
 
 
 @pytest.mark.parametrize("source,input_shape,output_shape,code", [
-    # A rank-2 operand: matmul is declared at rank 3 only.
+    # A rank-2 operand: matmul requires at least rank 3.
     ("a = linear(4)\nb = linear(x, 4)\nmatmul(a, b)", ("B", 8), ("B", 4), "E_CONSTRAINT"),
-    # A rank-4 operand must be reshaped to [B, C, H*W] first.
-    ("a = conv(3, kernel_size=1)\nb = conv(x, 3, kernel_size=1)\nmatmul(a, b)",
-     ("B", 3, 8, 8), ("B", 3, 8, 8), "E_CONSTRAINT"),
     # The inner dimensions disagree: 5 columns against 4 rows.
     ("a = linear(5)\nb = transpose(x, 1, 2)\nmatmul(a, b)", ("B", 6, 4), ("B", 6, 6), "E_CONSTRAINT"),
     # The output contract contradicts the product.

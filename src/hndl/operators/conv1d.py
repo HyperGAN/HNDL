@@ -2,24 +2,48 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import parametrizations
 
+from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ..relations import conv_axis
 from ._equalized import eval_weight
 
 
+def _validate(args):
+    if args.get("causal") and args.get("padding", 0) != 0:
+        raise HNDLError("E_ARGUMENT", "causal=True requires padding=0")
+
+
 def _relation(s):
     args = s.args
+    channel_axis = 2 if args.get("channels_last") else 1
+    length_axis = 1 if args.get("channels_last") else 2
     s.rank("x", 3)
     s.rank("out", 3)
-    s.axis("x", 1, args.get("in_channels"))
-    s.axis("out", 1, args.get("out_channels"))
+    s.axis("x", channel_axis, args.get("in_channels"))
+    s.axis("out", channel_axis, args.get("out_channels"))
     a, b = s.shape("x"), s.shape("out")
-    s.arg("in_channels", a[1])
-    s.arg("out_channels", b[1])
-    for channels in (a[1], b[1]):
+    s.arg("in_channels", a[channel_axis])
+    s.arg("out_channels", b[channel_axis])
+    for channels in (a[channel_axis], b[channel_axis]):
         if channels is not None and channels % args["groups"]:
             s.error("E_CONSTRAINT", f"groups={args['groups']} must divide input and output channels")
-    conv_axis(s, 2, *(args[key] for key in ("kernel_size", "stride", "padding", "dilation")))
+
+    if args.get("causal"):
+        stride = args["stride"]
+        in_len = a[length_axis]
+        out_len = b[length_axis]
+        if stride == 1:
+            if in_len is not None:
+                s.axis("out", length_axis, in_len)
+            if out_len is not None:
+                s.axis("x", length_axis, out_len)
+        else:
+            if in_len is not None:
+                s.axis("out", length_axis, (in_len - 1) // stride + 1)
+            elif out_len is not None:
+                s.error("E_AMBIGUOUS", f"Causal conv1d with stride={stride} cannot uniquely infer input length from output length {out_len}")
+    else:
+        conv_axis(s, length_axis, *(args[key] for key in ("kernel_size", "stride", "padding", "dilation")))
 
 
 def _reference(module):
@@ -31,18 +55,30 @@ def _reference(module):
     refreshed and therefore reproduces exactly the weight it applied.
     """
     def apply(x):
+        if module.channels_last:
+            x = x.transpose(1, 2)
+        if module.causal:
+            left_pad = module.dilation[0] * (module.kernel_size[0] - 1)
+            x = F.pad(x, (left_pad, 0))
+            padding = 0
+        else:
+            padding = module.padding
         weight = eval_weight(module)
-        return F.conv1d(x, weight, module.bias, stride=module.stride, padding=module.padding,
-                        dilation=module.dilation, groups=module.groups)
+        out = F.conv1d(x, weight, module.bias, stride=module.stride, padding=padding,
+                       dilation=module.dilation, groups=module.groups)
+        if module.channels_last:
+            out = out.transpose(1, 2).contiguous()
+        return out
     return apply
 
 
 @operator(
     "conv1d",
-    summary="One-dimensional convolution over [B, C, L] signals.",
-    shape="x[B, C_in, L_in] -> out[B, C_out, L_out]",
+    summary="One-dimensional convolution over [B, C, L] or [B, T, C] signals.",
+    shape="x -> out",
     relation=_relation,
-    shape_text="L_out = floor((L_in + 2*padding - dilation*(kernel_size - 1) - 1) / stride + 1)",
+    validate=_validate,
+    shape_text="x[B, C_in, L_in] -> out[B, C_out, L_out] (or x[B, L_in, C_in] -> out[B, L_out, C_out] when channels_last=True)",
     reference=_reference,
     args={
         "out_channels": Arg(int, inferable=True, min=1, max=MAX_DIMENSION_LITERAL,
@@ -57,6 +93,10 @@ def _reference(module):
         "bias": Arg(bool, True, positional=False, help="Add a learned per-channel bias."),
         "spectral_norm": Arg(bool, False, positional=False,
                              help="Divide the weight by its largest singular value, estimated by power iteration."),
+        "causal": Arg(bool, False, positional=False, since="0.9.0",
+                      help="Left-only causal padding; when stride=1 establishes bijective L_out == L_in."),
+        "channels_last": Arg(bool, False, positional=False, since="0.9.0",
+                             help="Sequence layout [B, T, C] instead of [B, C, L]."),
     },
     examples=[
         Example("conv1d(16, kernel_size=3, padding=1)\nrelu()\nconv1d(4, kernel_size=3, padding=1)",
@@ -69,6 +109,10 @@ def _reference(module):
                 "conv1d(32, kernel_size=4, stride=2, padding=1, spectral_norm=True)",
                 ("B", 1, 64), ("B", 32, 16),
                 "A spectrally normalized waveform discriminator trunk."),
+        Example("conv1d(32, kernel_size=4, causal=True)", ("B", 16, 64), ("B", 32, 64),
+                "Causal convolution preserves sequence length bijectively when stride=1."),
+        Example("conv1d(32, kernel_size=4, causal=True, channels_last=True)", ("B", 64, 16), ("B", 64, 32),
+                "Causal convolution directly on [B, T, C] sequence layout."),
     ],
     category="convolution",
 )
@@ -82,50 +126,29 @@ class Conv1d(nn.Conv1d):
 
     ## Axis convention
 
-    The input is `[B, C, L]`: channels at axis 1, positions at axis 2. The
-    kernel slides along the length axis only. A `[B, T, D]` sequence carries
-    its features on the last axis instead, so transpose it to `[B, D, T]`
-    before this operator and back afterwards; `conv1d` never reinterprets the
-    axes for you.
-
-    With `groups > 1` the channels split into that many independent groups,
-    each convolved with its own kernels; `groups == in_channels ==
-    out_channels` is a depthwise convolution. Both channel counts must be
-    divisible by `groups`.
-
-    The output length is
-    `floor((L_in + 2*padding - dilation*(kernel_size - 1) - 1) / stride + 1)`.
-    Because that formula is not injective, inferring the input length from a
-    known output length generally leaves an interval of valid values; the
-    resolver reports the ambiguity rather than choosing one.
-
-    Parameters are `weight` of shape `[out_channels, in_channels / groups,
-    kernel_size]` and, when enabled, `bias` of shape `[out_channels]`.
-    Behavior is identical in train and eval mode unless `spectral_norm` is
-    enabled, and the computation stays in the input dtype.
-
-    ## Spectral normalization
-
-    With `spectral_norm=True` the weight is reparametrized as `weight /
-    sigma(weight)`, where `sigma` is the largest singular value of the weight
-    viewed as an `[out_channels, -1]` matrix, estimated by one power iteration
-    per forward pass
-    (`torch.nn.utils.parametrizations.spectral_norm`). The layer is then
-    1-Lipschitz, the standard constraint for a GAN discriminator.
-
-    The parametrization renames the registered state: the learned tensor
-    becomes `parametrizations.weight.original` and `weight` turns into a
-    computed attribute, with persistent buffers
-    `parametrizations.weight.0._u` and `parametrizations.weight.0._v` holding
-    the power-iteration vectors. `init` and `trainable` overrides must
-    therefore target `parametrizations.weight.original` instead of `weight`;
-    `bias` is unaffected. The power iteration refreshes the buffers in
-    training mode only, so evaluation is a pure function of the stored state.
+    The default input is `[B, C, L]`: channels at axis 1, positions at axis 2.
+    With `channels_last=True`, the input layout is `[B, T, C]`.
+    With `causal=True`, left-padding of `dilation * (kernel_size - 1)` is applied
+    so each position attends only to past and present positions.
+    When `causal=True` and `stride=1`, `L_out == L_in` forms a bijective relation.
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias,
-                 spectral_norm):
+                 spectral_norm, causal=False, channels_last=False):
+        self.causal = bool(causal)
+        self.channels_last = bool(channels_last)
         super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=padding,
                          dilation=dilation, groups=groups, bias=bias)
         if spectral_norm:
             parametrizations.spectral_norm(self)
+
+    def forward(self, x):
+        if self.channels_last:
+            x = x.transpose(1, 2)
+        if self.causal:
+            left_pad = self.dilation[0] * (self.kernel_size[0] - 1)
+            x = F.pad(x, (left_pad, 0))
+        out = super().forward(x)
+        if self.channels_last:
+            out = out.transpose(1, 2).contiguous()
+        return out

@@ -140,3 +140,44 @@ def test_float64_affine_gradcheck_double(device):
     norm = RMSNorm(eps=1e-5, affine=True, D=8).double().to(device)
     x = torch.randn(2, 3, 8, dtype=torch.float64, device=device, requires_grad=True)
     assert torch.autograd.gradcheck(norm, (x,), eps=1e-6, atol=1e-4)
+
+
+def test_zero_centered_initialization_and_forward(device):
+    plan = resolve("rms_norm(zero_centered=True)", input_shape=("B", 8), output_shape=("B", 8))
+    model, module = _rms_norm(plan, device)
+    assert module.zero_centered is True
+    torch.testing.assert_close(module.weight, torch.zeros(8, device=device))
+    x = torch.randn(4, 8, device=device)
+    actual = model(x=x)["output"]
+    expected = F.rms_norm(x, (8,), None, module.eps)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_zero_centered_with_learned_weight_matches_formula(device):
+    plan = resolve("rms_norm(zero_centered=True)", input_shape=("B", 4, 16), output_shape=("B", 4, 16))
+    model, module = _rms_norm(plan, device)
+    with torch.no_grad():
+        module.weight.normal_(std=0.1)
+    x = torch.randn(2, 4, 16, device=device, requires_grad=True)
+    mirror = x.detach().clone().requires_grad_()
+    actual = model(x=x)["output"]
+    normed = F.rms_norm(mirror, (16,), None, module.eps)
+    expected = normed * (1.0 + module.weight)
+    torch.testing.assert_close(actual, expected)
+    actual.square().mean().backward()
+    expected.square().mean().backward()
+    torch.testing.assert_close(x.grad, mirror.grad)
+
+
+def test_zero_centered_requires_affine():
+    with pytest.raises(HNDLError, match="E_ARGUMENT.*zero_centered"):
+        resolve("rms_norm(zero_centered=True, affine=False)", input_shape=("B", 8), output_shape=("B", 8))
+
+
+def test_zero_centered_gradcheck_double(device):
+    from hndl.operators.rms_norm import RMSNorm
+    norm = RMSNorm(eps=1e-5, affine=True, D=8, zero_centered=True).double().to(device)
+    with torch.no_grad():
+        norm.weight.normal_(std=0.2)
+    x = torch.randn(2, 3, 8, dtype=torch.float64, device=device, requires_grad=True)
+    assert torch.autograd.gradcheck(norm, (x,), eps=1e-6, atol=1e-4)

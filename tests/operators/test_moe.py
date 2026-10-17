@@ -8,9 +8,18 @@ from hndl.operators.moe import MixtureOfExperts
 from hndl.torch import DTYPES, build
 
 
-def layer(device, *, experts=4, hidden=16, top_k=2, activation="gelu", d_model=8, seed=0):
+def layer(device, *, experts=4, hidden=16, top_k=2, activation="gelu", expert_kind="mlp", bias=True, scoring="softmax", d_model=8, seed=0):
     torch.manual_seed(seed)
-    module = MixtureOfExperts(experts=experts, hidden=hidden, top_k=top_k, activation=activation, D=d_model)
+    module = MixtureOfExperts(
+        experts=experts,
+        hidden=hidden,
+        top_k=top_k,
+        activation=activation,
+        expert_kind=expert_kind,
+        bias=bias,
+        scoring=scoring,
+        D=d_model,
+    )
     return module.to(device)
 
 
@@ -18,7 +27,12 @@ def routing(module, flat):
     """Router decisions for already flattened tokens."""
     logits = module.router(flat)
     values, indices = torch.topk(logits, module.top_k, dim=-1)
-    return indices, torch.softmax(values, dim=-1)
+    if getattr(module, "scoring", "softmax") == "sigmoid":
+        scores = torch.sigmoid(values)
+        weights = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20)
+    else:
+        weights = torch.softmax(values, dim=-1)
+    return indices, weights
 
 
 def per_token_reference(module, x):
@@ -163,3 +177,61 @@ def test_reduced_precision_routing_agrees_with_float32_on_cuda(dtype):
     wide = build(resolve("moe(4, 16)", input_shape=("B", 6, 8), output_shape=("B", 6, 8)),
                  device="cuda:0", initialization_seed=7)["n0"]
     torch.testing.assert_close(out.float(), wide(x.detach().float()), atol=3e-2, rtol=3e-2)
+
+
+def test_swiglu_expert_architecture_and_numerics(device):
+    module = layer(device, experts=3, hidden=16, top_k=2, expert_kind="swiglu", seed=42)
+    for expert in module.experts:
+        assert hasattr(expert, "gate") and hasattr(expert, "up") and hasattr(expert, "down")
+        assert expert.gate.weight.shape == (16, 8)
+        assert expert.up.weight.shape == (16, 8)
+        assert expert.down.weight.shape == (8, 16)
+    x = torch.randn(4, 5, 8, device=device)
+    ref = per_token_reference(module, x)
+    out = module(x)
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+def test_sigmoid_scoring_numerics_and_reference_parity(device):
+    module = layer(device, experts=4, hidden=16, top_k=2, scoring="sigmoid", seed=99)
+    x = torch.randn(3, 7, 8, device=device)
+    ref = per_token_reference(module, x)
+    out = module(x)
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+def test_bias_false_experts(device):
+    module = layer(device, experts=2, hidden=12, top_k=1, bias=False, expert_kind="mlp")
+    for expert in module.experts:
+        assert expert.up.bias is None
+        assert expert.down.bias is None
+    x = torch.randn(2, 4, 8, device=device)
+    torch.testing.assert_close(module(x), per_token_reference(module, x), atol=1e-5, rtol=1e-5)
+
+    swiglu_module = layer(device, experts=2, hidden=12, top_k=1, bias=False, expert_kind="swiglu")
+    for expert in swiglu_module.experts:
+        assert expert.gate.bias is None
+        assert expert.up.bias is None
+        assert expert.down.bias is None
+    torch.testing.assert_close(swiglu_module(x), per_token_reference(swiglu_module, x), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("source,code", [
+    ('moe(2, 8, expert_kind="invalid")', "E_ARGUMENT"),
+    ('moe(2, 8, scoring="invalid")', "E_ARGUMENT"),
+])
+def test_invalid_sota_moe_arguments_raise_e_argument(source, code):
+    with pytest.raises(HNDLError, match=code):
+        resolve(source, input_shape=("B", 8), output_shape=("B", 8))
+
+
+def test_moe_torch_compile_fullgraph(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    module = layer(device, experts=4, hidden=16, top_k=2, expert_kind="swiglu", scoring="sigmoid")
+    x = torch.randn(4, 8, device=device)
+    eager_out = module(x)
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
+    compiled_out = compiled(x)
+    torch.testing.assert_close(compiled_out, eager_out, atol=1e-5, rtol=1e-5)
+

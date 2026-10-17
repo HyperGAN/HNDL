@@ -24,6 +24,8 @@ def _reference(module):
                    help="Added to the variance before the square root; must be positive."),
         "affine": Arg(bool, True, positional=False,
                       help="Learn a per-feature scale and bias of width D. When false the layer has no parameters."),
+        "bias": Arg(bool, True, positional=False, since="0.9.0",
+                    help="Add a learned per-feature bias of width D. When false only the scale weight is learned."),
     },
     reference=_reference,
     examples=[
@@ -33,6 +35,8 @@ def _reference(module):
                 "On a [B, T, D] sequence each of the 12 positions is normalized independently."),
         Example("layer_norm(eps=0.001, affine=False)\nlinear()", ("B", 16), ("B", 4),
                 "A parameter-free normalization of the incoming features."),
+        Example("linear(64)\nlayer_norm(bias=False)\nlinear()", ("B", 32), ("B", 10),
+                "A bias-free LayerNorm carrying learned scale weight but no bias parameter."),
     ],
     category="normalization",
 )
@@ -53,11 +57,12 @@ class LayerNorm(nn.LayerNorm):
     what is wanted; reach for `group_norm` on images. The examples below
     therefore cover only ranks 2 and 3.
 
-    Parameters are ``weight`` (initialized to ones) and ``bias``
-    (initialized to zeros), both of shape ``[D]``, and exist only when
-    ``affine`` is true. There are no running statistics, so train and eval
-    behave identically. The computation runs in the plan's compute dtype.
+    Parameters are ``weight`` (initialized to ones) and, when ``bias`` is
+    true, ``bias`` (initialized to zeros), both of shape ``[D]``, and exist
+    only when ``affine`` is true. There are no running statistics, so train
+    and eval behave identically. The computation runs in the plan's compute
+    dtype.
     """
 
-    def __init__(self, eps, affine, *, D):
-        super().__init__(D, eps=eps, elementwise_affine=affine)
+    def __init__(self, eps, affine, *, D, bias=True):
+        super().__init__(D, eps=eps, elementwise_affine=affine, bias=bool(bias) and affine)

@@ -166,3 +166,75 @@ def test_dropout_only_perturbs_training_and_eval_matches_the_reference(device):
     query, context = x[:, :4], x[:, 4:]
     torch.testing.assert_close(clean, handwritten(model[plan.nodes[-1].id], query, context),
                                atol=2e-6, rtol=2e-6)
+
+
+# --- SOTA 0.9.0 Features ----------------------------------------------------
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_heads", [1, 2])
+def test_cross_attention_gqa_matches_reference(device, kv_heads):
+    heads, width, ctx_width = 4, 16, 20
+    module = CrossAttention(heads=heads, bias=True, dropout=0.0, D=width, D_ctx=ctx_width, kv_heads=kv_heads)
+    module = module.to(device).eval()
+    from hndl.operators.cross_attention import _reference
+    x = torch.randn(2, 5, width, device=device)
+    context = torch.randn(2, 7, ctx_width, device=device)
+    torch.testing.assert_close(module(x, context), _reference(module)(x, context), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_cross_attention_decoupled_head_dim(device):
+    heads, head_dim, width, ctx_width = 4, 10, 16, 24
+    module = CrossAttention(heads=heads, bias=True, dropout=0.0, D=width, D_ctx=ctx_width, head_dim=head_dim)
+    module = module.to(device).eval()
+    assert module.head_dim == 10
+    assert module.q_proj.weight.shape == (40, 16)
+    assert module.o_proj.weight.shape == (16, 40)
+    from hndl.operators.cross_attention import _reference
+    x = torch.randn(2, 4, width, device=device)
+    context = torch.randn(2, 6, ctx_width, device=device)
+    torch.testing.assert_close(module(x, context), _reference(module)(x, context), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("qk_norm", ["rms_norm", "l2_norm"])
+def test_cross_attention_qk_norm_matches_reference(device, qk_norm):
+    module = CrossAttention(heads=2, bias=True, dropout=0.0, D=8, D_ctx=12, qk_norm=qk_norm)
+    module = module.to(device).eval()
+    if qk_norm == "rms_norm":
+        assert hasattr(module, "q_norm") and hasattr(module, "k_norm")
+    from hndl.operators.cross_attention import _reference
+    x = torch.randn(2, 3, 8, device=device)
+    context = torch.randn(2, 5, 12, device=device)
+    torch.testing.assert_close(module(x, context), _reference(module)(x, context), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_cross_attention_logit_softcap_matches_reference(device):
+    module = CrossAttention(heads=4, bias=True, dropout=0.0, D=16, D_ctx=16, kv_heads=2, logit_softcap=20.0)
+    module = module.to(device).eval()
+    from hndl.operators.cross_attention import _reference
+    x = torch.randn(2, 4, 16, device=device)
+    context = torch.randn(2, 6, 16, device=device)
+    torch.testing.assert_close(module(x, context), _reference(module)(x, context), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("bias,qkv_bias,out_bias,expected", [
+    (True, True, True, "koqv"),
+    (False, True, True, ""),
+    (True, False, True, "o"),
+    (True, True, False, "kqv"),
+    (True, False, False, ""),
+])
+def test_cross_attention_narrow_biases(bias, qkv_bias, out_bias, expected):
+    module = CrossAttention(heads=2, bias=bias, dropout=0.0, D=8, D_ctx=8, qkv_bias=qkv_bias, out_bias=out_bias)
+    biased = "".join(sorted(letter for letter in "koqv" if getattr(module, f"{letter}_proj").bias is not None))
+    assert biased == "".join(sorted(expected))
+
+
+def test_cross_attention_invalid_sota_arguments():
+    with pytest.raises(HNDLError, match="E_CONSTRAINT"):
+        resolve("q, kv = split(4)\ncross_attention(q, kv, 4, kv_heads=3)",
+                input_shape=("B", 12, 8), output_shape=("B", 4, 8))
+

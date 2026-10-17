@@ -73,3 +73,56 @@ def test_adaptive_norm_mismatched_params_shape():
         resolve("adaptive_norm(feat, style)",
                 input_shape={"feat": ("B", 8, 4, 4), "style": ("B", 10)},
                 output_shape=("B", 8, 4, 4))
+
+
+@pytest.mark.parametrize("channels,positions", [(16, 8), (32, 12), (64, 4)])
+def test_adaptive_norm_rank3_sequence_parity_and_gradients(device, channels, positions):
+    batch = 2
+    module = AdaptiveNorm(eps=1e-5).to(device)
+    x = torch.randn(batch, positions, channels, device=device, requires_grad=True)
+    params = torch.randn(batch, 2 * channels, device=device, requires_grad=True)
+
+    actual = module(x, params)
+    normed = F.layer_norm(x, (channels,), eps=1e-5)
+    dg, beta = params[:, :channels], params[:, channels:]
+    expected = (1 + dg[:, None, :]) * normed + beta[:, None, :]
+
+    assert actual.shape == (batch, positions, channels)
+    torch.testing.assert_close(actual, expected)
+
+    grad_out = torch.randn_like(actual)
+    gx_act, gp_act = torch.autograd.grad(actual, (x, params), grad_outputs=grad_out, retain_graph=True)
+    gx_exp, gp_exp = torch.autograd.grad(expected, (x, params), grad_outputs=grad_out)
+    torch.testing.assert_close(gx_act, gx_exp)
+    torch.testing.assert_close(gp_act, gp_exp)
+
+
+def test_adaptive_norm_rank3_zero_params_matches_layer_norm(device):
+    batch, positions, channels = 2, 6, 16
+    module = AdaptiveNorm(eps=1e-5).to(device)
+    x = torch.randn(batch, positions, channels, device=device)
+    params = torch.zeros(batch, 2 * channels, device=device)
+
+    actual = module(x, params)
+    expected = F.layer_norm(x, (channels,), eps=1e-5)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_adaptive_norm_rank3_built_plan(device):
+    source = (
+        "seq = linear(x, 16)\n"
+        "pooled = mean(x, 1)\n"
+        "style = linear(pooled, 32)\n"
+        "adaptive_norm(seq, style)\n"
+        "linear(8)"
+    )
+    plan = resolve(source, input_shape=("B", 10, 8), output_shape=("B", 10, 8))
+    model = build(plan, device=device)
+    x = torch.randn(3, 10, 8, device=device)
+    out = model(x=x)["output"]
+    assert out.shape == (3, 10, 8)
+
+
+def test_adaptive_norm_rejects_rank2_and_rank5():
+    with pytest.raises(HNDLError, match="E_CONSTRAINT"):
+        resolve("adaptive_norm(x, p)", input_shape={"x": ("B", 16), "p": ("B", 32)}, output_shape=("B", 16))

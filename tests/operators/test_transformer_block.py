@@ -216,3 +216,73 @@ def test_reduced_precision_block_runs_on_cuda(dtype, norm):
 
     exact = build(resolve(source, **contract), device="cuda:0", initialization_seed=2)
     torch.testing.assert_close(output.float(), exact(x=x.detach().float())["output"], atol=3e-2, rtol=3e-2)
+
+
+# --- SOTA 0.9.0 Features ----------------------------------------------------
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_swiglu_feed_forward_branch(device):
+    from hndl.operators.swiglu import SwiGLU
+    from hndl.operators.transformer_block import _reference
+    module = TransformerBlock(
+        heads=2, mlp_ratio=4, activation="silu", norm="rms_norm", causal=True, dropout=0.0,
+        layer_scale=False, layer_scale_init=1e-5, eps=1e-5, D=16, ffn_kind="swiglu",
+    ).to(device).eval()
+    assert isinstance(module.ffn, SwiGLU)
+    x = torch.randn(2, 6, 16, device=device)
+    torch.testing.assert_close(module(x), _reference(module)(x), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_explicit_hidden_dimension_override(device):
+    module = TransformerBlock(
+        heads=4, mlp_ratio=4, activation="gelu", norm="layer_norm", causal=False, dropout=0.0,
+        layer_scale=False, layer_scale_init=1e-5, eps=1e-5, D=16, hidden=50,
+    ).to(device).eval()
+    assert module.ffn.up.weight.shape == (50, 16)
+    assert module.ffn.down.weight.shape == (16, 50)
+    from hndl.operators.transformer_block import _reference
+    x = torch.randn(2, 4, 16, device=device)
+    torch.testing.assert_close(module(x), _reference(module)(x), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_llama3_style_block_configuration(device):
+    from hndl.operators.transformer_block import _reference
+    module = TransformerBlock(
+        heads=4, mlp_ratio=4, activation="silu", norm="rms_norm", causal=True, dropout=0.0,
+        layer_scale=False, layer_scale_init=1e-5, eps=1e-5, D=16,
+        ffn_kind="swiglu", hidden=48, rope=True, rope_theta=500000.0, kv_heads=2, qk_norm="rms_norm",
+    ).to(device).eval()
+    assert module.attn.kv_heads == 2
+    assert module.attn.rope is True
+    assert module.attn.rope_theta == 500000.0
+    assert module.attn.qk_norm == "rms_norm"
+    x = torch.randn(2, 8, 16, device=device)
+    torch.testing.assert_close(module(x), _reference(module)(x), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_fully_bias_free_block(device):
+    from hndl.operators.transformer_block import _reference
+    module = TransformerBlock(
+        heads=2, mlp_ratio=2, activation="gelu", norm="layer_norm", causal=False, dropout=0.0,
+        layer_scale=False, layer_scale_init=1e-5, eps=1e-5, D=8, bias=False,
+    ).to(device).eval()
+    assert module.norm1.bias is None
+    assert module.norm2.bias is None
+    assert module.attn.q_proj.bias is None
+    assert module.ffn.up.bias is None
+    x = torch.randn(2, 4, 8, device=device)
+    torch.testing.assert_close(module(x), _reference(module)(x), atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("source,code", [
+    ("transformer_block(4, rope_theta=50000.0)", "E_ARGUMENT"),
+    ("transformer_block(4, kv_heads=3)", "E_CONSTRAINT"),
+])
+def test_invalid_sota_transformer_block_arguments(source, code):
+    with pytest.raises(HNDLError, match=code):
+        resolve(source, input_shape=("B", 8, 32), output_shape=("B", 8, 32))
+

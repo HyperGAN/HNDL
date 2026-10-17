@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
 from ._equalized import EqualLinear
+from .rms_norm import RMSNorm
 
 ROPE_BASE = 10000.0
 
@@ -21,10 +22,17 @@ def _validate(args):
         raise HNDLError("E_ARGUMENT",
                         "spatial_shape describes the token grid of relative_position_bias=True; "
                         "set relative_position_bias=True or drop spatial_shape")
+    if not args.get("rope") and args.get("rope_theta") != 10000.0:
+        raise HNDLError("E_ARGUMENT", "rope_theta is only valid when rope=True")
 
 
 def _relation(s):
     heads = s.args["heads"]
+    kv_heads = s.args.get("kv_heads", 0)
+    head_dim = s.args.get("head_dim", 0)
+    if kv_heads > 0 and heads % kv_heads != 0:
+        s.error("E_CONSTRAINT", f"heads={heads} must be divisible by kv_heads={kv_heads}")
+
     width = None
     positions = None
     for port in ("x", "out"):
@@ -48,11 +56,15 @@ def _relation(s):
                     s.axis(port, 1, tokens)
     if width is None:
         return
-    if width % heads:
-        s.error("E_CONSTRAINT", f"heads={heads} must divide the model width D={width}")
-    elif s.args.get("rope") and (width // heads) % 2:
+    if head_dim == 0:
+        if width % heads:
+            s.error("E_CONSTRAINT", f"heads={heads} must divide the model width D={width}")
+        effective_head_dim = width // heads
+    else:
+        effective_head_dim = head_dim
+    if s.args.get("rope") and effective_head_dim % 2:
         s.error("E_CONSTRAINT",
-                f"rope needs an even head dimension, but D={width} over heads={heads} gives {width // heads}")
+                f"rope needs an even head dimension, got {effective_head_dim}")
 
 
 def _split_heads(tensor, heads, head_dim):
@@ -66,13 +78,13 @@ def _rotate_half(tensor):
     return torch.cat((-right, left), dim=-1)
 
 
-def _rope_tables(positions, head_dim, device, dtype):
+def _rope_tables(positions, head_dim, device, dtype, theta=ROPE_BASE):
     """``cos``/``sin`` of shape ``[1, 1, T, head_dim]`` for the rotate-half convention."""
     # The angles are built in float32 for reduced-precision plans (1 / base**(i/d)
     # underflows in half precision) and float64 when double precision is requested.
     calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
     exponent = torch.arange(0, head_dim, 2, device=device, dtype=calc_dtype) / head_dim
-    inverse_frequency = ROPE_BASE ** (-exponent)
+    inverse_frequency = float(theta) ** (-exponent)
     angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
     duplicated = torch.cat((angles, angles), dim=-1)
     return duplicated.cos().to(dtype)[None, None], duplicated.sin().to(dtype)[None, None]
@@ -100,20 +112,44 @@ def _reference(module):
     def run(x):
         batch, positions, width = x.shape
         heads, head_dim = module.heads, module.head_dim
+        kv_heads = getattr(module, "kv_heads", heads)
         q = _split_heads(module.q_proj(x), heads, head_dim)
-        k = _split_heads(module.k_proj(x), heads, head_dim)
-        v = _split_heads(module.v_proj(x), heads, head_dim)
+        k = _split_heads(module.k_proj(x), kv_heads, head_dim)
+        v = _split_heads(module.v_proj(x), kv_heads, head_dim)
+        qk_norm = getattr(module, "qk_norm", "none")
+        if qk_norm == "rms_norm":
+            q, k = module.q_norm(q), module.k_norm(k)
+        elif qk_norm == "l2_norm":
+            eps = getattr(module, "eps", 1e-6)
+            q = F.normalize(q, p=2, dim=-1, eps=eps)
+            k = F.normalize(k, p=2, dim=-1, eps=eps)
         if module.rope:
-            cos, sin = _rope_tables(positions, head_dim, x.device, x.dtype)
+            theta = getattr(module, "rope_theta", ROPE_BASE)
+            cos, sin = _rope_tables(positions, head_dim, x.device, x.dtype, theta=theta)
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
+        if kv_heads != heads:
+            repeats = heads // kv_heads
+            k = k.repeat_interleave(repeats, dim=1)
+            v = v.repeat_interleave(repeats, dim=1)
         scores = q @ k.transpose(-2, -1) / math.sqrt(head_dim)
+        logit_softcap = getattr(module, "logit_softcap", 0.0)
+        if logit_softcap > 0.0:
+            scores = logit_softcap * torch.tanh(scores / logit_softcap)
         if module.relative_position_bias:
             scores = scores + module.position_bias()
-        if module.causal:
-            blocked = torch.ones(positions, positions, device=x.device, dtype=torch.bool).triu(1)
+        window_size = getattr(module, "window_size", 0)
+        if module.causal or window_size > 0:
+            i = torch.arange(positions, device=x.device)[:, None]
+            j = torch.arange(positions, device=x.device)[None, :]
+            diff = i - j
+            blocked = torch.zeros(positions, positions, dtype=torch.bool, device=x.device)
+            if module.causal:
+                blocked = blocked | (diff < 0)
+            if window_size > 0:
+                blocked = blocked | (diff >= window_size if module.causal else diff.abs() >= window_size)
             scores = scores.masked_fill(blocked, float("-inf"))
         weights = scores.softmax(dim=-1)
-        merged = (weights @ v).transpose(1, 2).reshape(batch, positions, width)
+        merged = (weights @ v).transpose(1, 2).reshape(batch, positions, heads * head_dim)
         return module.o_proj(merged)
     return run
 
@@ -147,6 +183,20 @@ def _reference(module):
         "spatial_shape": Arg(PAIR, 0, min=0, positional=False,
                              help="Token grid (H, W) behind the sequence, row-major, with H*W == T. Only "
                                   "meaningful with relative_position_bias=True; an int applies to both axes."),
+        "kv_heads": Arg(int, 0, min=0, positional=False, since="0.9.0",
+                        help="Number of key/value heads for GQA/MQA; 0 means kv_heads == heads. Must divide heads."),
+        "head_dim": Arg(int, 0, min=0, positional=False, since="0.9.0",
+                        help="Per-head dimension override; 0 means D // heads."),
+        "qk_norm": Arg(str, "none", choices=("none", "rms_norm", "l2_norm"), positional=False, since="0.9.0",
+                       help="Per-head query/key normalization before RoPE."),
+        "rope_theta": Arg(float, 10000.0, min=1.0, exclusive_min=True, positional=False, since="0.9.0",
+                          help="Base frequency for rotary position embeddings."),
+        "window_size": Arg(int, 0, min=0, positional=False, since="0.9.0",
+                           help="Sliding-window attention window size; 0 means full context."),
+        "logit_softcap": Arg(float, 0.0, min=0.0, positional=False, since="0.9.0",
+                             help="Logit soft-capping value C; 0.0 means disabled."),
+        "eps": Arg(float, 1e-6, min=0, exclusive_min=True, positional=False, since="0.9.0",
+                   help="Epsilon for QK normalization."),
     },
     reference=_reference,
     examples=[
@@ -269,26 +319,48 @@ class Attention(nn.Module):
 
     def __init__(self, heads, causal, dropout, bias, rope, *, D,
                  qkv_bias=True, out_bias=True, relative_position_bias=False, spatial_shape=(0, 0),
-                 equalized=False):
+                 equalized=False, kv_heads=0, head_dim=0, qk_norm="none",
+                 rope_theta=10000.0, window_size=0, logit_softcap=0.0, eps=1e-6):
         super().__init__()
-        if D % heads:
-            raise HNDLError("E_CONSTRAINT", f"heads={heads} must divide the model width D={D}")
         self.heads = heads
-        self.head_dim = D // heads
+        self.kv_heads = kv_heads if kv_heads > 0 else heads
+        if self.heads % self.kv_heads != 0:
+            raise HNDLError("E_CONSTRAINT", f"heads={heads} must be divisible by kv_heads={self.kv_heads}")
+        if head_dim == 0:
+            if D % heads:
+                raise HNDLError("E_CONSTRAINT", f"heads={heads} must divide the model width D={D}")
+            self.head_dim = D // heads
+        else:
+            self.head_dim = head_dim
         if rope and self.head_dim % 2:
             raise HNDLError("E_CONSTRAINT", f"rope needs an even head dimension, got {self.head_dim}")
         self.causal = bool(causal)
         self.dropout = float(dropout)
         self.rope = bool(rope)
+        self.rope_theta = float(rope_theta)
+        if not self.rope and self.rope_theta != 10000.0:
+            raise HNDLError("E_ARGUMENT", "rope_theta is only valid when rope=True")
         self.relative_position_bias = bool(relative_position_bias)
         self.equalized = bool(equalized)
+        self.qk_norm = qk_norm
+        self.window_size = int(window_size)
+        self.logit_softcap = float(logit_softcap)
+        self.eps = float(eps)
+
         height, width = (spatial_shape, spatial_shape) if type(spatial_shape) is int else tuple(spatial_shape)
         self.spatial_shape = (int(height), int(width))
         linear = EqualLinear if equalized else nn.Linear
-        self.q_proj = linear(D, D, bias=bias and qkv_bias)
-        self.k_proj = linear(D, D, bias=bias and qkv_bias)
-        self.v_proj = linear(D, D, bias=bias and qkv_bias)
-        self.o_proj = linear(D, D, bias=bias and out_bias)
+        q_dim = self.heads * self.head_dim
+        kv_dim = self.kv_heads * self.head_dim
+        self.q_proj = linear(D, q_dim, bias=bias and qkv_bias)
+        self.k_proj = linear(D, kv_dim, bias=bias and qkv_bias)
+        self.v_proj = linear(D, kv_dim, bias=bias and qkv_bias)
+        self.o_proj = linear(q_dim, D, bias=bias and out_bias)
+
+        if self.qk_norm == "rms_norm":
+            self.q_norm = RMSNorm(self.eps, affine=True, D=self.head_dim)
+            self.k_norm = RMSNorm(self.eps, affine=True, D=self.head_dim)
+
         if self.relative_position_bias:
             height, width = self.spatial_shape
             if height < 1 or width < 1:
@@ -309,10 +381,10 @@ class Attention(nn.Module):
         return self.relative_position_bias_table[self.relative_position_index].permute(2, 0, 1).contiguous()
 
     def _get_rope_tables(self, positions, device, dtype):
-        key = (positions, device, dtype)
+        key = (positions, device, dtype, self.rope_theta)
         cached = self._rope_cache.get(key)
         if cached is None:
-            cached = _rope_tables(positions, self.head_dim, device, dtype)
+            cached = _rope_tables(positions, self.head_dim, device, dtype, theta=self.rope_theta)
             self._rope_cache[key] = cached
         return cached
 
@@ -327,20 +399,73 @@ class Attention(nn.Module):
             mask = self.position_bias().to(dtype=x.dtype)
             if self.causal:
                 mask = mask + _causal_bias(positions, x.device, mask.dtype)
+
+        if self.window_size > 0:
+            i = torch.arange(positions, device=x.device)[:, None]
+            j = torch.arange(positions, device=x.device)[None, :]
+            diff = i - j
+            if self.causal:
+                blocked = (diff < 0) | (diff >= self.window_size)
+            else:
+                blocked = diff.abs() >= self.window_size
+            w_mask = torch.zeros((positions, positions), device=x.device, dtype=x.dtype).masked_fill(blocked, float("-inf"))
+            mask = w_mask if mask is None else mask + w_mask
+
         q = _split_heads(self.q_proj(x), self.heads, self.head_dim)
-        k = _split_heads(self.k_proj(x), self.heads, self.head_dim)
-        v = _split_heads(self.v_proj(x), self.heads, self.head_dim)
+        k = _split_heads(self.k_proj(x), self.kv_heads, self.head_dim)
+        v = _split_heads(self.v_proj(x), self.kv_heads, self.head_dim)
+
+        if self.qk_norm == "rms_norm":
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        elif self.qk_norm == "l2_norm":
+            q = F.normalize(q, p=2, dim=-1, eps=self.eps)
+            k = F.normalize(k, p=2, dim=-1, eps=self.eps)
+
         if self.rope:
             cos, sin = self._get_rope_tables(positions, x.device, x.dtype)
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
-        attended = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0,
-            is_causal=self.causal and mask is None)
-        merged = attended.transpose(1, 2).reshape(batch, positions, width)
+
+        if self.logit_softcap > 0.0:
+            if self.kv_heads != self.heads:
+                repeats = self.heads // self.kv_heads
+                k_rep = k.repeat_interleave(repeats, dim=1)
+                v_rep = v.repeat_interleave(repeats, dim=1)
+            else:
+                k_rep = k
+                v_rep = v
+            scores = (q @ k_rep.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
+            if mask is not None:
+                scores = scores + mask
+            elif self.causal:
+                scores = scores + _causal_bias(positions, x.device, scores.dtype)
+            weights = scores.softmax(dim=-1)
+            if self.dropout > 0.0 and self.training:
+                weights = F.dropout(weights, p=self.dropout)
+            attended = weights @ v_rep
+        else:
+            attended = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0,
+                is_causal=(self.causal and mask is None),
+                enable_gqa=(self.kv_heads != self.heads),
+            )
+        merged = attended.transpose(1, 2).reshape(batch, positions, self.heads * self.head_dim)
         return self.o_proj(merged)
 
     def extra_repr(self):
         grid = f", spatial_shape={self.spatial_shape}" if self.relative_position_bias else ""
+        opts = ""
+        if self.kv_heads != self.heads:
+            opts += f", kv_heads={self.kv_heads}"
+        if self.qk_norm != "none":
+            opts += f", qk_norm={self.qk_norm!r}"
+        if self.rope_theta != 10000.0:
+            opts += f", rope_theta={self.rope_theta}"
+        if self.window_size > 0:
+            opts += f", window_size={self.window_size}"
+        if self.logit_softcap > 0.0:
+            opts += f", logit_softcap={self.logit_softcap}"
         return (f"heads={self.heads}, head_dim={self.head_dim}, causal={self.causal}, "
                 f"dropout={self.dropout}, equalized={self.equalized}, rope={self.rope}, "
-                f"relative_position_bias={self.relative_position_bias}{grid}")
+                f"relative_position_bias={self.relative_position_bias}{grid}{opts}")

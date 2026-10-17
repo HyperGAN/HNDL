@@ -1,23 +1,36 @@
 import torch
 from torch import nn
 
+from ..errors import HNDLError
 from ..operator import Arg, Example, operator
 from .attention import Attention, _reference as _attention_reference
 from .feed_forward import ACTIVATIONS, FeedForward, _reference as _feed_forward_reference
 from .layer_norm import LayerNorm, _reference as _layer_norm_reference
 from .rms_norm import RMSNorm, _reference as _rms_norm_reference
+from .swiglu import SwiGLU, _reference as _swiglu_reference
 
 NORMS = ("layer_norm", "rms_norm")
+
+
+def _validate(args):
+    if not args.get("rope") and args.get("rope_theta") != 10000.0:
+        raise HNDLError("E_ARGUMENT", "rope_theta is only valid when rope=True")
 
 
 def _relation(s):
     """``heads`` must divide the model width ``D``, whichever side fixes it."""
     heads = s.args["heads"]
+    kv_heads = s.args.get("kv_heads", 0)
+    if kv_heads > 0 and heads % kv_heads != 0:
+        s.error("E_CONSTRAINT", f"heads={heads} must be divisible by kv_heads={kv_heads}")
     for port in ("x", "out"):
         shape = s.shape(port)
         if shape is not None and len(shape) == 3 and shape[2] is not None:
-            if shape[2] % heads:
-                s.error("E_CONSTRAINT", f"heads={heads} must divide the model width D={shape[2]}")
+            width = shape[2]
+            if width % heads:
+                s.error("E_CONSTRAINT", f"heads={heads} must divide the model width D={width}")
+            if s.args.get("rope") and (width // heads) % 2:
+                s.error("E_CONSTRAINT", f"rope needs an even head dimension, but D={width} over heads={heads} gives {width // heads}")
             return
 
 
@@ -27,7 +40,10 @@ def _reference(module):
     norm1_ref = norm_ref(module.norm1)
     attn_ref = _attention_reference(module.attn)
     norm2_ref = norm_ref(module.norm2)
-    ffn_ref = _feed_forward_reference(module.ffn)
+    if getattr(module, "ffn_kind", "mlp") == "swiglu":
+        ffn_ref = _swiglu_reference(module.ffn)
+    else:
+        ffn_ref = _feed_forward_reference(module.ffn)
 
     def run(x):
         branch = attn_ref(norm1_ref(x))
@@ -43,6 +59,7 @@ def _reference(module):
     summary="Pre-norm transformer block: residual self-attention followed by a residual feed-forward.",
     shape="x[B, T, D] -> out[B, T, D]",
     relation=_relation,
+    validate=_validate,
     reference=_reference,
     args={
         "heads": Arg(int, min=1, help="Number of attention heads; must divide the model width D."),
@@ -62,6 +79,20 @@ def _reference(module):
                                 help="Value the layer-scale gains start at; ignored when layer_scale is false."),
         "eps": Arg(float, 1e-5, min=0, exclusive_min=True, positional=False,
                    help="Epsilon of both normalizations; must be positive."),
+        "ffn_kind": Arg(str, "mlp", choices=("mlp", "swiglu"), positional=False, since="0.9.0",
+                        help='Feed-forward architecture: "mlp" or "swiglu".'),
+        "hidden": Arg(int, 0, min=0, positional=False, since="0.9.0",
+                      help="Explicit inner width of the feed-forward; 0 means mlp_ratio * D."),
+        "rope": Arg(bool, False, positional=False, since="0.9.0",
+                    help="Enable rotary position embeddings in self-attention."),
+        "rope_theta": Arg(float, 10000.0, min=1.0, exclusive_min=True, positional=False, since="0.9.0",
+                          help="Base frequency for rotary embeddings."),
+        "kv_heads": Arg(int, 0, min=0, positional=False, since="0.9.0",
+                        help="Number of key/value heads for GQA in self-attention; 0 means heads."),
+        "qk_norm": Arg(str, "none", choices=("none", "rms_norm", "l2_norm"), positional=False, since="0.9.0",
+                       help="Query/key normalization in self-attention."),
+        "bias": Arg(bool, True, positional=False, since="0.9.0",
+                    help="Add learned biases to projections and normalizations."),
     },
     examples=[
         Example("transformer_block(4)", ("B", 8, 32), ("B", 8, 32),
@@ -151,14 +182,33 @@ class TransformerBlock(nn.Module):
     """
 
     def __init__(self, heads, mlp_ratio, activation, norm, causal, dropout,
-                 layer_scale, layer_scale_init, eps, *, D):
+                 layer_scale, layer_scale_init, eps, *, D,
+                 ffn_kind="mlp", hidden=0, rope=False, rope_theta=10000.0,
+                 kv_heads=0, qk_norm="none", bias=True):
         super().__init__()
         self.norm_kind = norm
-        make_norm = RMSNorm if norm == "rms_norm" else LayerNorm
-        self.norm1 = make_norm(eps=eps, affine=True, D=D)
-        self.attn = Attention(heads=heads, causal=causal, dropout=dropout, bias=True, rope=False, D=D)
-        self.norm2 = make_norm(eps=eps, affine=True, D=D)
-        self.ffn = FeedForward(hidden=mlp_ratio * int(D), activation=activation, dropout=dropout, bias=True, D=D)
+        self.ffn_kind = ffn_kind
+        self.bias = bool(bias)
+        if norm == "rms_norm":
+            self.norm1 = RMSNorm(eps=eps, affine=True, D=D)
+            self.norm2 = RMSNorm(eps=eps, affine=True, D=D)
+        else:
+            self.norm1 = LayerNorm(eps=eps, affine=True, bias=self.bias, D=D)
+            self.norm2 = LayerNorm(eps=eps, affine=True, bias=self.bias, D=D)
+
+        self.attn = Attention(
+            heads=heads, causal=causal, dropout=dropout, bias=self.bias, rope=rope, D=D,
+            rope_theta=rope_theta, kv_heads=kv_heads, qk_norm=qk_norm,
+        )
+
+        actual_hidden = hidden if hidden > 0 else (mlp_ratio * int(D))
+        if ffn_kind == "swiglu":
+            self.ffn = SwiGLU(hidden=actual_hidden, bias=self.bias, D=D)
+        else:
+            self.ffn = FeedForward(
+                hidden=actual_hidden, activation=activation, dropout=dropout, bias=self.bias, D=D,
+            )
+
         if layer_scale:
             self.gamma1 = nn.Parameter(torch.full((int(D),), float(layer_scale_init)))
             self.gamma2 = nn.Parameter(torch.full((int(D),), float(layer_scale_init)))
@@ -173,4 +223,7 @@ class TransformerBlock(nn.Module):
         return x + branch if self.gamma2 is None else torch.addcmul(x, branch, self.gamma2)
 
     def extra_repr(self):
-        return f"norm={self.norm_kind!r}, layer_scale={self.gamma1 is not None}"
+        opts = f", ffn_kind={self.ffn_kind!r}" if self.ffn_kind != "mlp" else ""
+        if not self.bias:
+            opts += ", bias=False"
+        return f"norm={self.norm_kind!r}, layer_scale={self.gamma1 is not None}{opts}"

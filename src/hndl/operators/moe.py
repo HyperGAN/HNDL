@@ -18,13 +18,23 @@ def _reference(module):
     activation = ACTIVATIONS[module.activation]
 
     def expert_forward(expert, h):
+        if module.expert_kind == "swiglu":
+            return F.linear(
+                F.silu(F.linear(h, expert.gate.weight, expert.gate.bias)) * F.linear(h, expert.up.weight, expert.up.bias),
+                expert.down.weight, expert.down.bias,
+            )
         return F.linear(activation(F.linear(h, expert.up.weight, expert.up.bias)), expert.down.weight, expert.down.bias)
 
     def run(x):
         flat = x.reshape(-1, module.d_model)
         logits = F.linear(flat, module.router.weight)
         values, indices = torch.topk(logits, module.top_k, dim=-1)
-        gates = torch.zeros_like(logits).scatter(1, indices, torch.softmax(values, dim=-1))
+        if module.scoring == "sigmoid":
+            scores = torch.sigmoid(values)
+            weights = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20)
+        else:
+            weights = torch.softmax(values, dim=-1)
+        gates = torch.zeros_like(logits).scatter(1, indices, weights)
         expert_outputs = torch.stack([expert_forward(e, flat) for e in module.experts], dim=-1)
         return (expert_outputs * gates.unsqueeze(1)).sum(dim=-1).reshape(x.shape)
 
@@ -34,14 +44,27 @@ def _reference(module):
 class Expert(nn.Module):
     """One feed-forward expert: ``down(activation(up(x)))``."""
 
-    def __init__(self, d_model, hidden, activation):
+    def __init__(self, d_model, hidden, activation, bias=True):
         super().__init__()
-        self.up = nn.Linear(d_model, hidden)
-        self.down = nn.Linear(hidden, d_model)
+        self.up = nn.Linear(d_model, hidden, bias=bias)
+        self.down = nn.Linear(hidden, d_model, bias=bias)
         self.activation = ACTIVATIONS[activation]
 
     def forward(self, x):
         return self.down(self.activation(self.up(x)))
+
+
+class SwiGLUExpert(nn.Module):
+    """One 3-projection SwiGLU expert: ``down(silu(gate(x)) * up(x))``."""
+
+    def __init__(self, d_model, hidden, bias=True):
+        super().__init__()
+        self.gate = nn.Linear(d_model, hidden, bias=bias)
+        self.up = nn.Linear(d_model, hidden, bias=bias)
+        self.down = nn.Linear(hidden, d_model, bias=bias)
+
+    def forward(self, x):
+        return self.down(F.silu(self.gate(x)) * self.up(x))
 
 
 @operator(
@@ -56,6 +79,12 @@ class Expert(nn.Module):
                      help="Experts each token is routed to; must not exceed experts."),
         "activation": Arg(str, "gelu", positional=False, choices=tuple(ACTIVATIONS),
                           help='Nonlinearity inside each expert: "gelu", "gelu_tanh", "relu" or "silu".'),
+        "expert_kind": Arg(str, "mlp", choices=("mlp", "swiglu"), positional=False, since="0.9.0",
+                           help='Expert architecture: "mlp" (2-layer) or "swiglu" (3-projection gated).'),
+        "bias": Arg(bool, True, positional=False, since="0.9.0",
+                    help="Enable learned biases in expert projections."),
+        "scoring": Arg(str, "softmax", choices=("softmax", "sigmoid"), positional=False, since="0.9.0",
+                       help='Routing gate affinity normalization: "softmax" or "sigmoid".'),
     },
     validate=_validate,
     reference=_reference,
@@ -66,6 +95,10 @@ class Expert(nn.Module):
                 "On a [B, T, D] sequence every position is routed independently; top_k=1 is hard routing."),
         Example('moe(3, 24, activation="silu")', ("B", 6, 12), ("B", 6, 12),
                 "The operator preserves its input shape, so it drops into a residual stack unchanged."),
+        Example('moe(4, 32, expert_kind="swiglu", bias=False)', ("B", 8), ("B", 8),
+                "Four bias-free SwiGLU experts routed with top-2 softmax gating."),
+        Example('moe(4, 32, scoring="sigmoid")', ("B", 8), ("B", 8),
+                "Top-2 routing with sigmoid affinity scoring normalized over selected experts."),
     ],
     category="sequence",
 )
@@ -77,47 +110,41 @@ class MixtureOfExperts(nn.Module):
     ```text
     logits  = router(x)                        # [N, experts], bias-free linear
     v, idx  = topk(logits, top_k)              # the top_k experts per token
-    w       = softmax(v)                       # renormalized over the selection
+    w       = softmax(v) or sigmoid(v)/sum     # renormalized over the selection
     out     = sum_k w[:, k] * expert[idx[:, k]](x)
     ```
 
-    Each expert is ``down(activation(up(x)))`` with ``up`` of shape
-    ``[hidden, D]`` and ``down`` of shape ``[D, hidden]``, both with a bias.
-    The experts live in an ``nn.ModuleList`` named ``experts``, so their
-    parameters are ``experts.<i>.up.weight``, ``experts.<i>.up.bias``,
-    ``experts.<i>.down.weight`` and ``experts.<i>.down.bias``; the router is
-    ``router.weight``. Because the gate weights are a softmax over only the
-    selected logits, they sum to one per token, and ``top_k == experts`` makes
-    the layer a dense softmax-weighted mixture.
-
-    Dispatch is a loop over the experts with a boolean row mask, chosen for
-    clarity over throughput: cost grows with the number of experts even when
-    each one sees few tokens. The router, the softmax and the experts all
-    compute in the plan's compute dtype; nothing is upcast. Behavior is
-    identical in train and eval mode, and routing is deterministic given the
-    parameters (no noise, no capacity limit, so no token is ever dropped).
-
-    Limitation: this operator emits no auxiliary load-balancing loss, so
-    nothing pushes the router toward using its experts evenly. A host that
-    wants one can recompute it from the router logits, for example as
-    ``experts * sum_e fraction_of_tokens_to_e * mean_softmax_prob_e``, by
-    reading ``router`` out of the built model.
+    Each expert is either ``down(activation(up(x)))`` (for ``expert_kind="mlp"``)
+    or ``down(silu(gate(x)) * up(x))`` (for ``expert_kind="swiglu"``).
+    The experts live in an ``nn.ModuleList`` named ``experts``; the router is
+    ``router.weight``.
     """
 
-    def __init__(self, experts, hidden, top_k, activation, *, D):
+    def __init__(self, experts, hidden, top_k, activation, *, D,
+                 expert_kind="mlp", bias=True, scoring="softmax"):
         super().__init__()
         self.d_model = D
         self.hidden = hidden
         self.top_k = top_k
         self.activation = activation
+        self.expert_kind = expert_kind
+        self.bias = bool(bias)
+        self.scoring = scoring
         self.router = nn.Linear(D, experts, bias=False)
-        self.experts = nn.ModuleList(Expert(D, hidden, activation) for _ in range(experts))
+        if expert_kind == "swiglu":
+            self.experts = nn.ModuleList(SwiGLUExpert(D, hidden, bias=bias) for _ in range(experts))
+        else:
+            self.experts = nn.ModuleList(Expert(D, hidden, activation, bias=bias) for _ in range(experts))
 
     def forward(self, x):
         flat = x.reshape(-1, self.d_model)
         logits = self.router(flat)
         values, indices = torch.topk(logits, self.top_k, dim=-1)
-        weights = torch.softmax(values, dim=-1)
+        if self.scoring == "sigmoid":
+            scores = torch.sigmoid(values)
+            weights = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20)
+        else:
+            weights = torch.softmax(values, dim=-1)
 
         if torch.compiler.is_compiling():
             gates = torch.zeros(flat.shape[0], len(self.experts),
@@ -135,5 +162,10 @@ class MixtureOfExperts(nn.Module):
         return out.reshape(x.shape)
 
     def extra_repr(self):
+        opts = f", expert_kind={self.expert_kind!r}" if self.expert_kind != "mlp" else ""
+        if not self.bias:
+            opts += ", bias=False"
+        if self.scoring != "softmax":
+            opts += f", scoring={self.scoring!r}"
         return (f"experts={len(self.experts)}, hidden={self.hidden}, top_k={self.top_k}, "
-                f"activation={self.activation!r}")
+                f"activation={self.activation!r}{opts}")

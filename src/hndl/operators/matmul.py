@@ -4,11 +4,25 @@ from torch import nn
 from ..operator import Example, operator
 
 
+def _relation(s):
+    ranks = [len(sh) for sh in (s.shape("a"), s.shape("b"), s.shape("out")) if sh is not None]
+    if ranks:
+        rank = ranks[0]
+        s.rank("a", rank)
+        s.rank("b", rank)
+        s.rank("out", rank)
+    else:
+        s.rank("a", 3)
+        s.rank("b", 3)
+        s.rank("out", 3)
+
+
 @operator(
     "matmul",
-    summary="Batched matrix product of two rank-3 tensors.",
-    shape="a[B, N, K], b[B, K, M] -> out[B, N, M]",
-    reference=lambda module: torch.bmm,
+    summary="Batched matrix product of tensors with arbitrary leading batch dimensions.",
+    shape="a[B, ..., N, K], b[B, ..., K, M] -> out[B, ..., N, M]",
+    relation=_relation,
+    reference=lambda module: torch.matmul,
     examples=[
         Example("k = transpose(1, 2)\nmatmul(x, k)", ("B", 6, 4), ("B", 6, 6),
                 "The energy map of self-attention: a sequence times its own transpose."),

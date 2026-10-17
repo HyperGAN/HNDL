@@ -496,3 +496,90 @@ def test_rope_tables_preserves_float64_numerical_precision(device):
     dup = torch.cat((ang, ang), dim=-1)
     torch.testing.assert_close(cos_f64, dup.cos()[None, None], atol=1e-12, rtol=1e-12)
     torch.testing.assert_close(sin_f64, dup.sin()[None, None], atol=1e-12, rtol=1e-12)
+
+
+# --- SOTA 0.9.0 Features ----------------------------------------------------
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("kv_heads", [1, 2])
+def test_gqa_matches_reference_implementation(device, causal, kv_heads):
+    dtype, tolerance = precision(device)
+    heads, width, positions = 4, 32, 8
+    module = Attention(heads=heads, causal=causal, dropout=0.0, bias=True, rope=False, D=width, kv_heads=kv_heads)
+    module = module.to(device=device, dtype=dtype).eval()
+    assert module.k_proj.weight.shape == (kv_heads * (width // heads), width)
+    assert module.v_proj.weight.shape == (kv_heads * (width // heads), width)
+    x = torch.randn(2, positions, width, device=device, dtype=dtype)
+    torch.testing.assert_close(module(x), _reference(module)(x), **tolerance)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_decoupled_head_dim_allows_arbitrary_width(device):
+    dtype, tolerance = precision(device)
+    heads, head_dim, width, positions = 4, 12, 32, 6
+    module = Attention(heads=heads, causal=False, dropout=0.0, bias=True, rope=False, D=width, head_dim=head_dim)
+    module = module.to(device=device, dtype=dtype).eval()
+    assert module.head_dim == 12
+    assert module.q_proj.weight.shape == (48, 32)
+    assert module.o_proj.weight.shape == (32, 48)
+    x = torch.randn(2, positions, width, device=device, dtype=dtype)
+    torch.testing.assert_close(module(x), _reference(module)(x), **tolerance)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("qk_norm", ["rms_norm", "l2_norm"])
+def test_qk_norm_matches_reference_implementation(device, qk_norm):
+    dtype, tolerance = precision(device)
+    heads, width, positions = 2, 16, 5
+    module = Attention(heads=heads, causal=True, dropout=0.0, bias=True, rope=True, D=width, qk_norm=qk_norm)
+    module = module.to(device=device, dtype=dtype).eval()
+    if qk_norm == "rms_norm":
+        assert hasattr(module, "q_norm") and hasattr(module, "k_norm")
+    x = torch.randn(2, positions, width, device=device, dtype=dtype)
+    torch.testing.assert_close(module(x), _reference(module)(x), **tolerance)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_rope_theta_scales_frequencies_and_matches_reference(device):
+    dtype, tolerance = precision(device)
+    heads, width, positions = 2, 16, 6
+    module = Attention(heads=heads, causal=False, dropout=0.0, bias=True, rope=True, rope_theta=500000.0, D=width)
+    module = module.to(device=device, dtype=dtype).eval()
+    x = torch.randn(2, positions, width, device=device, dtype=dtype)
+    torch.testing.assert_close(module(x), _reference(module)(x), **tolerance)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("causal", [False, True])
+def test_sliding_window_attention_matches_reference(device, causal):
+    dtype, tolerance = precision(device)
+    heads, width, positions, window_size = 2, 16, 10, 3
+    module = Attention(heads=heads, causal=causal, dropout=0.0, bias=True, rope=False, D=width, window_size=window_size)
+    module = module.to(device=device, dtype=dtype).eval()
+    x = torch.randn(2, positions, width, device=device, dtype=dtype)
+    torch.testing.assert_close(module(x), _reference(module)(x), **tolerance)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("causal", [False, True])
+def test_logit_softcap_matches_reference(device, causal):
+    dtype, tolerance = precision(device)
+    heads, width, positions = 2, 16, 6
+    module = Attention(heads=heads, causal=causal, dropout=0.0, bias=True, rope=False, D=width,
+                       logit_softcap=15.0, kv_heads=1)
+    module = module.to(device=device, dtype=dtype).eval()
+    x = torch.randn(2, positions, width, device=device, dtype=dtype)
+    torch.testing.assert_close(module(x), _reference(module)(x), **tolerance)
+
+
+@pytest.mark.parametrize("source,code", [
+    ("attention(4, kv_heads=3)", "E_CONSTRAINT"),
+    ("attention(4, rope_theta=50000.0)", "E_ARGUMENT"),
+    ("attention(4, rope=True, head_dim=7)", "E_CONSTRAINT"),
+])
+def test_invalid_sota_attention_arguments_raise_error(source, code):
+    with pytest.raises(HNDLError, match=code):
+        resolve(source, input_shape=("B", 8, 32), output_shape=("B", 8, 32))
+

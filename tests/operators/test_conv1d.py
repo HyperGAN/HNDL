@@ -3,9 +3,11 @@
 import pytest
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.utils import parametrizations
 
 from hndl import HNDLError, resolve
+from hndl.operators.conv1d import _reference
 from hndl.torch import DTYPES, build
 
 
@@ -217,3 +219,97 @@ def test_plain_convolution_is_unchanged_when_spectral_norm_is_disabled():
     module = build(plan, device="cpu", initialization_seed=3)[plan.nodes[0].id]
     assert sorted(name for name, _ in module.named_parameters()) == ["bias", "weight"]
     assert not list(module.named_buffers())
+
+
+def test_causal_conv1d_bijective_solver_and_causality(device):
+    # Bijective: with stride=1, output length is uniquely equal to input length
+    plan = resolve("conv1d(16, kernel_size=4, causal=True)",
+                   input_shape=("B", 8, 32), output_shape=("B", 16, 32))
+    assert plan.nodes[0].output_shapes["out"] == ("B", 16, 32)
+
+    # Backward solver: input length is inferred backward from output length
+    plan_back = resolve("linear()\nreshape(2)\nconv1d(4, kernel_size=4, causal=True)",
+                        input_shape=("B", 16), output_shape=("B", 4, 8))
+    assert plan_back.nodes[1].output_shapes["out"] == ("B", 2, 8)
+    assert plan_back.nodes[2].input_shapes["x"] == ("B", 2, 8)
+
+    # Verify causality: gradient of output at position t w.r.t input at t+k (k>0) is 0
+    model = build(plan, device=device, initialization_seed=42)
+    x = torch.randn(2, 8, 32, device=device, requires_grad=True)
+    out = model(x=x)["output"]
+
+    # Target position t=10
+    loss = out[:, :, 10].sum()
+    loss.backward()
+    # Gradient w.r.t future positions (> 10) must be exactly 0
+    assert (x.grad[:, :, 11:] == 0).all(), "Future input positions leaked into past/present output"
+
+
+def test_causal_conv1d_parity_against_explicit_pad(device):
+    kernel_size, dilation, in_c, out_c, length = 5, 2, 4, 8, 20
+    source = f"conv1d({out_c}, kernel_size={kernel_size}, dilation={dilation}, causal=True)"
+    plan = resolve(source, input_shape=("B", in_c, length), output_shape=("B", out_c, length))
+    model = build(plan, device=device, initialization_seed=7)
+    module = model[plan.nodes[0].id]
+
+    x = torch.randn(3, in_c, length, device=device, requires_grad=True)
+    mirror = x.detach().clone().requires_grad_()
+    actual = model(x=x)["output"]
+
+    # Explicit left pad
+    left_pad = dilation * (kernel_size - 1)
+    padded = F.pad(mirror, (left_pad, 0))
+    expected = F.conv1d(padded, module.weight, module.bias, stride=1, padding=0, dilation=dilation)
+    torch.testing.assert_close(actual, expected)
+
+    actual.square().mean().backward()
+    expected.square().mean().backward()
+    torch.testing.assert_close(x.grad, mirror.grad)
+
+
+def test_causal_requires_zero_padding():
+    with pytest.raises(HNDLError, match="E_ARGUMENT.*causal"):
+        resolve("conv1d(8, kernel_size=3, padding=1, causal=True)",
+                input_shape=("B", 4, 16), output_shape=("B", 8, 16))
+
+
+def test_channels_last_sequence_format_parity(device):
+    # channels_last format: [B, T, C]
+    source = "conv1d(16, kernel_size=3, padding=1, channels_last=True)"
+    plan = resolve(source, input_shape=("B", 24, 8), output_shape=("B", 24, 16))
+    assert plan.nodes[0].input_shapes["x"] == ("B", 24, 8)
+    assert plan.nodes[0].output_shapes["out"] == ("B", 24, 16)
+
+    model = build(plan, device=device, initialization_seed=15)
+    module = model[plan.nodes[0].id]
+
+    x = torch.randn(2, 24, 8, device=device, requires_grad=True)
+    mirror = x.detach().clone().requires_grad_()
+    actual = model(x=x)["output"]
+
+    # Reference via transposition
+    transposed = mirror.transpose(1, 2)
+    expected = F.conv1d(transposed, module.weight, module.bias, stride=1, padding=1, dilation=1)
+    expected = expected.transpose(1, 2).contiguous()
+    torch.testing.assert_close(actual, expected)
+
+    actual.square().mean().backward()
+    expected.square().mean().backward()
+    torch.testing.assert_close(x.grad, mirror.grad)
+
+
+def test_causal_and_channels_last_combined(device):
+    # Modern sequence layer: causal depthwise conv1d on [B, T, D]
+    source = "conv1d(32, kernel_size=4, groups=32, causal=True, channels_last=True)"
+    plan = resolve(source, input_shape=("B", 16, 32), output_shape=("B", 16, 32))
+    model = build(plan, device=device, initialization_seed=21)
+    module = model[plan.nodes[0].id]
+
+    x = torch.randn(2, 16, 32, device=device, requires_grad=True)
+    actual = model(x=x)["output"]
+    assert actual.shape == (2, 16, 32)
+
+    # Reference check
+    ref_fn = _reference(module)
+    expected = ref_fn(x)
+    torch.testing.assert_close(actual, expected)

@@ -92,3 +92,20 @@ def test_width_flows_forward_and_backward_through_the_norm():
 def test_a_contradicting_width_is_a_constraint_error():
     with pytest.raises(HNDLError, match="E_CONSTRAINT"):
         resolve("layer_norm()", input_shape=("B", 8), output_shape=("B", 12))
+
+
+def test_bias_false_has_no_bias_parameter(device):
+    plan = resolve("layer_norm(bias=False)", input_shape=("B", 4, 16), output_shape=("B", 4, 16))
+    assert parameter_counts(plan) == {plan.nodes[0].id: 16}
+    model, module = _layer_norm(plan, device)
+    assert module.bias is None
+    assert module.weight is not None
+    assert len(list(module.parameters())) == 1
+    x = torch.randn(2, 4, 16, device=device, requires_grad=True)
+    mirror = x.detach().clone().requires_grad_()
+    actual = model(x=x)["output"]
+    expected = F.layer_norm(mirror, (16,), module.weight, None, module.eps)
+    torch.testing.assert_close(actual, expected)
+    actual.square().mean().backward()
+    expected.square().mean().backward()
+    torch.testing.assert_close(x.grad, mirror.grad)
