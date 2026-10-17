@@ -5,6 +5,7 @@
 - **`cast` operator & edge dtype propagation**: Added `cast@1` (`core` category) supporting explicit dtype conversions across graph edges (`float32`, `float16`, `bfloat16`, `float64`, `int64`, `int32`, `bool`, and `'compute'`), with resolver edge propagation updated to track cast output dtypes.
 - **`l2_norm` operator**: Added `l2_norm@1` (`normalization` category) providing parameter-free L2 normalization with configurable `dim` and numerical `eps`.
 - **`grn` operator**: Added `grn@1` (`normalization` category) implementing ConvNeXt-V2 Global Response Normalization with spatial L2 channel pooling and zero-initialized recalibration parameters.
+- **`sinusoidal_embed` operator**: Added `sinusoidal_embed@1` (`sequence` category) providing deterministic log-spaced sinusoidal timestep and coordinate embeddings.
 
 ## 0.8.2 (2026-10-15)
 
