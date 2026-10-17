@@ -322,7 +322,7 @@ class GatedDeltaAttention(nn.Module):
             kc = k[:, :, start:end]
             vc = v[:, :, start:end]
             betac = beta[:, :, start:end]
-            alphac = alpha[:, :, start:end]
+            alphac = alpha[:, :, start:end].clamp(min=1e-7)
 
             log_alpha = torch.log(alphac)
             cum_log_alpha = torch.cumsum(log_alpha, dim=2)
@@ -332,7 +332,7 @@ class GatedDeltaAttention(nn.Module):
             v_pred_inter = torch.matmul(k_decay_init, S)
             v_prime = vc - v_pred_inter
 
-            diff = cum_log_alpha.unsqueeze(3) - cum_log_alpha.unsqueeze(2)
+            diff = (cum_log_alpha.unsqueeze(3) - cum_log_alpha.unsqueeze(2)).clamp(max=0.0)
             lambda_mat = torch.exp(diff)
 
             ki = kc.unsqueeze(3)

@@ -24,12 +24,10 @@ Probes:
    - float64 gradgradcheck (double backward) parity
 """
 
-import math
 import pytest
 import torch
-import torch.nn.functional as F
 
-from hndl import HNDLError, Registry, resolve
+from hndl import Registry, resolve
 from hndl.torch import build
 
 REGISTRY = Registry.builtins()
@@ -383,7 +381,6 @@ def test_moe_swiglu_sigmoid_gradcheck_and_gradgradcheck():
 # ==============================================================================
 
 
-@pytest.mark.xfail(strict=True, reason="moe scoring='sigmoid' uses 1e-20 which underflows to 0 in float16, causing 0/0=NaN")
 def test_vulnerability_moe_sigmoid_float16_underflow_causes_nan():
     """Demonstrate that negative router logits in float16 produce NaNs due to 1e-20 underflow."""
     plan = resolve(
@@ -400,7 +397,6 @@ def test_vulnerability_moe_sigmoid_float16_underflow_causes_nan():
     assert out.isfinite().all(), "Expected finite outputs from MoE with negative router logits"
 
 
-@pytest.mark.xfail(strict=True, reason="gda forward computes torch.log(alphac) which evaluates to log(0)=-inf when alpha underflows in float16, causing (-inf)-(-inf)=NaN")
 def test_vulnerability_gda_alpha_underflow_causes_nan():
     """Demonstrate that extreme decay rates in float16 cause log(0) -inf and NaN outputs in forward, while reference stays finite."""
     plan = resolve(

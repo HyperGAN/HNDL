@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Numerical stability in MoE and Gated Delta Attention**: Fixed float16 underflow in `moe` sigmoid scoring router and `gated_delta_attention` cumulative decay, preventing `NaN` outputs during reduced-precision evaluation.
 - **Authored SOTA network recipes**: Added 8 frontier neural network recipes with complete `.hndl` declarations and `.json` sidecars in `examples/networks/`:
   - `llama_tiny`: 64-token LLaMA-style causal language model with pre-RMSNorm, 4-head RoPE causal attention, and bias-free SwiGLU feed-forward networks (918,656 parameters, 27 nodes).
   - `deepseek_moe_tiny`: Hybrid shared and routed mixture-of-experts causal decoder pairing pre-RMSNorm and RoPE attention with parallel shared SwiGLU and top-2-of-4 routed experts (922,240 parameters, 19 nodes).

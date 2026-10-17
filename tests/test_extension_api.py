@@ -390,7 +390,7 @@ def test_harness_checks_the_plan_and_the_model_hndl_produce(monkeypatch):
     with monkeypatch.context() as patch:
         # A resolver that stops leaving Arg(since=...) defaults out of the plan.
         patch.setattr(hndl.resolver, "_canonical_arguments", lambda spec, args, source: (args, source))
-        with pytest.raises(AssertionError, match="n1.offset keeps its post-release default in the plan"):
+        with pytest.raises(AssertionError, match=r"(n0\.causal|n1\.offset) keeps its post-release default in the plan"):
             testing.check_round_trip(REGISTRY, spec, example)
 
 

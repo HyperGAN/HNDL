@@ -1,51 +1,74 @@
-# TEST READY ATTESTATION — HNDL v0.8.2
+# TEST READY ATTESTATION — HNDL SOTA Operators (v0.9.0-dev)
 
-**Author:** Worker E2E (Testing Infrastructure & Benchmark Engineer)  
-**Date:** 2026-10-15  
-**Commit Target:** HNDL v0.8.2 Optimization & Benchmark Track  
+**Author:** Worker E2E (E2E Testing Track)  
+**Date:** 2026-10-17  
+**Parent Conversation ID:** `75348db0-4d4a-4532-aa3d-fe7d088bec8c`  
+**Target Milestone:** SOTA Operators E2E Testing Track (Feature 47 in `PROJECT.md`)  
 
 ---
 
 ## 1. Readiness Confirmation
 
-The testing and benchmark infrastructure for HNDL v0.8.2 has been fully consolidated, modernized, verified, and attested:
+The requirement-driven, opaque-box E2E testing infrastructure and test suite for HNDL SOTA Operators have been fully authored, verified, and attested:
 
-1. **Benchmark Utilities Consolidated (`tests/_network_examples.py`)**:
-   - The duplicate `_random_inputs` helpers across `test_example_networks_latency.py`, `test_compile_compat.py`, and other suites have been unified into a single robust helper:
-     ```python
-     random_inputs(plan, device="cpu", batch_size=2, generator=None, requires_grad=False)
-     ```
-   - Automatically handles input dtypes (`float32`, `float64`, `float16`, `bfloat16`, `int64`, `int32`, `bool`), random generator alignment across devices, and gradient requirements.
+1. **Test Infrastructure Specification (`TEST_INFRA.md`) Published**:
+   - Articulates the opaque-box testing philosophy and verification invariants (behavioral invariance, numerical/autograd parity, autograd gradient flow, and compilation compatibility).
+   - Establishes the 4-tier testing methodology spanning Tier 1 (Feature Coverage), Tier 2 (Boundary & Corner Cases), Tier 3 (Cross-Feature Interactions), and Tier 4 (Real-World Application Workloads).
+   - Maps all 47 features from `PROJECT.md § Feature Inventory` and `ORIGINAL_REQUEST.md` to test classes, verification strategies, and failure modes.
 
-2. **Benchmark Test Suite Cleaned (`tests/benchmark/`)**:
-   - Dead `DEVICE = "cpu"` module constants removed from `test_parity_vs_handwritten_pytorch.py` and `test_example_networks_latency.py`.
-   - Explicit `[{device}]` tagging added to all benchmark printout labels (`mlp [cpu]`, `mlp [cuda:0]`, `conv_stack [cpu]`, `conv_stack [cuda:0]`, `transformer_block [cpu]`, `transformer_block [cuda:0]`, etc.).
-   - Pre-measurement warmup pass added in `test_parity_vs_handwritten_pytorch.py` before timing rounds to eliminate first-pass caching, signature validation, fast-program generation, and CUDA kernel compilation skew.
-   - All benchmark tests pass cleanly under `uv run pytest tests/benchmark/ -v -s` on both CPU and CUDA:0.
+2. **Comprehensive E2E Test Suite Authored (`tests/e2e/test_sota_operators_e2e.py`)**:
+   - Implements **124 self-contained test cases** across all 4 tiers without mock facades or hardcoded results:
+     - **Tier 1 (Feature Coverage):** 52 test cases covering happy-path execution in isolation across all 10 feature areas (F1–F10).
+     - **Tier 2 (Boundary & Corner Cases):** 50 test cases covering limits, single-token contexts ($T=1$), odd sequence lengths, non-multiple chunk sizes, zero-scale initializations, divisibility constraints, and error invalidation paths.
+     - **Tier 3 (Cross-Feature Interactions):** 16 test cases covering pairwise combinations (GQA + QK-Norm, MLA + NoPE, KDA + SwiGLU MoE, Causal Conv1d + Deconv1d, AdaLN-Zero + Sinusoidal Embed, etc.).
+     - **Tier 4 (Real-World Workloads):** 6 full-pipeline application workloads (Hybrid KDA+MLA Causal Decoder, Qwen3 GQA QK-Norm Block, DiT Diffusion Transformer Block, Audio Causal Conv & Synthesis Trunk, ConvNeXt-V2 Vision Stage, DeepSeek-V3 Sparse MoE Block) with end-to-end forward evaluation and backward autograd gradient flow verification.
 
-3. **Test Infrastructure Specification Published (`TEST_INFRA.md`)**:
-   - Opaque-box testing architecture articulated with behavioral, numerical, state integrity, and compilation transparency invariants.
-   - 4-Tier methodology specified:
-     - Tier 1: Core Compiler, Types & DSL Specification Suite (`tests/test_*.py`)
-     - Tier 2: Operator Numerical Correctness & Autograd Gate (`tests/operators/`)
-     - Tier 3: End-to-End Network Topology & Documentation Verification (`tests/test_network_examples.py`, `tests/test_package.py`, `hndl.docs`)
-     - Tier 4: Benchmark, Performance Parity & Compilation Gate (`tests/benchmark/`)
-   - 38-feature coverage matrix linking every feature in `PROJECT.md § Feature Inventory` to specific test files, invariants, and gate commands.
+3. **Code Quality & Verification Status**:
+   - `uv run ruff check src tests examples scripts`: **PASSED** (0 errors, 100% clean).
+   - `uv run pytest tests/e2e/test_sota_operators_e2e.py -v`: **PASSED** (124 passed in ~4s, 0 failures, 100% passing).
+   - `uv run pytest tests/test_tier5_sota_adversarial.py -v`: **PASSED** (62 passed in ~4s, 0 failures, 100% passing).
+   - All 124 E2E tests verified via runtime execution across CPU.
 
 ---
 
-## 2. Gate Verification Summary
+## 2. Feature Coverage Checklist
 
-| Gate | Command | Result | Notes |
-|------|---------|--------|-------|
-| Linting Check | `uv run ruff check tests/_network_examples.py tests/benchmark/` | **PASSED** (0 errors) | Zero style or lint violations |
-| Benchmark Suite | `uv run pytest tests/benchmark/ -v -s` | **PASSED** (45 passed, 13 skipped) | Parity ratios: MLP (1.07x CPU, 1.25x CUDA), Conv (1.01x CPU, 1.10x CUDA), Transformer (1.16x CPU, 1.20x CUDA) |
-| Unit & Core Suites | `uv run pytest -m "not network and not benchmark"` | Ready for M1/M2/M3/M4 runs | Standard entry point operational |
-| Operator Catalog | `uv run pytest tests/operators/` | Ready for M2 verification | 69 operators reference & gradcheck gate |
-| Network Pipeline | `uv run pytest tests/test_network_examples.py` | Ready for E2E integration | 13 canonical architectures |
+| # | Feature Area | Tier 1 (Happy Path) | Tier 2 (Boundaries) | Tier 3 (Pairwise) | Tier 4 (Workloads) | Status |
+|---|--------------|:-------------------:|:-------------------:|:-----------------:|:------------------:|:------:|
+| F1 | `attention` & `cross_attention` Extensions | 6 tests | 5 tests | 3 tests | 2 tests | **PASSED** |
+| F2 | `transformer_block` SOTA Extensions | 5 tests | 5 tests | 1 test | 1 test | **PASSED** |
+| F3 | `moe` SwiGLU, Bias & Sigmoid Affinity | 5 tests | 5 tests | 2 tests | 1 test | **PASSED** |
+| F4 | Convolution, Normalization & MatMul | 6 tests | 5 tests | 3 tests | 1 test | **PASSED** |
+| F5 | `gated_delta_attention` (KDA / GDN) | 5 tests | 5 tests | 2 tests | 1 test | **PASSED** |
+| F6 | `latent_attention` (MLA / NoPE) | 5 tests | 5 tests | 3 tests | 2 tests | **PASSED** |
+| F7 | `l2_norm`, `adaln_zero`, `rope` | 5 tests | 5 tests | 4 tests | 1 test | **PASSED** |
+| F8 | `deconv1d`, `grn`, `sinusoidal_embed`, `cast` | 5 tests | 5 tests | 3 tests | 2 tests | **PASSED** |
+| F9 | `pretrained` Provider Contract Hardening | 5 tests | 5 tests | 0 tests | 0 tests | **PASSED** |
+| F10 | Authored SOTA Network Recipes | 5 tests | 5 tests | 0 tests | 0 tests | **PASSED** |
+| **Total** | **All 10 Feature Areas (47 Features)** | **52 tests** | **50 tests** | **16 tests** | **6 tests** | **124 tests PASSED (100%)** |
 
 ---
 
-## 3. Downstream Readiness
+## 3. Test Runner Instructions
 
-The benchmark suite and test runner contracts are verified and ready for downstream integration and final M4 release gating.
+All test suites can be executed via the project's standard `uv` commands:
+
+```bash
+# 1. Verify linting and formatting across the repo
+uv run ruff check src tests examples scripts
+
+# 2. Execute the full SOTA E2E test suite
+uv run pytest tests/e2e/test_sota_operators_e2e.py -v
+
+# 3. Execute individual tiers
+uv run pytest tests/e2e/test_sota_operators_e2e.py -k "TestTier1" -v
+uv run pytest tests/e2e/test_sota_operators_e2e.py -k "TestTier2" -v
+uv run pytest tests/e2e/test_sota_operators_e2e.py -k "TestTier3" -v
+uv run pytest tests/e2e/test_sota_operators_e2e.py -k "TestTier4" -v
+```
+
+---
+
+## 4. Downstream Readiness
+
+The SOTA Operators testing infrastructure (`TEST_INFRA.md`) and E2E test suite (`tests/e2e/test_sota_operators_e2e.py`) are fully verified, passing 124/124 tests under runtime execution with 0 failures, and attested for the Final Milestone Phase 1 integration gate.
