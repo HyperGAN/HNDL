@@ -25,7 +25,7 @@ and the [authored networks](docs/networks.md) are generated from the code.
   policies, validation, and finalization. Built-ins are discovered from
   `hndl.operators`; custom operators use the same decorator on a `Registry`.
   See [docs/ADDING_OPERATORS.md](docs/ADDING_OPERATORS.md).
-- Sixty-nine (69) operators across activation, arithmetic, convolution, core, memory,
+- Seventy-eight (78) operators across activation, arithmetic, convolution, core, memory,
   normalization, pretrained, regularization, sequence, shape, spatial, and vision
   categories, each with tests against PyTorch references.
 - `pretrained(source)`: a generic loader for transformers and timm checkpoints

@@ -1,0 +1,20 @@
+# Diffusion Transformer (DiT) at 32x32 scale: 4x4 patchify stem, 2 DiT blocks
+# with AdaLN-Zero conditioning modulation, self-attention with QK-norm,
+# SwiGLU feed-forward networks, and 4x4 sub-pixel unpatchify head.
+
+x = patch_embed(x, 128, 4, name="patch_stem")
+x = pos_embed(x, 64, name="pos_emb")
+
+for _ in range(2):
+    normed_attn, gate_attn = adaln_zero(x, cond, name="attn_adaln")
+    a = attention(normed_attn, 4, qk_norm="rms_norm", name="attn")
+    x = add(x, broadcast_mul(a, gate_attn), name="attn_res")
+
+    normed_ffn, gate_ffn = adaln_zero(x, cond, name="ffn_adaln")
+    f = swiglu(normed_ffn, 384, bias=False, name="ffn")
+    x = add(x, broadcast_mul(f, gate_ffn), name="ffn_res")
+
+normed_out, _ = adaln_zero(x, cond, name="final_adaln")
+reshape(normed_out, 128, 8, 8, name="to_spatial")
+conv(48, kernel_size=1, name="unpatchify")
+pixel_shuffle(4, name="to_pixels")

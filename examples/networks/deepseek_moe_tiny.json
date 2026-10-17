@@ -1,0 +1,9 @@
+{
+  "title": "Tiny DeepSeekMoE Causal Decoder",
+  "description": "A 32-token hybrid shared and routed mixture-of-experts causal decoder: learned token embeddings, 2 transformer layers pairing pre-RMSNorm and RoPE attention with parallel shared SwiGLU and top-2-of-4 routed experts, a final RMSNorm, and an untied vocabulary head whose width comes from the output contract.",
+  "input_shape": ["B", 32],
+  "output_shape": ["B", 32, 256],
+  "input_dtype": "int64",
+  "parameters": 922240,
+  "reference": "Architecture follows Dai et al. 2024, \"DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models\" (arXiv:2401.06066); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 2 layers with (RMSNorm 128 + 4·(128·128) attention + RMSNorm 128 + 3·(128·256) shared SwiGLU + router 128·4 + 4·(128·256+256 + 256·128+128) routed experts) = 2·428,288 = 856,576, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 856,576 + 128 + 32,768 = 922,240."
+}

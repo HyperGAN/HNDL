@@ -1,0 +1,19 @@
+# Whisper-style speech-to-token encoder-decoder: 2-layer Conv1d acoustic stem
+# downsampling spectrogram frames by 2x, bidirectional encoder, and causal
+# decoder attending to acoustic features via cross_attention.
+
+conv1d(x, 64, kernel_size=3, padding=1, name="stem1")
+gelu()
+conv1d(64, kernel_size=3, stride=2, padding=1, name="stem2")
+gelu()
+enc = transpose(1, 2, name="to_seq")
+enc = pos_embed(enc, 32, name="enc_pos")
+enc = transformer_block(enc, 4, norm="rms_norm", name="enc_block")
+
+dec = embedding(tokens, 128, 64, name="dec_emb")
+dec = pos_embed(dec, 16, name="dec_pos")
+dec = add(dec, attention(rms_norm(dec, name="self_norm"), 4, causal=True, rope=True, bias=False, name="self_attn"))
+dec = add(dec, cross_attention(rms_norm(dec, name="cross_norm"), enc, 4, bias=False, name="cross_attn"))
+dec = add(dec, swiglu(rms_norm(dec, name="ffn_norm"), 192, bias=False, name="ffn"))
+rms_norm(dec, name="out_norm")
+linear(bias=False, name="head")

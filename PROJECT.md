@@ -1,96 +1,117 @@
-# Project: HNDL v0.8.2 Optimization & Readability Release
+# Project: HNDL SOTA Operator Catalog, Pretrained Provider Contract Hardening, and Network Recipes
 
 ## Architecture
 HNDL is structured across compiler, runtime, operator catalog, and verification layers:
-- **Specification & Parsing** (`src/hndl/_parser.py`, `src/hndl/capture.py`): Parses DSL, validates syntax, extracts node declarations and contracts.
-- **Type System & Settings** (`src/hndl/types.py`, `src/hndl/settings.py`, `src/hndl/config.py`): Immutable plan types, node specifications, parameter settings, serialization.
-- **Registry & Operator Specs** (`src/hndl/registry.py`, `src/hndl/operator.py`, `src/hndl/relations.py`): Catalog of operations, shape relations, contracts.
-- **Resolver & Constraint Solver** (`src/hndl/resolver.py`): Topological sort, bidirectional shape inference, dimension bound enforcement.
-- **PyTorch Runtime** (`src/hndl/torch.py`): `GraphModule` and `Network` execution engine, state-store tracking, dynamic shape validation, `torch.compile` compatibility.
-- **Operator Catalog** (`src/hndl/operators/`): 69 built-in PyTorch operator implementations with custom autograd and reference implementations.
-- **Pretrained & Tooling** (`src/hndl/pretrained.py`, `src/hndl/testing.py`, `src/hndl/docs.py`): Weight loading, testing utilities, doc generator.
-- **Verification & Benchmarks** (`tests/`, `tests/operators/`, `tests/benchmark/`): Parity tests, autograd tests, latency benchmarks, packaging checks.
+- **Specification & Parsing** (`src/hndl/_parser.py`, `src/hndl/capture.py`, `src/hndl/ast.py`): Parses DSL, validates syntax, extracts node declarations and contracts.
+- **Type System & Settings** (`src/hndl/types.py`, `src/hndl/settings.py`): Immutable plan types, dictionary input contracts (`named_dtypes`), port specifications, serialization.
+- **Registry & Operator Specs** (`src/hndl/registry.py`, `src/hndl/operator.py`, `src/hndl/relations.py`): Catalog of 78 built-in operations, shape relations, `Arg(..., since="0.9.0")`.
+- **Resolver & Constraint Solver** (`src/hndl/resolver.py`): Topological sort, bidirectional shape inference, `ELLIPSIS` axis matching, dtype propagation (including `cast`).
+- **PyTorch Runtime** (`src/hndl/torch.py`): `GraphModule` execution engine, `_build_fast_program`, state-store tracking, dynamic shape validation, `torch.compile` compatibility.
+- **Operator Catalog** (`src/hndl/operators/`):
+  - Existing extended: `attention`, `cross_attention`, `transformer_block`, `moe`, `conv1d`, `rms_norm`, `layer_norm`, `adaptive_norm`, `matmul`.
+  - New Tier 1: `gated_delta_attention` (KDA / Gated DeltaNet), `latent_attention` (MLA), `l2_norm`, `adaln_zero`, `rope`.
+  - New Tier 2: `deconv1d` (`conv_transpose1d@1`), `grn`, `sinusoidal_embed`, `cast`.
+- **Pretrained Subsystem** (`src/hndl/pretrained.py`): Provider registrations, shape/contract callbacks avoiding `meta` execution, `contract="ids"` token-ID inputs.
+- **Authored Network Recipes** (`examples/networks/`): 21 total recipes (13 existing + 8 new SOTA: `llama_tiny`, `deepseek_moe_tiny`, `whisper_seq2seq_tiny`, `convnext_tiny`, `espcn_super_res`, `kimi_linear_tiny`, `qwen3_gqa_qknorm`, `dit_tiny`).
+- **Verification, Benchmarks & Documentation** (`tests/`, `tests/operators/`, `tests/benchmark/`, `src/hndl/docs.py`, `SPEC.md`, `IMPLEMENTATION.md`, `CHANGELOG.md`).
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
-| 1 | C-Speed `_stores` Verification | Dual-tier store check in `GraphModule._execute` using native `id(t)` comparison, falling back to shape/dtype check only on ID divergence | M1 | R1, Plan 1.1 |
-| 2 | Hot-Path Positional Tuple Binding | Return positional tuple in `_bind` for zero-dict allocations on standard `forward()` calls | M1 | R1, Plan 1.2 |
-| 3 | 1-Input Signature Fast Path | Dedicated 5-tuple fast path in `_signature` avoiding list comprehension allocations | M1 | R1, Plan 1.2 |
-| 4 | Multi-Input `itemgetter` | Use `operator.itemgetter` for multi-input nodes in `_build_fast_program` | M1 | R1, Plan 1.2 |
-| 5 | Single-Output Direct Return | Allow `Network.forward` to bypass intermediate dictionary unpacking | M1 | R1, Plan 1.2 |
-| 6 | Liveness Slot Recycling | Static liveness analysis & free-list recycling in `_build_fast_program` reducing peak intermediate slots by 50–84% | M1 | R1, Plan 1.3 |
-| 7 | Non-Mutating Dynamo Tracing | Pass `cache=not compiling` to `_resolve_shapes` in `_run_checked` to avoid mutating `self._compiled` during tracing | M1 | R1, Plan 1.4 |
-| 8 | Registration Hook Fast Path | Query `_watched.data.get(id(module))` in `_registration_hook` to bypass `WeakValueDictionary` `KeyError` | M1 | R1, Plan 3.2 |
-| 9 | CPU `construct()` Fast Path | Call module constructor directly on CPU when `torch_function_stack` is empty, bypassing `torch.device("cpu")` overhead | M1 | R1, Plan 3.2 |
-| 10 | Hoist `registry.activated()` | Hoist context manager outside node loops in `_build()` and `parameter_counts()` | M1 | R1, Plan 3.2 |
-| 11 | Pretrained & Testing Cleanup | Bound `_file_digests` with `@lru_cache(256)`, unify safetensors loader, reuse plan in `testing.py` | M1 | R4, Plan 4.3 |
-| 12 | Fused `RMSNorm.forward` | Use `F.rms_norm` in `RMSNorm.forward` and move explicit formula to `_reference` | M2 | R2, Plan 2.1 |
-| 13 | Fused `AdaptiveNorm.forward` | Use `F.instance_norm` + `torch.addcmul` in `forward` and move explicit formula to `_reference` | M2 | R2, Plan 2.1 |
-| 14 | RoPE & Causal Bias Optimization | Scalar base `ROPE_BASE ** -exp`, instance `_rope_cache` in `Attention`, and `torch.full(...).triu(1)` | M2 | R2, Plan 2.2 |
-| 15 | `MixtureOfExperts` Fast & Dynamo Dispatch | Sparse `torch.where` + `index_add_` in eager mode; branchless dispatch when compiling to eliminate graph breaks | M2 | R2, Plan 2.3 |
-| 16 | Separable 1D `AdaptiveAvgPool2d` | Replace nested 2D loops with separable 1D pooling $O(H+W)$, retaining `_explicit` in `_reference` | M2 | R2, Plan 2.4 |
-| 17 | `EqualLinear` Precomputed Scale | Precompute `self.scale = in_features ** -0.5` in `__init__` | M2 | R2, Plan 2.5 |
-| 18 | `Hopfield` Optimization | Hoist `stored_t = self.stored.t()` outside loop, prestore `(self.features,)` | M2 | R2, Plan 2.5 |
-| 19 | `FeedForward` Direct Activations | Bind `F.gelu`, `F.relu`, `F.silu` directly without lambda wrappers | M2 | R2, Plan 2.5 |
-| 20 | `PoolTokens` Bound Function | Bind pooling callable in `__init__` instead of per-call string check | M2 | R2, Plan 2.5 |
-| 21 | Residual Scale-and-Add Fusion | Use `torch.addcmul(x, branch, gamma)` in `SpatialAttention` and `TransformerBlock` | M2 | R2, Plan 2.5 |
-| 22 | Operator Relation Deduplication | Deduplicate `non_image`, `reduce_axis`, `conv_axis`, and `eval_weight` across operator catalog | M2 | R4, Plan 4.2 |
-| 23 | Solver Per-Sweep Convergence | Early exit check (`if not self.changed: break`) after each sweep in `_Solver.run` (2x speedup) | M3 | R3, Plan 3.1 |
-| 24 | Pre-Allocate `NodeView` & Metadata | Pre-allocate `NodeView` in `_Solver.__init__` and static `Operator` metadata in `Operator.__post_init__` | M3 | R3, Plan 3.1 |
-| 25 | $O((V+E)\log V)$ Topo Sort | Use `heapq` and integer in-degrees in `_ordered_nodes` | M3 | R3, Plan 3.1 |
-| 26 | Decompose `_ordered_nodes` | Decompose into 4 focused helpers (`_normalize_graph_nodes`, `_topological_sort`, `_validate_reachability`, `_propagate_dtypes`) | M3 | R4, Plan 4.1 |
-| 27 | Solver Axis/Rank Fast Path & Limit Check | Early returns in `axis`/`rank`; enforce `max_elements` after merging axis updates in `set_shape` | M3 | R3, Plan 3.1 |
-| 28 | Decompose `Capture.emit` | Split into `_bind_inputs` and `_rethrow_with_source`, use `_variadic_member` | M3 | R4, Plan 4.1 |
-| 29 | Unify Plan Table & Shape Formatting | Extract `format_plan_table(plan, label)` and `format_shape(shape)` in `types.py` | M3 | R4, Plan 4.1 |
-| 30 | Isolate `conv_axis` Unpacking | Extract `_unpack_conv_axis_args` in `relations.py` | M3 | R4, Plan 4.1 |
-| 31 | Cache `semantic_digest` & Singletons | Cache `ResolvedPlan.semantic_digest` and use pre-frozen default settings singletons | M3 | R3, Plan 3.3 |
-| 32 | Cache `Registry.builtins()` | Cache master registry builtins and skip redundant default validation in `normalize_arguments` | M3 | R3, Plan 3.3 |
-| 33 | ASCII Fast Path & Parser Depth | Fast-path ASCII source location lookup and integrate AST depth validation in `Validator` | M3 | R3, Plan 3.3 |
-| 34 | Redundant Re-Solve Skip in `_build()` | Stamp validated `ResolvedPlan` to skip re-running `validate_concrete_plan` in `_build()` | M3 | R3, Plan 3.2 |
-| 35 | E2E Testing Infra & Benchmarks Consolidation | Consolidate `_random_inputs` into `tests/_network_examples.py`, add warmup passes, verify device printouts | E2E | R5, Plan 4.3 |
-| 36 | Full Test & Benchmark Gate Verification | 100% pass across unit, operator, benchmark, doc tests on cpu and cuda:0 | M4 | R5, AC |
-| 37 | Version Synchronization & Documentation | Update version 0.8.2 in `pyproject.toml`, `_version.py`, `README.md`, `SPEC.md`, `IMPLEMENTATION.md`, `tests/test_package.py`, and `CHANGELOG.md` | M4 | R5, AGENTS.md |
-| 38 | Distribution Build, Git Tag & PyPI Release | Local wheel/sdist `twine check --strict`, tag `v0.8.2`, `gh release create v0.8.2`, and `.github/workflows/publish.yml` monitoring | M4 | R5, AC |
+| 1 | `attention` GQA/MQA | `kv_heads` with fused `enable_gqa=True` in `F.scaled_dot_product_attention` | M1 | R1, Survey |
+| 2 | `attention` `head_dim` override | Independent `head_dim` override decoupling $H \cdot d_h$ from $D$ | M1 | R1, Survey |
+| 3 | `attention` per-head QK normalization | `qk_norm` supporting `"none"`, `"rms_norm"`, `"l2_norm"` per-head before RoPE | M1 | R1, Survey |
+| 4 | `attention` configurable `rope_theta` | Configurable base frequency replacing hardcoded 10000.0 | M1 | R1, Survey |
+| 5 | `attention` sliding-window attention | `window_size` sliding window band masking | M1 | R1, Survey |
+| 6 | `attention` `logit_softcap` | Explicit fallback path applying $C \cdot \tanh(\text{scores} / C)$ | M1 | R1, Survey |
+| 7 | `cross_attention` SOTA extensions | Add `qkv_bias`, `out_bias`, `kv_heads`, `head_dim`, `qk_norm`, `logit_softcap` | M1 | R1, Survey |
+| 8 | `transformer_block` FFN kind & hidden override | `ffn_kind` (`"mlp"` vs `"swiglu"`) and explicit inner `hidden` width override | M1 | R1, Survey |
+| 9 | `transformer_block` RoPE & Attention options | Pass-through `rope`, `rope_theta`, `kv_heads`, `qk_norm`, and `bias` | M1 | R1, Survey |
+| 10 | `moe` SwiGLU Gated Experts | 3-projection gated experts (`expert_kind="swiglu"` alongside `"mlp"`) | M1 | R1, Survey |
+| 11 | `moe` Bias & Sigmoid Affinity | `bias` (bool, default True) and `scoring` (`"softmax"` vs `"sigmoid"`) | M1 | R1, Survey |
+| 12 | `moe` Compile Compatibility & Reference Oracle | 0 graph breaks under `torch.compile(fullgraph=True)` and updated dense `_reference` oracle | M1 | R1, Survey |
+| 13 | `conv1d` Causal & Channels-Last | `causal=True` (left padding, bijective $L_{out} == L_{in}$ in solver when stride=1) and `channels_last=True` | M1 | R1, Survey |
+| 14 | `rms_norm` Zero-Centered Scaling | `zero_centered=True` (Gemma $1 + w$ scaling, weight initialized to 0.0) | M1 | R1, Survey |
+| 15 | `layer_norm` Bias Option | `bias=False` support using `elementwise_affine` | M1 | R1, Survey |
+| 16 | `adaptive_norm` Rank-3 Sequence Support | Rank-3 `[B, T, C]` sequence modulation alongside rank-4 `[B, C, H, W]` | M1 | R1, Survey |
+| 17 | `matmul` Multi-Rank Batching | Generalize to rank 2, 3, and 4 batched matrix multiplication (`a[B, ..., N, K], b[B, ..., K, M] -> out[B, ..., N, M]`) | M1 | R1, Survey |
+| 18 | `gated_delta_attention` Operator Definition | `gated_delta_attention@1` in category `"sequence"` with KDA (`decay_kind="channel"`) and Gated DeltaNet (`decay_kind="head"`) | M2 | R2, Survey |
+| 19 | `gated_delta_attention` Input Projections | Causal short depthwise conv1d (`conv_size=4`), SiLU, per-head L2 Q/K norm, beta gate | M2 | R2, Survey |
+| 20 | `gated_delta_attention` Output Projections | Head-wise RMSNorm + low-rank sigmoid output gate + output projection $W_o$ | M2 | R2, Survey |
+| 21 | `gated_delta_attention` Chunkwise WY Forward | Pure PyTorch chunkwise parallel Tensor Core evaluation via `torch.linalg.solve_triangular` | M2 | R2, Survey |
+| 22 | `gated_delta_attention` Sequential Recurrence Reference | Exact step-by-step state recurrence in `_reference(module)` | M2 | R2, Survey |
+| 23 | `latent_attention` Operator Definition | `latent_attention@1` in category `"sequence"` implementing Multi-Head Latent Attention (MLA) | M2 | R2, Survey |
+| 24 | `latent_attention` LoRA Compression & NoPE Mode | KV LoRA rank, optional Q LoRA rank, decoupled RoPE, and `qk_rope_head_dim=0` NoPE mode | M2 | R2, Survey |
+| 25 | `l2_norm` Operator | `l2_norm@1` in category `"normalization"`: Parameter-free L2 norm with `dim` and `eps` | M2 | R2, Survey |
+| 26 | `adaln_zero` Operator | `adaln_zero@1` in category `"normalization"`: Rank-3 adaptive LayerNorm-Zero returning `out` and `gate` | M2 | R2, Survey |
+| 27 | `rope` Standalone Operator | `rope@1` in category `"sequence"`: Standalone rotary position embedding with `heads` and `theta` | M2 | R2, Survey |
+| 28 | `deconv1d` Operator | `conv_transpose1d@1` in category `"convolution"` with `policy="up2"` using `conv_transpose_axis` | M2 | R2, Survey |
+| 29 | `grn` Operator | `grn@1` in category `"normalization"`: Global Response Normalization for ConvNeXt-V2 | M2 | R2, Survey |
+| 30 | `sinusoidal_embed` Operator | `sinusoidal_embed@1` in category `"sequence"`: Deterministic log-spaced sinusoidal timestep embeddings | M2 | R2, Survey |
+| 31 | `cast` Operator | `cast@1` in category `"core"`: Explicit dtype conversion across edges with resolver integration | M2 | R2, Survey |
+| 32 | `pretrained` Explicit Shape Callback | Optional `shape_fn` on `registry.pretrained_provider` avoiding `torch.device("meta")` execution | M3 | R3, Survey |
+| 33 | `pretrained` Token-ID Input Support | Support `contract="ids"` (`int64`, rank 2 `[B, T]`) in `LocalProvider` and `pretrained` operator | M3 | R3, Survey |
+| 34 | `pretrained` Hardening Test Suite | Unit & integration tests for Triton/CUDA kernel wrapping and token-ID inputs | M3 | R3, Survey |
+| 35 | `llama_tiny` Network Recipe | 27 nodes, 918,656 parameters (`.hndl` and `.json` sidecars) | M4 | R4, Survey |
+| 36 | `deepseek_moe_tiny` Network Recipe | 19 nodes, 922,240 parameters (`.hndl` and `.json` sidecars) | M4 | R4, Survey |
+| 37 | `whisper_seq2seq_tiny` Network Recipe | 20 nodes, 159,296 parameters (multi-input `x` float32 + `tokens` int64) | M4 | R4, Survey |
+| 38 | `convnext_tiny` Network Recipe | 19 nodes, 76,876 parameters (`learned_scale` per instantiation) | M4 | R4, Survey |
+| 39 | `espcn_super_res` Network Recipe | 6 nodes, 26,796 parameters (sub-pixel conv with backward solver inference) | M4 | R4, Survey |
+| 40 | `kimi_linear_tiny` Network Recipe | 3:1 hybrid KDA + NoPE MLA, 956,384 parameters | M4 | R4, Survey |
+| 41 | `qwen3_gqa_qknorm` Network Recipe | GQA (4:2), QK-RMSNorm, high-theta RoPE, SwiGLU, 853,376 parameters | M4 | R4, Survey |
+| 42 | `dit_tiny` Network Recipe | AdaLN-Zero diffusion transformer, 695,472 parameters | M4 | R4, Survey |
+| 43 | Network Recipe Test Scaling | `tests/test_network_examples.py` scaling from 40 to 64 tests (exact params, JSON digest, CPU/CUDA grads) | M4 | R4, Survey |
+| 44 | Global Operator Count Synchronization | Synchronize count (69 -> 78) across `SPEC.md`, `IMPLEMENTATION.md`, `README.md`, `tests/test_package.py`, `tests/e2e/test_audit_remediation_e2e.py` | M4 | R4, Survey |
+| 45 | Documentation Generator Update | `uv run python -m hndl.docs` generating 79 operator pages and updated `docs/networks.md` passing `--check` | M4 | R4, Survey |
+| 46 | Repository Hygiene & Changelog | Maintain `## Unreleased` at top of `CHANGELOG.md`, incremental commits and pushes on `develop` | M4 | R4, AGENTS.md |
+| 47 | E2E Testing Suite (Tiers 1–4) | Requirement-driven opaque-box test cases across Tiers 1–4 publishing `TEST_READY.md` | E2E | Project Pattern |
+| 48 | Final Milestone Phase 1: 100% E2E Pass | Run full E2E test suite across Tiers 1–4 until 100% passing | Final | Project Pattern |
+| 49 | Final Milestone Phase 2: Adversarial Hardening | Tier 5 white-box challenger stress tests on edge cases and numerical limits | Final | Project Pattern |
+| 50 | Final Gate Verification & Victory Audit | Run ruff, pytest, benchmarks, docs check, git push, handoff to Sentinel | Final | Project Pattern |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Runtime Forward-Pass & Memory Optimization | Features 1–11 (`src/hndl/torch.py`, `pretrained.py`, `testing.py`, `docs.py`) | none | DONE (commit 57d9515) |
-| M2 | Operator Kernels & Forward-Pass Optimization | Features 12–22 (`src/hndl/operators/*.py`) | none | DONE (commit 45a6dec) |
-| M3 | Compiler, Solver & Network Construction | Features 23–34 (`src/hndl/resolver.py`, `operator.py`, `types.py`, `relations.py`, `settings.py`, `registry.py`, `capture.py`, `_parser.py`) | none | DONE (commit 05175b1) |
-| E2E | E2E Test Suite & Testing Infrastructure | Feature 35 (`tests/benchmark/*`, `tests/_network_examples.py`, `TEST_READY.md`) | none | DONE (TEST_READY.md published) |
-| M4 | Final Milestone: Full Verification, Packaging & PyPI Release | Features 36–38 (All test gates, benchmark verification, version bump, tag, GitHub release, PyPI publish) | M1, M2, M3, E2E | IN_PROGRESS (efb6a915-adfa-4bba-974f-0bf7f0cd96ba) |
+| M1 | Existing Operator SOTA Extensions (`Arg(..., since="0.9.0")`) | Features 1–17 (`src/hndl/operators/{attention,cross_attention,transformer_block,moe,conv1d,rms_norm,layer_norm,adaptive_norm,matmul}.py`, unit tests) | none | PLANNED |
+| M2 | New Tier 1 & Tier 2 Built-in Operators | Features 18–31 (`src/hndl/operators/{gated_delta_attention,latent_attention,l2_norm,adaln_zero,rope,deconv1d,grn,sinusoidal_embed,cast}.py`, `resolver.py`, unit tests) | none | PLANNED |
+| M3 | `pretrained` Provider Contract Hardening | Features 32–34 (`src/hndl/pretrained.py`, `src/hndl/operators/pretrained.py`, `tests/test_pretrained.py`) | none | PLANNED |
+| E2E | E2E Testing Track | Feature 47 (Requirement-driven test suite Tiers 1–4, `TEST_INFRA.md`, `TEST_READY.md`) | none | PLANNED |
+| M4 | Authored SOTA Network Recipes & Repository Hygiene | Features 35–46 (`examples/networks/`, `tests/test_network_examples.py`, count sync in `SPEC.md`, `IMPLEMENTATION.md`, docs, `CHANGELOG.md`) | M1, M2, M3 | PLANNED |
+| Final | Final Milestone: E2E Integration, Adversarial Hardening & Audit | Features 48–50 (Phase 1: 100% E2E pass, Phase 2: Tier 5 adversarial hardening, Victory Audit handoff) | M1, M2, M3, M4, E2E | PLANNED |
 
 ## Interface Contracts
-### `src/hndl/torch.py` (M1) ↔ `src/hndl/types.py` & `src/hndl/resolver.py` (M3)
-- `ResolvedPlan._validated_stamp: tuple[int, tuple]`: M3 stamps validated plans in `validate_concrete_plan` / `resolve_graph`. M1 checks this stamp in `_build()` to skip redundant validation.
-- `format_plan_table(plan, label)`: M3 exports `format_plan_table` in `src/hndl/types.py`. M1 calls it in `GraphModule.__repr__`.
-- `format_shape(shape)`: M3 exports `format_shape` in `src/hndl/types.py`. M1 and M3 call it for consistent tuple/str formatting.
+### `src/hndl/operators/` (M1 & M2) ↔ `src/hndl/resolver.py` & `src/hndl/types.py` (M2 & Core)
+- `cast@1`: `cast` operator uses `dtype` argument. `src/hndl/resolver.py:_propagate_dtypes` inspects `node.args["dtype"]` to propagate the casted dtype to downstream edges.
+- `deconv1d`: Uses `hndl.relations.conv_transpose_axis` on axis 2 with `policy="up2"`.
+- `Arg(..., since="0.9.0")`: Handled natively by `src/hndl/operator.py:omitted` and `src/hndl/torch.py:_construct` default rehydration.
 
-### `src/hndl/operators/` (M2) ↔ `src/hndl/relations.py` (M3)
-- `conv_axis` / `conv_output` / `conv_input_range`: M3 maintains function signature in `src/hndl/relations.py`. M2 consumes these helpers in `resblock.py` and `_pooling.py`.
-- `non_image(s)`: Extracted in `src/hndl/relations.py` or `src/hndl/operators/_common.py` and consumed by `linear.py`, `feed_forward.py`, `swiglu.py`, `moe.py`, and `hopfield.py`.
-- `eval_weight(module)`: Exported from `src/hndl/operators/_equalized.py` and consumed by `conv.py`, `conv1d.py`, `deconv.py`, and `linear.py`.
+### `src/hndl/pretrained.py` (M3) ↔ Network Recipes & Providers (M4 & External)
+- `registry.pretrained_provider(name, shape_fn=..., contract=...)`:
+  - If `shape_fn` is provided, `_traced_output_shapes` calls `shape_fn(args)` directly, bypassing `torch.device("meta")`.
+  - If `contract="ids"`, `LocalProvider` and `pretrained` operator accept `int64` inputs of rank 2 (`[B, T]`).
 
-### E2E Testing & Verification (E2E / M4) ↔ Runtime & Operators (M1, M2, M3)
-- `TEST_READY.md`: Created at project root by E2E track when benchmark consolidation and test runner contracts are ready.
-- All test runs use entry points: `uv run pytest`, `uv run pytest tests/benchmark/ -v -s`, `uv run python -m hndl.docs --check ...`, `uv run ruff check src tests examples scripts`.
+### Network Recipes (M4) ↔ Operator Catalog (M1 & M2)
+- `llama_tiny` & `deepseek_moe_tiny` & `convnext_tiny` & `whisper_seq2seq_tiny` & `espcn_super_res`: Ready today with existing catalog.
+- `qwen3_gqa_qknorm`: Consumes M1 `kv_heads`, `qk_norm="rms_norm"`, `rope_theta`, `ffn_kind="swiglu"`.
+- `kimi_linear_tiny`: Consumes M2 `gated_delta_attention` and `latent_attention` (with `qk_rope_head_dim=0`).
+- `dit_tiny`: Consumes M2 `adaln_zero` and `sinusoidal_embed`.
+
+### E2E Testing Track (E2E) ↔ Implementation Track (M1–M4, Final)
+- `TEST_READY.md`: Created at project root by E2E track when test cases (Tiers 1–4) and runner are ready.
+- All verification commands use standard entry points:
+  - `uv run pytest`
+  - `uv run pytest tests/benchmark/ -v -s`
+  - `uv run python -m hndl.docs --check`
+  - `uv run ruff check src tests examples scripts`
 
 ## Code Layout
-- `src/hndl/torch.py` — Owned exclusively by M1
-- `src/hndl/pretrained.py` — Owned exclusively by M1
-- `src/hndl/testing.py` — Owned exclusively by M1
-- `src/hndl/docs.py` — Owned exclusively by M1
-- `src/hndl/operators/*.py` — Owned exclusively by M2
-- `src/hndl/resolver.py` — Owned exclusively by M3
-- `src/hndl/operator.py` — Owned exclusively by M3
-- `src/hndl/types.py` — Owned exclusively by M3
-- `src/hndl/relations.py` — Owned exclusively by M3
-- `src/hndl/settings.py` — Owned exclusively by M3
-- `src/hndl/registry.py` — Owned exclusively by M3
-- `src/hndl/capture.py` — Owned exclusively by M3
-- `src/hndl/_parser.py` — Owned exclusively by M3
-- `tests/_network_examples.py` — Owned exclusively by E2E / M4
-- `tests/benchmark/*` — Owned exclusively by E2E / M4
-- `pyproject.toml`, `src/hndl/_version.py`, `CHANGELOG.md`, `README.md`, `SPEC.md`, `IMPLEMENTATION.md` — Owned exclusively by M4
+- `src/hndl/operators/{attention,cross_attention,transformer_block,moe,conv1d,rms_norm,layer_norm,adaptive_norm,matmul}.py` — Owned exclusively by M1
+- `tests/operators/test_{attention,cross_attention,transformer_block,moe,conv1d,rms_norm,layer_norm,adaptive_norm,matmul}.py` — Owned exclusively by M1
+- `src/hndl/operators/{gated_delta_attention,latent_attention,l2_norm,adaln_zero,rope,deconv1d,grn,sinusoidal_embed,cast}.py` — Owned exclusively by M2
+- `tests/operators/test_{gated_delta_attention,latent_attention,l2_norm,adaln_zero,rope,deconv1d,grn,sinusoidal_embed,cast}.py` — Owned exclusively by M2
+- `src/hndl/resolver.py` (`_propagate_dtypes` cast branch) — Owned exclusively by M2
+- `src/hndl/pretrained.py`, `src/hndl/operators/pretrained.py`, `tests/test_pretrained.py` — Owned exclusively by M3
+- `examples/networks/*` — Owned exclusively by M4
+- `tests/test_network_examples.py` — Owned exclusively by M4
+- `SPEC.md`, `IMPLEMENTATION.md`, `README.md`, `CHANGELOG.md`, `tests/test_package.py`, `tests/e2e/test_audit_remediation_e2e.py` — Owned exclusively by M4
+- `tests/e2e/test_sota_operators_e2e.py`, `TEST_INFRA.md`, `TEST_READY.md` — Owned exclusively by E2E

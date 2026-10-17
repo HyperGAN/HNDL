@@ -1,0 +1,13 @@
+# LLaMA-style causal decoder at toy scale: pre-RMSNorm, rotary position
+# embeddings, bias-free attention, and SwiGLU feed-forward blocks.
+
+h = embedding(256, 128, name="tok_emb")
+
+for _ in range(4):
+    a = attention(rms_norm(h, name="attn_norm"), 4, causal=True, rope=True, bias=False, name="attn")
+    h = add(h, a, name="attn_res")
+    f = swiglu(rms_norm(h, name="ffn_norm"), 384, bias=False, name="ffn")
+    h = add(h, f, name="ffn_res")
+
+rms_norm(h, name="final_norm")
+linear(bias=False, name="lm_head")

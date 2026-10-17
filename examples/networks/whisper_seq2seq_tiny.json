@@ -1,0 +1,14 @@
+{
+  "title": "Tiny Whisper Audio Seq2Seq Model",
+  "description": "A speech-to-text sequence-to-sequence model: 2-layer 1D convolutional audio stem downsampling 40-channel log-mel spectrogram frames by 2x, a 64-width transformer encoder, and a 16-token causal decoder with self-attention, acoustic cross-attention, and SwiGLU feed-forward networks.",
+  "input_shape": {
+    "x": ["B", 40, 64],
+    "tokens": ["B", 16]
+  },
+  "output_shape": ["B", 16, 128],
+  "input_dtype": {
+    "tokens": "int64"
+  },
+  "parameters": 159296,
+  "reference": "Architecture follows Radford et al. 2022, \"Robust Speech Recognition via Large-Scale Weak Supervision\" (Whisper, arXiv:2212.04356); parameter count checked against plain PyTorch: encoder (stem1 64·40·3+64 = 7,744, stem2 64·64·3+64 = 12,352, pos 32·64 = 2,048, block 64 + 4·(64·64+64) + 64 + 64·256+256 + 256·64+64 = 49,856; total 72,000) + decoder (emb 128·64 = 8,192, pos 16·64 = 1,024, self_norm 64, self_attn 4·(64·64) = 16,384, cross_norm 64, cross_attn 4·(64·64) = 16,384, ffn_norm 64, ffn 3·(64·192) = 36,864, out_norm 64, head 64·128 = 8,192; total 87,296); total 72,000 + 87,296 = 159,296."
+}

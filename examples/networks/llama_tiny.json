@@ -1,0 +1,9 @@
+{
+  "title": "Tiny LLaMA Causal Decoder",
+  "description": "A 64-token LLaMA-style causal language model: learned token embeddings, 4 transformer layers pairing pre-RMSNorm and 4-head RoPE causal attention with bias-free SwiGLU feed-forward networks, a final RMSNorm, and an untied vocabulary head whose width is inferred from the output contract.",
+  "input_shape": ["B", 64],
+  "output_shape": ["B", 64, 256],
+  "input_dtype": "int64",
+  "parameters": 918656,
+  "reference": "Architecture follows Touvron et al. 2023, \"LLaMA: Open and Efficient Foundation Language Models\" (arXiv:2302.13971) and Touvron et al. 2023, \"Llama 2: Open Foundation and Fine-Tuned Chat Models\" (arXiv:2307.09288); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 4 layers with (RMSNorm 128 + 4·(128·128) attention + RMSNorm 128 + 3·(128·384) SwiGLU) = 4·213,248 = 852,992, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 852,992 + 128 + 32,768 = 918,656."
+}

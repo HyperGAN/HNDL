@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Authored SOTA network recipes**: Added 8 frontier neural network recipes with complete `.hndl` declarations and `.json` sidecars in `examples/networks/`:
+  - `llama_tiny`: 64-token LLaMA-style causal language model with pre-RMSNorm, 4-head RoPE causal attention, and bias-free SwiGLU feed-forward networks (918,656 parameters, 27 nodes).
+  - `deepseek_moe_tiny`: Hybrid shared and routed mixture-of-experts causal decoder pairing pre-RMSNorm and RoPE attention with parallel shared SwiGLU and top-2-of-4 routed experts (922,240 parameters, 19 nodes).
+  - `whisper_seq2seq_tiny`: Audio speech recognition seq2seq architecture with 2-layer 1D convolutional acoustic stem, bidirectional transformer encoder, and causal decoder with cross-attention over heterogeneous float32 spectrogram and int64 token inputs (159,296 parameters, 20 nodes).
+  - `convnext_tiny`: ConvNeXt vision classifier with 4×4 patchifying stem convolution, 7×7 depthwise convolutions with GroupNorm, inverted 1×1 pointwise bottlenecks (4× expansion), and learned residual scale (76,876 parameters, 19 nodes).
+  - `espcn_super_res`: Efficient Sub-Pixel Convolutional Neural Network for 2× image super-resolution exercising backward channel inference through `pixel_shuffle(2)` and output contract (26,796 parameters, 6 nodes).
+  - `kimi_linear_tiny`: 3:1 hybrid causal decoder interleaving 3 Kimi Delta Attention (KDA) layers with fine-grained channel-wise decay and 1 NoPE Multi-Head Latent Attention (MLA) layer (955,808 parameters).
+  - `qwen3_gqa_qknorm`: Qwen3-style causal decoder pairing pre-RMSNorm, 4:2 Grouped-Query Attention, per-head QK-RMSNorm, high-frequency RoPE ($\theta=10^6$), and bias-free SwiGLU (853,376 parameters).
+  - `dit_tiny`: Diffusion Transformer at 32×32 image scale with 4×4 patch embedding stem, AdaLN-Zero conditioning modulation, QK-normalized self-attention, SwiGLU feed-forwards, and sub-pixel unpatchify head (695,472 parameters).
+- **Network recipe test suite scaling**: Scaled `tests/test_network_examples.py` across all 21 authored network recipes (64 test cases covering sidecar metadata completeness, round-trip JSON semantic digest invariance, and CPU/CUDA module construction and finite autograd backward gradient checks).
+- **Global operator catalog count synchronization**: Updated operator count from 69 to 78 across 12 categories in `SPEC.md`, `IMPLEMENTATION.md`, `README.md`, `tests/test_package.py`, and `tests/e2e/test_audit_remediation_e2e.py`.
 - **`conv1d` causal & sequence extensions**: Added `causal=True` left-padding with a bijective $L_{out} == L_{in}$ constraint solver relation when `stride=1`, and added `channels_last=True` for direct `[B, T, C]` sequence evaluation.
 - **`rms_norm` zero-centered scaling**: Added `zero_centered=True` initializing weights to `0.0` and evaluating as $(1 + \text{weight}) \cdot \text{RMSNorm}(x)$ for Gemma-style models.
 - **`layer_norm` bias-free option**: Added `bias=False` to `LayerNorm` for constructing bias-free LayerNorm blocks.

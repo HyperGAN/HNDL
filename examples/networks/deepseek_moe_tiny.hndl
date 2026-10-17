@@ -1,0 +1,15 @@
+# Hybrid Shared + Routed Mixture-of-Experts causal decoder (DeepSeekMoE / Qwen-MoE style).
+
+h = embedding(256, 128, name="tok_emb")
+
+for _ in range(2):
+    a = attention(rms_norm(h, name="attn_norm"), 4, causal=True, rope=True, bias=False, name="attn")
+    h = add(h, a, name="attn_res")
+    n = rms_norm(h, name="ffn_norm")
+    shared = swiglu(n, 256, bias=False, name="shared_expert")
+    routed = moe(n, 4, 256, top_k=2, activation="silu", name="routed_experts")
+    combined = add(shared, routed, name="moe_sum")
+    h = add(h, combined, name="ffn_res")
+
+rms_norm(h, name="final_norm")
+linear(bias=False, name="lm_head")

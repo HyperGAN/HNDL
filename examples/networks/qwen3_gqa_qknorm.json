@@ -1,0 +1,9 @@
+{
+  "title": "Tiny Qwen3 GQA QK-Norm Causal Decoder",
+  "description": "A 64-token Qwen3-style causal language model: learned token embeddings, 4 transformer blocks combining pre-RMSNorm, Grouped-Query Attention (4 query heads, 2 key/value heads), per-head QK-RMSNorm, high-frequency RoPE (theta = 1,000,000), and bias-free SwiGLU feed-forward networks, followed by a final RMSNorm and vocabulary head.",
+  "input_shape": ["B", 64],
+  "output_shape": ["B", 64, 256],
+  "input_dtype": "int64",
+  "parameters": 853376,
+  "reference": "Architecture follows Qwen Team 2024/2025, \"Qwen2.5 Technical Report\" (arXiv:2412.15115); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 4 blocks with (norm1 128 + q_proj 128·128 + k_proj 128·64 + v_proj 128·64 + q_norm 32 + k_norm 32 + o_proj 128·128 + norm2 128 + SwiGLU 3·(128·384)) = 4·196,928 = 787,712, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 787,712 + 128 + 32,768 = 853,376."
+}

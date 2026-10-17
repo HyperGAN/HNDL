@@ -1,0 +1,8 @@
+{
+  "title": "ESPCN 2x Super-Resolution Network",
+  "description": "An Efficient Sub-Pixel Convolutional Neural Network for 2× image super-resolution: feature extraction convolutions at low resolution followed by a sub-pixel convolution layer with pixel_shuffle(2) where output channel width (12 = 3 × 2²) is automatically inferred backward by HNDL's constraint solver.",
+  "input_shape": ["B", 3, 16, 16],
+  "output_shape": ["B", 3, 32, 32],
+  "parameters": 26796,
+  "reference": "Architecture follows Shi et al. 2016, \"Real-Time Single Image and Video Super-Resolution Using an Efficient Sub-Pixel Convolutional Neural Network\" (CVPR 2016, arXiv:1609.05158); parameter count checked against plain PyTorch: conv1 64·3·5·5+64 = 4,864, conv2 32·64·3·3+32 = 18,464, subpixel_conv 12·32·3·3+12 = 3,468, pixel_shuffle 0; total 4,864 + 18,464 + 3,468 = 26,796."
+}

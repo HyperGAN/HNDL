@@ -41,17 +41,17 @@ def test_network_builds_and_runs(name, device):
     plan = resolve(source, **kwargs)
     model = build(plan, device=device, initialization_seed=1)
     inputs = {}
-    for name, entry in plan.inputs.items():
+    for port_name, entry in plan.inputs.items():
         shape = (2, *entry["shape"][1:])
         if entry["dtype"] in ("int64", "int32"):
-            inputs[name] = torch.randint(0, 8, shape, device=device, dtype=getattr(torch, entry["dtype"]))
+            inputs[port_name] = torch.randint(0, 8, shape, device=device, dtype=getattr(torch, entry["dtype"]))
         else:
-            inputs[name] = torch.randn(shape, device=device, dtype=DTYPES[plan.dtype], requires_grad=True)
+            inputs[port_name] = torch.randn(shape, device=device, dtype=DTYPES[plan.dtype], requires_grad=True)
     outputs = model(**inputs)
     assert set(outputs) == set(plan.outputs)
-    for name, entry in plan.outputs.items():
-        assert tuple(outputs[name].shape) == (2, *entry["shape"][1:])
-        assert outputs[name].isfinite().all()
+    for port_name, entry in plan.outputs.items():
+        assert tuple(outputs[port_name].shape) == (2, *entry["shape"][1:])
+        assert outputs[port_name].isfinite().all()
     sum(output.float().square().mean() for output in outputs.values()).backward()
     trainable = [p for p in model.parameters() if p.requires_grad]
     assert trainable and all(p.grad is not None for p in trainable)

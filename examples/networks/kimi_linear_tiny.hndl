@@ -1,0 +1,15 @@
+# Kimi Linear 3:1 hybrid causal decoder: 3 Kimi Delta Attention (KDA) layers
+# with channel-wise decay and causal short conv1d, interleaved with 1 global
+# NoPE Multi-Head Latent Attention (MLA) layer and SwiGLU feed-forward blocks.
+
+h = embedding(256, 128, name="tok_emb")
+
+for _ in range(3):
+    h = add(h, gated_delta_attention(rms_norm(h, name="kda_norm"), 4, decay_kind="channel", conv_size=4, name="kda"))
+    h = add(h, swiglu(rms_norm(h, name="ffn_norm"), 384, bias=False, name="ffn"))
+
+h = add(h, latent_attention(rms_norm(h, name="mla_norm"), 4, kv_lora_rank=32, qk_rope_head_dim=0, causal=True, name="mla"))
+h = add(h, swiglu(rms_norm(h, name="mla_ffn_norm"), 384, bias=False, name="mla_ffn"))
+
+rms_norm(h, name="final_norm")
+linear(bias=False, name="lm_head")

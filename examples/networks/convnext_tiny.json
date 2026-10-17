@@ -1,0 +1,8 @@
+{
+  "title": "Tiny ConvNeXt Vision Classifier",
+  "description": "A ConvNeXt-style convolutional vision network: 4×4 patchifying convolution, 2 stages of 7×7 depthwise convolutions with GroupNorm, inverted 1×1 pointwise convolutions (4× expansion), and learned residual scale, followed by global average pooling and a linear classifier.",
+  "input_shape": ["B", 3, 32, 32],
+  "output_shape": ["B", 10],
+  "parameters": 76876,
+  "reference": "Architecture follows Liu et al. 2022, \"A ConvNet for the 2020s\" (ConvNeXt, CVPR 2022, arXiv:2201.03545) and Woo et al. 2023, \"ConvNeXt V2\" (arXiv:2301.00808); parameter count checked against plain PyTorch: patch_stem 64·3·4·4+64 = 3,136, stem_norm 64·2 = 128, 2 blocks each (dwconv 64·1·7·7+64 = 3,200, norm 64·2 = 128, pwconv1 256·64·1·1+256 = 16,640, pwconv2 64·256·1·1+64 = 16,448, gamma 1; block total 36,417) = 72,834, head_norm 64·2 = 128, head 64·10+10 = 650; total 3,136 + 128 + 72,834 + 128 + 650 = 76,876."
+}

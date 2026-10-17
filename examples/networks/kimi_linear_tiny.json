@@ -1,0 +1,9 @@
+{
+  "title": "Tiny Kimi Linear Hybrid 3:1 Decoder",
+  "description": "A 64-token Kimi Linear hybrid language model: learned token embeddings, 3 Kimi Delta Attention (KDA) layers with fine-grained channel-wise decay, causal short conv1d, per-head L2 normalization and SwiGLU FFNs, interleaved with 1 global NoPE Multi-Head Latent Attention (MLA) layer with compressed KV latent caching, followed by final RMSNorm and linear head.",
+  "input_shape": ["B", 64],
+  "output_shape": ["B", 64, 256],
+  "input_dtype": "int64",
+  "parameters": 955808,
+  "reference": "Architecture follows Moonshot AI 2025, \"Kimi Linear: An Expressive, Efficient Attention Architecture\" (arXiv:2510.26692) and DeepSeek-AI 2024, \"DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model\" (arXiv:2405.04434); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 3 KDA blocks each (RMSNorm 128 + KDA 84,736 + RMSNorm 128 + SwiGLU 147,456 = 232,448) = 697,344, 1 MLA block (RMSNorm 128 + MLA 45,088 + RMSNorm 128 + SwiGLU 147,456 = 192,800), final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 697,344 + 192,800 + 128 + 32,768 = 955,808."
+}

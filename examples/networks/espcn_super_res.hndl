@@ -1,0 +1,10 @@
+# ESPCN (Shi et al. 2016) 2x image super-resolution network: feature maps stay
+# at 16x16 and the final conv channel count (12) is inferred backward from
+# pixel_shuffle(2) and the [B, 3, 32, 32] output contract.
+
+conv(64, kernel_size=5, padding=2, name="conv1")
+tanh()
+conv(32, kernel_size=3, padding=1, name="conv2")
+tanh()
+conv(kernel_size=3, padding=1, name="subpixel_conv")
+pixel_shuffle(2, name="upscale")

@@ -1070,11 +1070,11 @@ class TestTier2BoundaryCases:
         assert "0.1.2" not in impl_text, "Finding H-08: Stale version 0.1.2 found in IMPLEMENTATION.md"
         assert "0.1.2" not in spec_text, "Finding H-08: Stale version 0.1.2 found in SPEC.md"
 
-    def test_tier2_f10_h08_spec_operator_count_equals_69(self):
-        """[Finding H-08] IMPLEMENTATION.md must record 69 operators across 12 categories, not 'Fifty-nine'."""
+    def test_tier2_f10_h08_spec_operator_count_equals_78(self):
+        """[Finding H-08] IMPLEMENTATION.md must record 78 operators across 12 categories, not 'Fifty-nine'."""
         impl_text = (REPO_ROOT / "IMPLEMENTATION.md").read_text(encoding="utf-8")
         assert "Fifty-nine" not in impl_text, "Finding H-08: Stale 'Fifty-nine operators' in IMPLEMENTATION.md"
-        assert "69" in impl_text, "Finding H-08: Operator count 69 missing from IMPLEMENTATION.md"
+        assert "78" in impl_text, "Finding H-08: Operator count 78 missing from IMPLEMENTATION.md"
 
     def test_tier2_f10_h08_spec_arg_lists_since_parameter(self):
         """[Finding H-08] SPEC.md Arg signature must document the 'since' parameter."""
