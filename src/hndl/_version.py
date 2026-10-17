@@ -1,3 +1,3 @@
 """Package version (also recorded in distribution metadata)."""
 
-__version__ = "0.8.2"
+__version__ = "0.9.0"

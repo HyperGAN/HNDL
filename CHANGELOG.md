@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (2026-10-17)
 
 - **MoE float16 backward autograd stability**: Clamped router score summation denominator to `1e-4` in `moe` sigmoid scoring, preventing reciprocal overflow to `+inf` and subsequent `NaN` gradients during float16 backward backpropagation.
 - **Numerical stability in MoE and Gated Delta Attention**: Fixed float16 underflow in `moe` sigmoid scoring router and `gated_delta_attention` cumulative decay, preventing `NaN` outputs during reduced-precision evaluation.
