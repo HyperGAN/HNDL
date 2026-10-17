@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **`cast` operator & edge dtype propagation**: Added `cast@1` (`core` category) supporting explicit dtype conversions across graph edges (`float32`, `float16`, `bfloat16`, `float64`, `int64`, `int32`, `bool`, and `'compute'`), with resolver edge propagation updated to track cast output dtypes.
+- **`l2_norm` operator**: Added `l2_norm@1` (`normalization` category) providing parameter-free L2 normalization with configurable `dim` and numerical `eps`.
 
 ## 0.8.2 (2026-10-15)
 
