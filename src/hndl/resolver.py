@@ -191,8 +191,12 @@ def _propagate_dtypes(graph, ordered, specs):
                 raise HNDLError("E_DTYPE", f"Port {port} expects {expected} but {ref} carries {dtypes[ref]}",
                                 node=node.id, **source_location(node.source))
         for port in node.outputs:
-            declared = spec.port_dtype(port, graph.dtype)
-            dtypes[f"node:{node.id}/{port}"] = graph.dtype if declared == "any" else declared
+            if spec.identity == "cast" and "dtype" in node.args:
+                target_dtype = node.args["dtype"]
+                dtypes[f"node:{node.id}/{port}"] = graph.dtype if target_dtype == "compute" else target_dtype
+            else:
+                declared = spec.port_dtype(port, graph.dtype)
+                dtypes[f"node:{node.id}/{port}"] = graph.dtype if declared == "any" else declared
     return dtypes
 
 

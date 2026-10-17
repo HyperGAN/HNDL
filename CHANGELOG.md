@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`cast` operator & edge dtype propagation**: Added `cast@1` (`core` category) supporting explicit dtype conversions across graph edges (`float32`, `float16`, `bfloat16`, `float64`, `int64`, `int32`, `bool`, and `'compute'`), with resolver edge propagation updated to track cast output dtypes.
+
 ## 0.8.2 (2026-10-15)
 
 - **C-speed steady-state module verification**: `GraphModule._execute` implements a 2-tier store verification fast path caching module and parameter IDs, validating steady-state forward passes in C without per-call tuple or `torch.device` allocations (<1 µs on `mlp`, <10 µs on `resnet18`).
