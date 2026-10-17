@@ -13,9 +13,11 @@ their ``sha256`` has been verified.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
+import inspect
 import json
 import os
 from pathlib import Path
@@ -24,6 +26,7 @@ from typing import Any
 import torch
 
 from .errors import HNDLError
+from .registry import MAX_PROVIDER_NAME, Registry
 from .types import Immutable
 
 OUTPUTS = ("features", "pooled", "logits", "embeds")
@@ -329,6 +332,125 @@ def provider_readout(provider, name):
     return readout
 
 
+def provider_shape_fn(name: str):
+    """The optional shape_fn registered for ``name`` on the active registry."""
+    registry = Registry.active()
+    if registry is None:
+        return None
+    getter = getattr(registry, "pretrained_shape_fn", None)
+    if getter is not None:
+        return getter(name)
+    return getattr(registry, "_pretrained_shape_fns", {}).get(name)
+
+
+def provider_contract(name: str):
+    """The contract registered for ``name`` on the active registry."""
+    registry = Registry.active()
+    if registry is None:
+        return "tensor"
+    getter = getattr(registry, "pretrained_contract", None)
+    if getter is not None:
+        return getter(name)
+    return getattr(registry, "_pretrained_contracts", {}).get(name, "tensor")
+
+
+def _invoke_shape_fn(shape_fn, input_shape, output="features", layer="", readout="", layers=()):
+    """Invoke provider shape_fn callback supporting flexible positional or keyword signatures."""
+    kwargs = {"output": output, "layer": layer, "readout": readout, "layers": layers}
+    try:
+        sig = inspect.signature(shape_fn)
+        has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        accepted_kwargs = {}
+        for k, v in kwargs.items():
+            if has_var_keyword or k in sig.parameters:
+                accepted_kwargs[k] = v
+        return shape_fn(input_shape, **accepted_kwargs)
+    except (TypeError, ValueError):
+        try:
+            return shape_fn(input_shape, **kwargs)
+        except TypeError:
+            try:
+                return shape_fn(input_shape, output)
+            except TypeError:
+                return shape_fn(input_shape)
+
+
+def _enhanced_pretrained_provider(self, name, build, readouts=None, *args, contract="tensor", shape_fn=None, **kwargs):
+    """Register a trusted architecture builder for ``pretrained(..., provider=name)``.
+
+    ``readouts`` optionally maps a name to a ``callable(model, x)`` returning
+    one tensor, selected in configuration with ``readout="<name>"`` when the
+    model's own ``forward`` is not what the network wants.
+
+    ``contract`` declares what inputs the model consumes: ``"tensor"`` (default,
+    floating-point), ``"ids"`` (rank 2 [B, T] int64 token IDs), or ``"pixels"``.
+
+    ``shape_fn`` optionally provides an explicit output shape calculation
+    ``callable(input_shape, output, **kwargs) -> tuple[int, ...]``, bypassing
+    PyTorch meta-device tracing during graph resolution.
+    """
+    if len(args) == 1:
+        contract = args[0]
+    elif len(args) >= 2:
+        contract = args[0]
+        shape_fn = args[1]
+    if "contract" in kwargs:
+        contract = kwargs["contract"]
+    if "shape_fn" in kwargs:
+        shape_fn = kwargs["shape_fn"]
+
+    if type(name) is not str or not name or len(name) > MAX_PROVIDER_NAME:
+        raise HNDLError("E_REGISTRY", f"A pretrained provider name must be a string of 1-{MAX_PROVIDER_NAME} characters")
+    if not callable(build):
+        raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} must be a callable returning an nn.Module")
+    if name in self._pretrained_providers:
+        raise HNDLError("E_REGISTRY", f"Duplicate pretrained provider {name!r}")
+    if readouts is not None and not isinstance(readouts, Mapping):
+        raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} readouts must be a mapping of name to callable(model, x)")
+    if shape_fn is not None and not callable(shape_fn):
+        raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} shape_fn must be a callable")
+
+    if isinstance(contract, Contract):
+        contract_str = contract.kind
+    elif isinstance(contract, str):
+        contract_str = contract
+    else:
+        raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} contract must be a string or Contract, got {type(contract).__name__}")
+    if contract_str not in ("tensor", "ids", "pixels"):
+        raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} contract must be 'tensor', 'ids', or 'pixels', got {contract_str!r}")
+
+    self._pretrained_providers[name] = build
+    self._pretrained_readouts[name] = {}
+    if not hasattr(self, "_pretrained_shape_fns"):
+        self._pretrained_shape_fns = {}
+    if not hasattr(self, "_pretrained_contracts"):
+        self._pretrained_contracts = {}
+    if shape_fn is not None:
+        self._pretrained_shape_fns[name] = shape_fn
+    self._pretrained_contracts[name] = contract_str
+
+    for readout_name, readout in (readouts or {}).items():
+        self.pretrained_readout(name, readout_name, readout)
+    return build
+
+
+def _pretrained_shape_fn(self, name):
+    """The registered shape_fn for ``name``, or None."""
+    shape_fns = getattr(self, "_pretrained_shape_fns", {})
+    return shape_fns.get(name)
+
+
+def _pretrained_contract(self, name):
+    """The registered contract kind for ``name``, defaulting to 'tensor'."""
+    contracts = getattr(self, "_pretrained_contracts", {})
+    return contracts.get(name, "tensor")
+
+
+Registry.pretrained_provider = _enhanced_pretrained_provider
+Registry.pretrained_shape_fn = _pretrained_shape_fn
+Registry.pretrained_contract = _pretrained_contract
+
+
 @dataclass(frozen=True)
 class Contract(Immutable):
     """What the wrapped model consumes."""
@@ -617,9 +739,14 @@ class LocalProvider:
                   "one output of the node, in order")
         self.build = provider_build(source.config["provider"])
         self.read = provider_readout(source.config["provider"], readout) if readout else None
+        self._contract = provider_contract(source.config["provider"])
+        self.shape_fn = provider_shape_fn(source.config["provider"])
 
     def contract(self):
-        return Contract("tensor")
+        contract = self._contract
+        if isinstance(contract, Contract):
+            return contract
+        return Contract(contract)
 
     def instantiate(self, weights):
         model = self.build()
@@ -692,23 +819,56 @@ def _traced(source_key, config_path, output, component, input_shape, provider, c
     # The builder and readout are part of the cache key: two registries may bind the same names.
     build = provider_build(provider) if provider else None
     read = provider_readout(provider, readout) if provider and readout else None
+    shape_fn = provider_shape_fn(provider) if provider else None
     source = resolve_source(source_key, config_path, provider, checksum)
     return _traced_output_shapes(source_key, config_path, output, component, input_shape, provider, checksum, layer,
-                                 readout, layers, build, read, source.revision)
+                                 readout, layers, build, read, source.revision, shape_fn)
 
 
 @lru_cache(maxsize=256)
 def _traced_output_shapes(source_key, config_path, output, component, input_shape, provider_name, checksum, layer,
-                          readout, layers, build, read, revision=""):
+                          readout, layers, build, read, revision="", shape_fn=None):
     source = resolve_source(source_key, config_path, provider_name, checksum)
     provider = provider_for(source, output, component, layer, readout, layers)
     kind = provider.contract().kind
-    with torch.device("meta"):
-        model = provider.instantiate(weights=False)
-        model.eval()
-        dtype = torch.long if kind == "ids" else torch.float32
-        probe = torch.zeros((2, *input_shape[1:]), dtype=dtype)
+    fn = shape_fn if shape_fn is not None else (provider_shape_fn(provider_name) if provider_name else None)
+    if fn is not None:
         try:
+            raw = _invoke_shape_fn(fn, input_shape, output=output, layer=layer, readout=readout, layers=layers)
+        except HNDLError:
+            raise
+        except Exception as exc:
+            through = (f" through readout {readout!r}" if readout
+                       else f" through layers {list(layers)}" if layers else "")
+            _fail(f"{source.location}: shape_fn failed for input shape {list(input_shape)}{through}: "
+                  f"{type(exc).__name__}: {exc}")
+        if isinstance(raw, torch.Tensor):
+            raw = raw.shape
+        if layers:
+            if isinstance(raw, (list, tuple)) and len(raw) == len(layers) and all(isinstance(s, (list, tuple, torch.Size)) for s in raw):
+                results = tuple(raw)
+            elif len(layers) == 1 and isinstance(raw, (list, tuple, torch.Size)) and not (raw and isinstance(raw[0], (list, tuple, torch.Size))):
+                results = (raw,)
+            else:
+                results = tuple(raw) if isinstance(raw, (list, tuple)) else (raw,)
+        else:
+            if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], (list, tuple, torch.Size)):
+                results = tuple(raw)
+            else:
+                results = (raw,)
+        shapes = []
+        for s in results:
+            s_tuple = tuple(s)
+            norm = (input_shape[0], *tuple(int(d) for d in s_tuple[1:]))
+            shapes.append(norm)
+        return tuple(shapes)
+
+    with torch.device("meta"):
+        try:
+            model = provider.instantiate(weights=False)
+            model.eval()
+            dtype = torch.long if kind == "ids" else torch.float32
+            probe = torch.zeros((2, *input_shape[1:]), dtype=dtype)
             result = provider.select(provider.call(model, probe, kind))
         except HNDLError:
             raise

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`conv1d` causal & sequence extensions**: Added `causal=True` left-padding with a bijective $L_{out} == L_{in}$ constraint solver relation when `stride=1`, and added `channels_last=True` for direct `[B, T, C]` sequence evaluation.
+- **`rms_norm` zero-centered scaling**: Added `zero_centered=True` initializing weights to `0.0` and evaluating as $(1 + \text{weight}) \cdot \text{RMSNorm}(x)$ for Gemma-style models.
+- **`layer_norm` bias-free option**: Added `bias=False` to `LayerNorm` for constructing bias-free LayerNorm blocks.
+- **`adaptive_norm` rank-3 sequence support**: Extended `adaptive_norm` to accept rank-3 sequence tensors `[B, T, C]` alongside rank-4 image tensors `[B, C, H, W]`.
+- **`matmul` multi-rank batching**: Generalized `matmul` to arbitrary leading batch dimensions (`a[B, ..., N, K], b[B, ..., K, M] -> out[B, ..., N, M]`), supporting both rank-3 and rank-4 multi-head batched matrix multiplication.
+
+- **Pretrained provider contract hardening**: Registered architecture providers on `registry.pretrained_provider` can specify an optional `shape_fn` callback to compute output shapes directly without executing on PyTorch's `meta` device (preventing crashes on custom Triton and CUDA kernels lacking fake-tensor registrations), and can declare `contract="ids"` to consume rank-2 `[B, T]` `int64` token IDs without triggering `E_DTYPE`.
 - **`cast` operator & edge dtype propagation**: Added `cast@1` (`core` category) supporting explicit dtype conversions across graph edges (`float32`, `float16`, `bfloat16`, `float64`, `int64`, `int32`, `bool`, and `'compute'`), with resolver edge propagation updated to track cast output dtypes.
 - **`l2_norm` operator**: Added `l2_norm@1` (`normalization` category) providing parameter-free L2 normalization with configurable `dim` and numerical `eps`.
 - **`grn` operator**: Added `grn@1` (`normalization` category) implementing ConvNeXt-V2 Global Response Normalization with spatial L2 channel pooling and zero-initialized recalibration parameters.

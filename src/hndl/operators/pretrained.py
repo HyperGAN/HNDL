@@ -71,7 +71,7 @@ def _relation(s):
         "config": Arg(str, "", positional=False, help="Path to config.json when source is a bare .safetensors file."),
         "provider": Arg(str, "", positional=False,
                         help="Name of an architecture builder the host registered with "
-                             "registry.pretrained_provider(name, build); required for a local .pth state dict."),
+                             "registry.pretrained_provider(name, build, ...); required for a local .pth state dict."),
         "sha256": Arg(str, "", positional=False,
                       help="The 64 hex character digest of a local .pth file, verified before it is loaded."),
         "layer": Arg(str, "", positional=False,
@@ -133,9 +133,10 @@ class Pretrained(nn.Module):
     must match exactly (``strict=True``). ``layer`` names a submodule by its
     dotted ``named_modules()`` path and returns that submodule's output through
     a forward hook, stopping the pass there; omitted, the node returns the
-    model's own output. Provider checkpoints declare no input contract, so the
-    graph input shape is whatever the module accepts (floating point); the
-    meta-device trace checks it.
+    model's own output. A registered provider defaults to consuming floating-point
+    tensors, but may declare ``contract="ids"`` (rank 2 ``[B, T]`` ``int64`` token IDs)
+    to consume integer sequences, and may register an optional ``shape_fn`` callback
+    to resolve output shapes directly without meta-device tracing.
 
     ``layers=("layer1", "layer2", "layer3")`` returns several intermediates
     from *one* forward pass. The node gains one output port per entry ---

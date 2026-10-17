@@ -1,12 +1,14 @@
 """The generic ``pretrained`` operator: sources, contracts, freezing, dtypes, restore checks."""
 
+import hashlib
 import json
 import shutil
 
 import pytest
 import torch
+from torch import nn
 
-from hndl import HNDLError, ResolvedPlan, resolve
+from hndl import HNDLError, Registry, ResolvedPlan, resolve
 from hndl import pretrained as sources
 from hndl.torch import build, network, parameter_counts
 
@@ -291,3 +293,209 @@ class TestHubCheckpoints:
         dino = resolve('pretrained("hf://facebook/dinov2-small", output="pooled")', input_shape=("B", 3, 518, 518),
                        output_shape=("B", 384))
         assert dino.nodes[0].output_shapes["out"] == ("B", 384)
+
+
+class MetaCrashingModule(nn.Module):
+    """Simulates a custom Triton/CUDA kernel layer that cannot run on PyTorch meta device."""
+
+    def __init__(self):
+        super().__init__()
+        if torch.empty(0).device.type == "meta":
+            raise RuntimeError("Custom Triton/CUDA kernel does not support meta device")
+        self.linear = nn.Linear(16, 32)
+        self.layer1 = nn.Linear(16, 24)
+        self.layer2 = nn.Linear(24, 32)
+
+    def forward(self, x):
+        if x.device.type == "meta":
+            raise RuntimeError("Custom Triton/CUDA kernel forward does not support meta device")
+        return self.layer2(self.layer1(x))
+
+
+class TokenEmbeddingProvider(nn.Module):
+    """Local provider that consumes int64 token IDs and outputs embeddings."""
+
+    def __init__(self, vocab_size=64, embed_dim=32):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.proj = nn.Linear(embed_dim, 48)
+
+    def forward(self, x):
+        if x.dtype not in (torch.int64, torch.long):
+            raise TypeError(f"Expected int64 tensor, got {x.dtype}")
+        if x.ndim != 2:
+            raise ValueError(f"Expected rank 2 [B, T], got rank {x.ndim}")
+        return self.proj(self.embedding(x))
+
+
+def test_provider_with_shape_fn_bypasses_meta_device(tmp_path):
+    reg = Registry.builtins()
+    path = tmp_path / "meta_crash.pth"
+    torch.save(MetaCrashingModule().state_dict(), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    # 1. Register with shape_fn: resolution and build MUST succeed without meta crash
+    def shape_fn(input_shape, **kwargs):
+        return (input_shape[0], 32)
+
+    reg.pretrained_provider("meta_kernel", MetaCrashingModule, shape_fn=shape_fn)
+    sources.resolve_source.cache_clear()
+    sources.output_shape.cache_clear()
+
+    plan = resolve(f'pretrained("{path}", provider="meta_kernel", sha256="{digest}")',
+                   input_shape=("B", 16), output_shape=("B", 32), registry=reg)
+    assert plan.nodes[0].output_shapes["out"] == ("B", 32)
+
+    # Build and verify forward pass on CPU
+    model = build(plan, device="cpu")
+    x = torch.randn(3, 16)
+    out = model(x=x)["output"]
+    assert out.shape == (3, 32)
+
+    # 2. Register without shape_fn: resolution MUST fail because meta device crashes
+    reg_fail = Registry.builtins()
+    reg_fail.pretrained_provider("meta_kernel_fail", MetaCrashingModule)
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*Custom Triton/CUDA kernel"):
+        resolve(f'pretrained("{path}", provider="meta_kernel_fail", sha256="{digest}")',
+                input_shape=("B", 16), output_shape=("B", 32), registry=reg_fail)
+
+
+def test_provider_with_shape_fn_multi_layer_outputs(tmp_path):
+    reg = Registry.builtins()
+    path = tmp_path / "multi_layer.pth"
+    torch.save(MetaCrashingModule().state_dict(), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def shape_fn(input_shape, layers=(), **kwargs):
+        layer_dims = {"layer1": 24, "layer2": 32}
+        return tuple((input_shape[0], layer_dims[name]) for name in layers)
+
+    reg.pretrained_provider("multi_layer_provider", MetaCrashingModule, shape_fn=shape_fn)
+    sources.resolve_source.cache_clear()
+    sources.output_shape.cache_clear()
+
+    plan = resolve(f'f1, f2 = pretrained("{path}", provider="multi_layer_provider", sha256="{digest}", '
+                   f'layers=("layer1", "layer2"))',
+                   input_shape=("B", 16), output_shape={"f1": ("B", 24), "f2": ("B", 32)}, registry=reg)
+    assert plan.nodes[0].output_shapes["out0"] == ("B", 24)
+    assert plan.nodes[0].output_shapes["out1"] == ("B", 32)
+
+
+def test_provider_shape_fn_signature_flexibility(tmp_path):
+    reg = Registry.builtins()
+    path = tmp_path / "signatures.pth"
+    torch.save(MetaCrashingModule().state_dict(), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    # Signature with only input_shape
+    reg.pretrained_provider("p_single_arg", MetaCrashingModule, shape_fn=lambda s: (s[0], 32))
+    plan1 = resolve(f'pretrained("{path}", provider="p_single_arg", sha256="{digest}")',
+                    input_shape=("B", 16), output_shape=("B", 32), registry=reg)
+    assert plan1.nodes[0].output_shapes["out"] == ("B", 32)
+
+    # Signature with input_shape and output
+    reg.pretrained_provider("p_two_args", MetaCrashingModule, shape_fn=lambda s, out: (s[0], 32))
+    plan2 = resolve(f'pretrained("{path}", provider="p_two_args", sha256="{digest}")',
+                    input_shape=("B", 16), output_shape=("B", 32), registry=reg)
+    assert plan2.nodes[0].output_shapes["out"] == ("B", 32)
+
+
+def test_provider_shape_fn_error_handling(tmp_path):
+    reg = Registry.builtins()
+    path = tmp_path / "err.pth"
+    torch.save(MetaCrashingModule().state_dict(), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def bad_shape_fn(input_shape, **kwargs):
+        raise RuntimeError("Something went wrong inside shape calculation")
+
+    reg.pretrained_provider("p_err", MetaCrashingModule, shape_fn=bad_shape_fn)
+    with pytest.raises(HNDLError, match="E_PRETRAINED.*shape_fn failed"):
+        resolve(f'pretrained("{path}", provider="p_err", sha256="{digest}")',
+                input_shape=("B", 16), output_shape=("B", 32), registry=reg)
+
+
+def test_provider_contract_ids_accepts_int64_tokens(tmp_path):
+    reg = Registry.builtins()
+    path = tmp_path / "tokens.pth"
+    torch.save(TokenEmbeddingProvider().state_dict(), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    reg.pretrained_provider("token_provider", TokenEmbeddingProvider, contract="ids")
+    sources.resolve_source.cache_clear()
+    sources.output_shape.cache_clear()
+
+    # 1. Resolves and builds with int64 inputs and rank 2 [B, T]
+    plan = resolve(f'pretrained("{path}", provider="token_provider", sha256="{digest}")',
+                   input_shape=("B", 12), output_shape=("B", 12, 48), input_dtype="int64", registry=reg)
+    assert plan.nodes[0].output_shapes["out"] == ("B", 12, 48)
+
+    model = build(plan, device="cpu")
+    ids = torch.randint(0, 64, (2, 12), dtype=torch.int64)
+    out = model(x=ids)["output"]
+    assert out.shape == (2, 12, 48)
+    assert out.dtype == torch.float32
+
+    # 2. Rejects floating-point input with E_DTYPE
+    with pytest.raises(HNDLError, match="E_DTYPE.*declare input_dtype=\"int64\""):
+        resolve(f'pretrained("{path}", provider="token_provider", sha256="{digest}")',
+                input_shape=("B", 12), output_shape=("B", 12, 48), input_dtype="float32", registry=reg)
+
+    # 3. Rejects rank != 2
+    with pytest.raises(HNDLError, match="E_CONSTRAINT|E_SCHEMA"):
+        resolve(f'pretrained("{path}", provider="token_provider", sha256="{digest}")',
+                input_shape=("B", 3, 12), output_shape=("B", 12, 48), input_dtype="int64", registry=reg)
+
+
+def test_provider_contract_ids_combined_with_shape_fn(tmp_path):
+    reg = Registry.builtins()
+    path = tmp_path / "tokens_shape_fn.pth"
+    torch.save(TokenEmbeddingProvider().state_dict(), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def token_shape_fn(input_shape, **kwargs):
+        return (input_shape[0], input_shape[1], 48)
+
+    reg.pretrained_provider("token_fast", TokenEmbeddingProvider, contract="ids", shape_fn=token_shape_fn)
+    sources.resolve_source.cache_clear()
+    sources.output_shape.cache_clear()
+
+    plan = resolve(f'pretrained("{path}", provider="token_fast", sha256="{digest}")',
+                   input_shape=("B", 20), output_shape=("B", 20, 48), input_dtype="int64", registry=reg)
+    assert plan.nodes[0].output_shapes["out"] == ("B", 20, 48)
+
+    model = build(plan, device="cpu")
+    ids = torch.randint(0, 64, (3, 20), dtype=torch.int64)
+    out = model(x=ids)["output"]
+    assert out.shape == (3, 20, 48)
+
+
+def test_provider_contract_backward_compatibility(tmp_path):
+    reg = Registry.builtins()
+    path = tmp_path / "compat.pth"
+    torch.save(nn.Linear(8, 16).state_dict(), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    # Omitted contract and shape_fn defaults to "tensor" and None
+    reg.pretrained_provider("compat_linear", lambda: nn.Linear(8, 16))
+    assert reg.pretrained_contract("compat_linear") == "tensor"
+    assert reg.pretrained_shape_fn("compat_linear") is None
+
+    # Resolves with floating point
+    plan = resolve(f'pretrained("{path}", provider="compat_linear", sha256="{digest}")',
+                   input_shape=("B", 8), output_shape=("B", 16), registry=reg)
+    assert plan.nodes[0].output_shapes["out"] == ("B", 16)
+
+    # Rejects int64 on contract="tensor" with E_DTYPE
+    with pytest.raises(HNDLError, match="E_DTYPE.*floating-point"):
+        resolve(f'pretrained("{path}", provider="compat_linear", sha256="{digest}")',
+                input_shape=("B", 8), output_shape=("B", 16), input_dtype="int64", registry=reg)
+
+    # Invalid contract raises E_REGISTRY
+    with pytest.raises(HNDLError, match="E_REGISTRY.*contract must be 'tensor', 'ids', or 'pixels'"):
+        reg.pretrained_provider("bad_contract", lambda: nn.Linear(8, 16), contract="invalid_contract")
+
+    # Non-callable shape_fn raises E_REGISTRY
+    with pytest.raises(HNDLError, match="E_REGISTRY.*shape_fn must be a callable"):
+        reg.pretrained_provider("bad_shape_fn", lambda: nn.Linear(8, 16), shape_fn="not_a_callable")
+
