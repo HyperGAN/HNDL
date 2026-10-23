@@ -343,11 +343,13 @@ class GatedDeltaAttention(nn.Module):
             k_full = k_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
             v_full = v_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
             beta_full = beta_f[:, :, :full_len].view(b, self.heads, N_full, C)
-            log_a_full = log_alpha[:, :, :full_len].view(b, self.heads, N_full, C, -1)
+            log_a_full = log_alpha[:, :, :full_len].view(
+                b, self.heads, N_full, C, log_alpha.shape[-1]
+            )
 
             cum_log_a = torch.cumsum(log_a_full, dim=3)
             lambda_init = torch.exp(cum_log_a)
-            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 85.0
+            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 45.0
             K_pos = k_full * lambda_init
             K_neg = k_full * torch.exp((-cum_log_a).clamp(max=max_neg_exp)) * beta_full.unsqueeze(-1)
             Q_pos = q_full * lambda_init
@@ -385,7 +387,7 @@ class GatedDeltaAttention(nn.Module):
             cum_log_alpha = torch.cumsum(log_alphac, dim=2)
             lambda_init = torch.exp(cum_log_alpha)
 
-            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 85.0
+            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 45.0
             K_pos = kc * lambda_init
             K_neg = kc * torch.exp((-cum_log_alpha).clamp(max=max_neg_exp)) * betac.unsqueeze(-1)
             Q_pos = qc * lambda_init

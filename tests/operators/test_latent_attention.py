@@ -134,3 +134,17 @@ def test_weight_absorption_inference_parity(device):
         assert module.is_weight_absorbed
         out_absorbed = module(x)
         torch.testing.assert_close(out_absorbed, out_standard, atol=1e-5, rtol=1e-5)
+
+
+def test_latent_attention_absorb_weights_rejects_bias(device):
+    """Verify that absorb_weights() raises E_UNSUPPORTED when projections have linear bias."""
+    plan = resolve(
+        "latent_attention(4, 32, qk_nope_head_dim=16, qk_rope_head_dim=16, causal=True, bias=True)",
+        input_shape=("B", 8, 64),
+        output_shape=("B", 8, 64),
+    )
+    model = build(plan, device=device)
+    module = model[plan.nodes[0].id]
+    with pytest.raises(HNDLError, match="E_UNSUPPORTED"):
+        module.absorb_weights()
+

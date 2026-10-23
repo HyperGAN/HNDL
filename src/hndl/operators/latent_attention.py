@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..errors import HNDLError
 from ..operator import Arg, Example, operator
 
 
@@ -292,8 +293,13 @@ class LatentAttention(nn.Module):
         """Absorb k_up into q_proj and v_up into o_proj for low-memory inference.
 
         Eliminates uncompressed keys and values from memory by evaluating attention
-        directly over compressed latent tokens c_kv.
+        directly over compressed latent tokens c_kv. Supported for unbiased projections.
         """
+        if self.bias or self.k_up.bias is not None or self.v_up.bias is not None:
+            raise HNDLError(
+                "E_UNSUPPORTED",
+                "LatentAttention weight absorption is only supported when bias=False",
+            )
         W_uk = self.k_up.weight.view(self.heads, self.qk_nope_head_dim, self.kv_lora_rank)
         W_uv = self.v_up.weight.view(self.heads, self.v_head_dim, self.kv_lora_rank)
         W_o = self.o_proj.weight.view(self.D, self.heads, self.v_head_dim)

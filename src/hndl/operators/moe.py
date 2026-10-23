@@ -162,7 +162,7 @@ class MixtureOfExperts(nn.Module):
         sorted_inputs = flat[sorted_token_ids]
 
         elem_bytes = sorted_inputs.element_size()
-        stride_ok = not sorted_inputs.is_cuda or (
+        stride_ok = (
             (self.d_model * elem_bytes) % 16 == 0 and (self.hidden * elem_bytes) % 16 == 0
         )
         use_grouped = (
@@ -171,7 +171,7 @@ class MixtureOfExperts(nn.Module):
             and sorted_inputs.dtype in (torch.float16, torch.bfloat16, torch.float32)
             and (
                 not torch.compiler.is_compiling()
-                or sorted_inputs.dtype in (torch.float16, torch.bfloat16)
+                or sorted_inputs.dtype == torch.bfloat16
             )
         )
 

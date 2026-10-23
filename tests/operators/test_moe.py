@@ -235,3 +235,32 @@ def test_moe_torch_compile_fullgraph(device):
     compiled_out = compiled(x)
     torch.testing.assert_close(compiled_out, eager_out, atol=1e-5, rtol=1e-5)
 
+
+@pytest.mark.parametrize("d_model,hidden", [
+    (10, 16),
+    (18, 18),
+    (7, 13),
+    (11, 17),
+])
+def test_unaligned_hidden_dimensions_cpu_and_cuda(device, d_model, hidden):
+    """Verify that unaligned byte strides fall back cleanly to bmm on CPU and CUDA."""
+    module = layer(device, experts=4, hidden=hidden, top_k=2, activation="gelu", d_model=d_model, seed=42)
+    x = torch.randn(3, 5, d_model, device=device)
+    ref = per_token_reference(module, x)
+    out = module(x)
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+def test_moe_torch_compile_float16_cuda():
+    """Verify that MoE compiles under torch.compile in float16 without Dynamo fake tensor crash."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    module = MixtureOfExperts(experts=4, hidden=32, top_k=2, activation="gelu", expert_kind="mlp", D=16).to(
+        device="cuda:0", dtype=torch.float16
+    )
+    x = torch.randn(4, 16, device="cuda:0", dtype=torch.float16)
+    eager_out = module(x)
+    compiled = torch.compile(module, backend="eager", fullgraph=True)
+    compiled_out = compiled(x)
+    torch.testing.assert_close(compiled_out, eager_out, atol=1e-5, rtol=1e-5)
+

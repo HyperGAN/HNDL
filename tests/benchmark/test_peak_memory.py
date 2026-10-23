@@ -95,6 +95,10 @@ def test_graph_module_dead_slot_clearing():
 
     x = torch.randn(16, 1024, device=device)
 
+    # Warmup call: populates _fast program validation cache and sets up steady-state execution
+    with torch.no_grad():
+        _ = model(x=x)
+
     if str(device).startswith("cuda"):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)

@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from hndl import HNDLError, Registry, resolve
+from hndl.operators.gated_delta_attention import GatedDeltaAttention
 from hndl.testing import check_operator
 from hndl.torch import DTYPES, build, parameter_counts
 
@@ -125,3 +126,37 @@ def test_reduced_precision_on_cuda(dtype):
     out = model(x=x)["output"]
     assert out.dtype == torch_dtype
     assert out.isfinite().all()
+
+
+@pytest.mark.parametrize("decay_kind", ["channel", "head"])
+def test_gated_delta_attention_empty_batch(device, decay_kind):
+    """Verify that empty batch inputs (b=0) execute cleanly and propagate gradients."""
+    layer = GatedDeltaAttention(heads=2, head_dim=16, chunk_size=32, decay_kind=decay_kind, D=32).to(device)
+    x = torch.randn(0, 32, 32, device=device, requires_grad=True)
+    out = layer(x)
+    assert out.shape == (0, 32, 32)
+    loss = out.sum()
+    loss.backward()
+    assert x.grad is not None
+    assert x.grad.shape == (0, 32, 32)
+
+
+@pytest.mark.parametrize("decay_kind", ["channel", "head"])
+@pytest.mark.parametrize("a_val", [2.0, 5.0, 10.0])
+def test_gated_delta_attention_backward_gradient_stability_under_strong_decay(device, decay_kind, a_val):
+    """Verify that strong decay rates (A_log >= 2.0) produce 100% finite gradients."""
+    layer = GatedDeltaAttention(
+        heads=2, head_dim=16, chunk_size=16, conv_size=0, decay_kind=decay_kind, D=32
+    ).to(device)
+    with torch.no_grad():
+        layer.A_log.fill_(a_val)
+    x = torch.randn(2, 32, 32, device=device, requires_grad=True)
+    out = layer(x)
+    loss = out.sum()
+    loss.backward()
+    assert x.grad is not None
+    assert torch.all(torch.isfinite(x.grad)), f"NaN gradients detected for {decay_kind} with A_log={a_val}"
+    for name, p in layer.named_parameters():
+        if p.grad is not None:
+            assert torch.all(torch.isfinite(p.grad)), f"NaN param gradient in {name}"
+
