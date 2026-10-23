@@ -1,3 +1,7 @@
+## Unreleased
+
+- Require patched build tooling (setuptools 84.2.1 and wheel 0.46.2 or newer) to prevent wheel unpack permission changes outside the extraction directory.
+
 # Changelog
 
 ## 0.9.0 (2026-10-17)
