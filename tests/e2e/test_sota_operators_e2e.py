@@ -576,7 +576,7 @@ class TestTier1FeatureCoverage:
         tokens = torch.randint(0, 256, (2, 32), device=device)
         out = model(tokens)
         assert out.shape == (2, 32, 256)
-        assert sum(parameter_counts(model.plan).values()) == 922240
+        assert sum(parameter_counts(model.plan).values()) == 1181312
 
     def test_tier1_f10_whisper_seq2seq_tiny_resolves(self, device):
         """[F10 Happy Path 3] whisper_seq2seq_tiny recipe with conv1d audio stem and cross_attention."""

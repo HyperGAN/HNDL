@@ -270,8 +270,8 @@ class GraphModule(nn.Module):
                 else:
                     raw_d = spec._port_dtypes.get(port, "compute")
 
-                if spec.identity == "cast" and "dtype" in node.args and port in spec.output_ports:
-                    target_dtype = node.args["dtype"]
+                if spec.identity == "cast" and port in spec.output_ports:
+                    target_dtype = node.args.get("dtype", "compute")
                     declared[port] = plan.dtype if target_dtype == "compute" else target_dtype
                     if target_dtype == "compute":
                         self._symbolic_compute_ports.add((node.id, port))
@@ -288,13 +288,8 @@ class GraphModule(nn.Module):
             self._port_dtypes[node.id] = {port: None if name == "any" else DTYPES[name] for port, name in declared.items()}
             for port in node.outputs:
                 ref = f"node:{node.id}/{port}"
-                if spec.identity == "cast" and "dtype" in node.args:
-                    target_dtype = node.args["dtype"]
-                    produced[ref] = plan.dtype if target_dtype == "compute" else target_dtype
-                    produced_is_compute[ref] = (target_dtype == "compute")
-                else:
-                    produced[ref] = plan.dtype if declared[port] == "any" else declared[port]
-                    produced_is_compute[ref] = (declared[port] == "compute" or declared[port] == "any")
+                produced[ref] = plan.dtype if declared[port] == "any" else declared[port]
+                produced_is_compute[ref] = (node.id, port) in self._symbolic_compute_ports
 
         self._output_dtypes = MappingProxyType(
             {name: DTYPES[produced[entry["ref"]]] for name, entry in plan.outputs.items()})

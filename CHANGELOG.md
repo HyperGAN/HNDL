@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Milestone 1 forensic bug remediation**: Corrected `produced_is_compute` port tracking in `GraphModule` so floating-point module casts (`.double()`, `.half()`, `.to()`) track compute outputs accurately; reverted `SinusoidalEmbed._apply` buffer override to align module state bytes with build receipt while maintaining float32 precision during forward evaluation; and synchronized `deepseek_moe_tiny` parameter count assertion to 1,181,312.
 - **`cast` runtime crash & buffer pollution remediation (B-01)**: Eliminated `_prototype` buffer pollution from module `state_dict()` and `buffers()` in `Cast`, added `"float64"` to `DTYPES`, and updated `GraphModule._effective_dtype` to track compute-domain ports and leave explicit integer, boolean, and float64 ports unchanged under `.half()` or `.to()`.
 - **`torch.compile` RoPE cache poisoning and device retention (B-02)**: Added cache clearing in `_apply()` across `RoPE`, `Attention`, and `LatentAttention` modules to eliminate device retention on `.to(device)` or `.cpu()`, bypassed caching when `torch.compiler.is_compiling()` is true, and added max-length cache slicing for variable-length sequence evaluation.
 - **`gated_delta_attention` float16 backward autograd stability (B-03)**: Evaluated log-space gating decay `log_alpha` and recurrence accumulation in `calc_dtype` (`float32`/`float64`), preventing reciprocal/exponential overflow and subsequent `NaN` gradients during reduced-precision backward passes.

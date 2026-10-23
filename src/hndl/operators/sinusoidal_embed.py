@@ -102,24 +102,21 @@ class SinusoidalEmbed(nn.Module):
             freqs = torch.ones(1, dtype=torch.float32)
         self.register_buffer("freqs", freqs)
 
-    def _apply(self, fn, recurse=True):
-        res = super()._apply(fn, recurse=recurse)
-        if hasattr(self, "freqs") and self.freqs is not None:
+    def forward(self, x):
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        if self.freqs.dtype == calc_dtype and self.freqs.device == x.device:
+            freqs = self.freqs
+        else:
             d_per = self.features // (2 * self.D_in)
             if d_per > 1:
-                f = torch.exp(
+                freqs = torch.exp(
                     -math.log(self.max_period)
-                    * torch.arange(d_per, device=self.freqs.device, dtype=torch.float32)
+                    * torch.arange(d_per, device=x.device, dtype=calc_dtype)
                     / (d_per - 1)
                 )
             else:
-                f = torch.ones(1, device=self.freqs.device, dtype=torch.float32)
-            self.freqs = f
-        return res
-
-    def forward(self, x):
-        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
-        angles = x.to(calc_dtype).unsqueeze(-1) * self.freqs.to(calc_dtype).unsqueeze(0).unsqueeze(0)
+                freqs = torch.ones(1, device=x.device, dtype=calc_dtype)
+        angles = x.to(calc_dtype).unsqueeze(-1) * freqs.unsqueeze(0).unsqueeze(0)
         emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
         return emb.view(x.shape[0], self.features).to(x.dtype)
 

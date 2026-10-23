@@ -63,6 +63,19 @@ def test_b01_cast_graphmodule_runtime_and_buffer_pollution():
     out_chain = model_chain(x=x.half())["output"]
     assert out_chain.dtype == torch.int64
 
+    # 4. Verify standard compute output moves with .double() and .half()
+    source_std = """
+    linear(32)
+    """
+    plan_std = resolve(source_std, input_shape=("B", 16), output_shape=("B", 32))
+    model_std = build(plan_std, device="cpu")
+    model_std.double()
+    out_std = model_std(x=x.double())["output"]
+    assert out_std.dtype == torch.float64
+    model_std.half()
+    out_std_h = model_std(x=x.half())["output"]
+    assert out_std_h.dtype == torch.float16
+
 
 
 # ==============================================================================
@@ -162,6 +175,12 @@ def test_b04_grn_and_sinusoidal_embed_fp16_numerical_stability():
     # Check max relative error between forward and reference oracle
     rel_error = (out.float() - ref_out.float()).abs() / (ref_out.float().abs() + 1e-6)
     assert rel_error.max().item() < 0.01, f"Max relative error too high: {rel_error.max().item()}"
+
+    # 3. SinusoidalEmbed state bytes match build receipt in float16
+    plan_se = resolve("sinusoidal_embed(64)", input_shape=("B", 1), output_shape=("B", 64), dtype="float16")
+    model_se = build(plan_se, device="cpu")
+    stored_bytes = sum(t.numel() * t.element_size() for t in (*model_se.parameters(), *model_se.buffers()))
+    assert model_se.build_receipt["state_bytes"] == stored_bytes
 
 
 # ==============================================================================
