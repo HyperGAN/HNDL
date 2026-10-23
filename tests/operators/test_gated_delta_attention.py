@@ -160,3 +160,87 @@ def test_gated_delta_attention_backward_gradient_stability_under_strong_decay(de
         if p.grad is not None:
             assert torch.all(torch.isfinite(p.grad)), f"NaN param gradient in {name}"
 
+
+
+@pytest.mark.parametrize("c_size", [8, 16, 32, 64, 128])
+@pytest.mark.parametrize("decay_kind", ["channel", "head"])
+@pytest.mark.parametrize("seq_len", [128, 256])
+def test_reference_parity_across_chunk_sizes(device, c_size, decay_kind, seq_len):
+    """Verify exact parity (< 1e-4) with _reference across chunk sizes C in [8, 16, 32, 64, 128]."""
+    plan = resolve(
+        f'gated_delta_attention(2, decay_kind="{decay_kind}", chunk_size={c_size})',
+        input_shape=("B", seq_len, 32),
+        output_shape=("B", seq_len, 32),
+    )
+    model = build(plan, device=device)
+    module = model[plan.nodes[0].id]
+    ref_fn = REGISTRY.get("gated_delta_attention").reference(module)
+
+    x = torch.randn(2, seq_len, 32, device=device)
+    actual = module(x)
+    expected = ref_fn(x)
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("a_val", [2.0, 5.0])
+@pytest.mark.parametrize("c_size", [16, 64, 128])
+@pytest.mark.parametrize("decay_kind", ["channel", "head"])
+def test_reference_parity_under_strong_decay(device, a_val, c_size, decay_kind):
+    """Verify exact parity (< 1e-4) with _reference under strong decay A_log in [2.0, 5.0]."""
+    plan = resolve(
+        f'gated_delta_attention(2, decay_kind="{decay_kind}", chunk_size={c_size})',
+        input_shape=("B", 128, 32),
+        output_shape=("B", 128, 32),
+    )
+    model = build(plan, device=device)
+    module = model[plan.nodes[0].id]
+    with torch.no_grad():
+        module.A_log.fill_(a_val)
+    ref_fn = REGISTRY.get("gated_delta_attention").reference(module)
+
+    x = torch.randn(2, 128, 32, device=device)
+    actual = module(x)
+    expected = ref_fn(x)
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("a_val", [2.0, 5.0, 10.0, 20.0, 50.0])
+@pytest.mark.parametrize("c_size", [16, 64, 128])
+@pytest.mark.parametrize("decay_kind", ["channel", "head"])
+def test_extreme_decay_gradient_finiteness_full_range(device, a_val, c_size, decay_kind):
+    """Verify 100% finite backward gradients under extreme decay rates A_log in [2.0..50.0]."""
+    layer = GatedDeltaAttention(
+        heads=2, head_dim=16, chunk_size=c_size, conv_size=4, decay_kind=decay_kind, D=32
+    ).to(device)
+    with torch.no_grad():
+        layer.A_log.fill_(a_val)
+    x = torch.randn(2, 64, 32, device=device, requires_grad=True)
+    out = layer(x)
+    loss = out.sum()
+    loss.backward()
+
+    assert x.grad is not None
+    assert torch.all(torch.isfinite(x.grad)), (
+        f"Non-finite x.grad detected for {decay_kind} with A_log={a_val}, C={c_size}"
+    )
+    for name, p in layer.named_parameters():
+        if p.grad is not None:
+            assert torch.all(torch.isfinite(p.grad)), (
+                f"Non-finite param gradient in {name} for {decay_kind} with A_log={a_val}, C={c_size}"
+            )
+
+
+@pytest.mark.parametrize("c_size", [16, 64, 128])
+@pytest.mark.parametrize("decay_kind", ["channel", "head"])
+def test_empty_batch_gradient_propagation_chunk_sizes(device, c_size, decay_kind):
+    """Verify empty batch (b=0) execution and gradient propagation across chunk sizes."""
+    layer = GatedDeltaAttention(
+        heads=2, head_dim=16, chunk_size=c_size, conv_size=4, decay_kind=decay_kind, D=32
+    ).to(device)
+    x = torch.randn(0, 64, 32, device=device, requires_grad=True)
+    out = layer(x)
+    assert out.shape == (0, 64, 32)
+    loss = out.sum()
+    loss.backward()
+    assert x.grad is not None
+    assert x.grad.shape == (0, 64, 32)

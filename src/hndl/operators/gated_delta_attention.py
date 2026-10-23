@@ -349,25 +349,36 @@ class GatedDeltaAttention(nn.Module):
 
             cum_log_a = torch.cumsum(log_a_full, dim=3)
             lambda_init = torch.exp(cum_log_a)
-            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 45.0
-            K_pos = k_full * lambda_init
-            K_neg = k_full * torch.exp((-cum_log_a).clamp(max=max_neg_exp)) * beta_full.unsqueeze(-1)
-            Q_pos = q_full * lambda_init
 
-            inner_k = torch.matmul(K_pos, K_neg.transpose(-2, -1))
-            inner_q = torch.matmul(Q_pos, K_neg.transpose(-2, -1))
-
-            A = torch.tril(inner_k, diagonal=-1)
-            B_mat = torch.tril(inner_q, diagonal=0)
+            if self.decay_kind == "head":
+                diff = (cum_log_a - cum_log_a.transpose(-2, -1)).clamp(max=0.0)
+                decay = torch.exp(diff) * beta_full.unsqueeze(-2)
+                inner_k = torch.matmul(k_full, k_full.transpose(-2, -1)) * decay
+                inner_q = torch.matmul(q_full, k_full.transpose(-2, -1)) * decay
+                A = torch.tril(inner_k, diagonal=-1)
+                B_mat = torch.tril(inner_q, diagonal=0)
+            else:
+                A_list = []
+                B_list = []
+                for c in range(N_full):
+                    diff_c = (cum_log_a[:, :, c].unsqueeze(3) - cum_log_a[:, :, c].unsqueeze(2)).clamp(max=0.0)
+                    decay_c = torch.exp(diff_c)
+                    beta_c = beta_full[:, :, c].unsqueeze(-2)
+                    ik_c = (k_full[:, :, c].unsqueeze(3) * decay_c * k_full[:, :, c].unsqueeze(2)).sum(-1) * beta_c
+                    iq_c = (q_full[:, :, c].unsqueeze(3) * decay_c * k_full[:, :, c].unsqueeze(2)).sum(-1) * beta_c
+                    A_list.append(torch.tril(ik_c, diagonal=-1))
+                    B_list.append(torch.tril(iq_c, diagonal=0))
+                A = torch.stack(A_list, dim=2)
+                B_mat = torch.stack(B_list, dim=2)
 
             E_intra = torch.linalg.solve_triangular(A, v_full, upper=False, unitriangular=True)
             k_decay_init = lambda_init * k_full
             K_solve = torch.linalg.solve_triangular(A, k_decay_init, upper=False, unitriangular=True)
 
             lambda_end = torch.exp(cum_log_a[:, :, :, -1])
-            lambda_to_end = torch.exp(cum_log_a[:, :, :, -1:] - cum_log_a)
+            lambda_to_end = torch.exp((cum_log_a[:, :, :, -1:] - cum_log_a).clamp(max=0.0))
             W = beta_full.unsqueeze(-1) * (lambda_to_end * k_full)
-            Q_decay = Q_pos
+            Q_decay = q_full * lambda_init
 
             for c in range(N_full):
                 E_c = E_intra[:, :, c] - torch.matmul(K_solve[:, :, c], S)
@@ -387,13 +398,16 @@ class GatedDeltaAttention(nn.Module):
             cum_log_alpha = torch.cumsum(log_alphac, dim=2)
             lambda_init = torch.exp(cum_log_alpha)
 
-            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 45.0
-            K_pos = kc * lambda_init
-            K_neg = kc * torch.exp((-cum_log_alpha).clamp(max=max_neg_exp)) * betac.unsqueeze(-1)
-            Q_pos = qc * lambda_init
-
-            inner_k = torch.matmul(K_pos, K_neg.transpose(-2, -1))
-            inner_q = torch.matmul(Q_pos, K_neg.transpose(-2, -1))
+            if self.decay_kind == "head":
+                diff = (cum_log_alpha - cum_log_alpha.transpose(-2, -1)).clamp(max=0.0)
+                decay = torch.exp(diff) * betac.unsqueeze(-2)
+                inner_k = torch.matmul(kc, kc.transpose(-2, -1)) * decay
+                inner_q = torch.matmul(qc, kc.transpose(-2, -1)) * decay
+            else:
+                diff = (cum_log_alpha.unsqueeze(3) - cum_log_alpha.unsqueeze(2)).clamp(max=0.0)
+                decay = torch.exp(diff)
+                inner_k = (kc.unsqueeze(3) * decay * kc.unsqueeze(2)).sum(-1) * betac.unsqueeze(-2)
+                inner_q = (qc.unsqueeze(3) * decay * kc.unsqueeze(2)).sum(-1) * betac.unsqueeze(-2)
 
             A = torch.tril(inner_k, diagonal=-1)
             B_mat = torch.tril(inner_q, diagonal=0)
@@ -412,7 +426,7 @@ class GatedDeltaAttention(nn.Module):
             lambda_end = torch.exp(cum_log_alpha[:, :, -1])
             S_init_decayed = lambda_end.unsqueeze(-1) * S
 
-            lambda_to_end = torch.exp(cum_log_alpha[:, :, -1:] - cum_log_alpha)
+            lambda_to_end = torch.exp((cum_log_alpha[:, :, -1:] - cum_log_alpha).clamp(max=0.0))
             W = betac.unsqueeze(-1) * (lambda_to_end * kc)
             S_update = W.transpose(-2, -1) @ E
             S = S_init_decayed + S_update
