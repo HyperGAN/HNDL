@@ -288,9 +288,67 @@ class LatentAttention(nn.Module):
         self._cache[key] = (cos, sin)
         return cos, sin
 
+    def absorb_weights(self):
+        """Absorb k_up into q_proj and v_up into o_proj for low-memory inference.
+
+        Eliminates uncompressed keys and values from memory by evaluating attention
+        directly over compressed latent tokens c_kv.
+        """
+        W_uk = self.k_up.weight.view(self.heads, self.qk_nope_head_dim, self.kv_lora_rank)
+        W_uv = self.v_up.weight.view(self.heads, self.v_head_dim, self.kv_lora_rank)
+        W_o = self.o_proj.weight.view(self.D, self.heads, self.v_head_dim)
+        W_o_abs = torch.einsum("mhk,hkc->mhc", W_o, W_uv)
+
+        self.register_buffer("_absorbed_W_uk", W_uk.contiguous(), persistent=False)
+        self.register_buffer("_absorbed_W_o", W_o_abs.contiguous(), persistent=False)
+        self._weight_absorption = True
+        return self
+
+    absorb_for_inference = absorb_weights
+
+    @property
+    def is_weight_absorbed(self):
+        return getattr(self, "_weight_absorption", False)
+
     def forward(self, x):
         b, t, _ = x.shape
         c_kv = self.kv_norm(self.kv_down(x))
+
+        if getattr(self, "_weight_absorption", False):
+            if self.q_lora_rank > 0:
+                cq = self.q_norm(self.q_down(x))
+                q_all = self.q_up(cq).view(b, t, self.heads, -1).transpose(1, 2)
+            else:
+                q_all = self.q_up(x).view(b, t, self.heads, -1).transpose(1, 2)
+
+            qc = q_all[..., : self.qk_nope_head_dim]
+            q_abs = torch.einsum("bhtd,hdc->bhtc", qc, self._absorbed_W_uk)
+            scores_c = torch.einsum("bhtc,bsc->bhts", q_abs, c_kv)
+
+            if self.qk_rope_head_dim > 0:
+                qr_raw = q_all[..., self.qk_nope_head_dim :]
+                cos, sin = self._tables(t, self.qk_rope_head_dim, x.device, x.dtype)
+                cos_u = cos.unsqueeze(0).unsqueeze(0)
+                sin_u = sin.unsqueeze(0).unsqueeze(0)
+                qr = qr_raw * cos_u + _rotate_half(qr_raw) * sin_u
+                kr_raw = self.k_rope_proj(x)
+                kr = kr_raw * cos.unsqueeze(0) + _rotate_half(kr_raw) * sin.unsqueeze(0)
+                scores_r = torch.einsum("bhtd,bsd->bhts", qr, kr)
+                scores = (scores_c + scores_r) * self.scale
+            else:
+                scores = scores_c * self.scale
+
+            if self.causal:
+                causal_mask = torch.full((t, t), float("-inf"), device=x.device, dtype=scores.dtype).triu(1)
+                scores = scores + causal_mask
+
+            attn_weights = scores.softmax(dim=-1)
+            attn_c = torch.einsum("bhts,bsc->bhtc", attn_weights, c_kv)
+            out = torch.einsum("bhtc,mhc->btm", attn_c, self._absorbed_W_o)
+            if self.o_proj.bias is not None:
+                out = out + self.o_proj.bias
+            return out
+
         kc = self.k_up(c_kv).view(b, t, self.heads, self.qk_nope_head_dim).transpose(1, 2)
         v = self.v_up(c_kv).view(b, t, self.heads, self.v_head_dim).transpose(1, 2)
 
@@ -299,7 +357,10 @@ class LatentAttention(nn.Module):
             cos, sin = self._tables(t, self.qk_rope_head_dim, x.device, x.dtype)
             kr = kr_raw * cos.unsqueeze(0) + _rotate_half(kr_raw) * sin.unsqueeze(0)
             kr = kr.unsqueeze(1).expand(b, self.heads, t, self.qk_rope_head_dim)
-            k = torch.cat([kc, kr], dim=-1)
+            k = torch.empty(b, self.heads, t, self.qk_nope_head_dim + self.qk_rope_head_dim,
+                            device=x.device, dtype=x.dtype)
+            k[..., : self.qk_nope_head_dim] = kc
+            k[..., self.qk_nope_head_dim :] = kr
         else:
             k = kc
 
@@ -310,10 +371,12 @@ class LatentAttention(nn.Module):
             q_all = self.q_up(x).view(b, t, self.heads, -1).transpose(1, 2)
 
         if self.qk_rope_head_dim > 0:
-            qc = q_all[..., : self.qk_nope_head_dim]
             qr_raw = q_all[..., self.qk_nope_head_dim :]
-            qr = qr_raw * cos.unsqueeze(0).unsqueeze(0) + _rotate_half(qr_raw) * sin.unsqueeze(0).unsqueeze(0)
-            q = torch.cat([qc, qr], dim=-1)
+            cos_u = cos.unsqueeze(0).unsqueeze(0)
+            sin_u = sin.unsqueeze(0).unsqueeze(0)
+            q = torch.empty_like(q_all)
+            q[..., : self.qk_nope_head_dim] = q_all[..., : self.qk_nope_head_dim]
+            q[..., self.qk_nope_head_dim :] = qr_raw * cos_u + _rotate_half(qr_raw) * sin_u
         else:
             q = q_all
 

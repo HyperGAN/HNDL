@@ -586,10 +586,11 @@ class GraphModule(nn.Module):
         tensor_stores = [store for module in modules for store in (module._parameters, module._buffers)]
         same = tuple([module._modules for module in modules] + [store for store in tensor_stores if not store])
         views = tuple([store.values() for store in tensor_stores if store])
-        ids = [*map(len, views), *map(id, _chain(views))]
-        shape = [*map(len, views), *map(_is, _chain(views), _NONES),
+        store_lens = tuple(map(len, views))
+        tensor_ids = tuple(map(id, _chain(views)))
+        shape = [*store_lens, *map(_is, _chain(views), _NONES),
                  *[(t.dtype, t.device) if t is not None else None for t in _chain(views)]]
-        return same, tuple(map(dict, same)), views, ids, shape
+        return same, tuple(map(dict, same)), views, store_lens, tensor_ids, shape
 
     def _state_checked(self, generation):
         """Record that the registered state matched the build at ``generation``."""
@@ -770,6 +771,7 @@ class GraphModule(nn.Module):
                 slots[ref] = slot
                 outs.append(slot)
 
+            to_clear = []
             # After outputs are allocated, recycle dead inputs
             for in_ref in node.inputs.values():
                 if not in_ref.startswith("input:") and last_consumer.get(in_ref) == i:
@@ -777,6 +779,7 @@ class GraphModule(nn.Module):
                     if dead_slot not in free_set:
                         heapq.heappush(free_slots, dead_slot)
                         free_set.add(dead_slot)
+                        to_clear.append(dead_slot)
 
             # Also recycle any outputs that have no consumers and are not graph outputs
             for port in node.outputs:
@@ -786,6 +789,7 @@ class GraphModule(nn.Module):
                     if dead_slot not in free_set:
                         heapq.heappush(free_slots, dead_slot)
                         free_set.add(dead_slot)
+                        to_clear.append(dead_slot)
 
             fast_ins = ins[0] if len(ins) == 1 else operator.itemgetter(*ins) if len(ins) > 1 else None
             program.append((
@@ -793,6 +797,7 @@ class GraphModule(nn.Module):
                 fast_ins,
                 outs[0] if len(outs) == 1 else None,
                 (ins, tuple(outs), node.outputs, frozenset(node.outputs), node.id),
+                tuple(to_clear),
             ))
 
         max_slot = max(slots.values()) if slots else num_inputs - 1
@@ -938,16 +943,23 @@ class GraphModule(nn.Module):
         signature = self._signature(inputs)
         # _record_stores, compared: submodules and empty stores by identity,
         # the other stores by length and which values are None.
-        same, copies, views, ids, shape = self._stores
+        same, copies, views, store_lens, tensor_ids, shape = self._stores
         try:
             if same != copies:
                 changed = True
-            elif [*map(len, views), *map(id, _chain(views))] != ids:
-                dtypes_devices = [(t.dtype, t.device) if t is not None else None for t in _chain(views)]
-                current_shape = [*map(len, views), *map(_is, _chain(views), _NONES), *dtypes_devices]
-                changed = current_shape != shape
             else:
                 changed = False
+                for v, expected_len in zip(views, store_lens):
+                    if len(v) != expected_len:
+                        changed = True
+                        break
+                if not changed:
+                    for t, expected_id in zip(_chain(views), tensor_ids):
+                        if id(t) != expected_id:
+                            dtypes_devices = [(x.dtype, x.device) if x is not None else None for x in _chain(views)]
+                            current_shape = [*store_lens, *map(_is, _chain(views), _NONES), *dtypes_devices]
+                            changed = current_shape != shape
+                            break
         except Exception:  # noqa: BLE001 - a submodule's own __eq__ raised
             changed = True
         if changed or generation != self._state_seen or signature not in self._validated:
@@ -958,7 +970,7 @@ class GraphModule(nn.Module):
         padding, program, output_slots = self._fast
         values = [*inputs, *padding]
         try:
-            for module, ins, out, node in program:
+            for module, ins, out, node, to_clear in program:
                 result = (module(values[ins]) if type(ins) is int
                           else module(*ins(values)) if ins is not None
                           else module())
@@ -968,6 +980,8 @@ class GraphModule(nn.Module):
                     _, outs, out_ports, out_set, node_id = node
                     for slot, value in zip(outs, self._split_result(result, out_ports, out_set, node_id)):
                         values[slot] = value
+                for slot in to_clear:
+                    values[slot] = None
         except Exception as error:
             ins, _, _, _, node_id = node
             leading = values[0]
@@ -1104,7 +1118,7 @@ def _symbol_values(spec, node):
     return values
 
 
-def construct(spec, node, device, dtype):
+def construct(spec, node, device, dtype, initialization_seed=None):
     """Instantiate one operator's module from concrete plan arguments."""
     # A resolved node omits arguments added after release that hold their
     # default (``Arg(since=...)``); the module still receives every argument.
@@ -1117,11 +1131,25 @@ def construct(spec, node, device, dtype):
     for name in spec.init_shapes:
         kwargs[name] = {port: tuple(shape) for port, shape in getattr(node, name).items()}
     device_obj = device if isinstance(device, torch.device) else torch.device(device)
-    if device_obj.type == "cpu" and getattr(torch._C, "_len_torch_function_stack", lambda: 1)() == 0:
-        layer = spec.module(**kwargs)
-    else:
-        with torch.device(device_obj):
+    prev_dtype = torch.get_default_dtype()
+    set_default = (
+        initialization_seed is None
+        and dtype is not None
+        and hasattr(dtype, "is_floating_point")
+        and dtype.is_floating_point
+        and dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+    )
+    if set_default and dtype != prev_dtype:
+        torch.set_default_dtype(dtype)
+    try:
+        if device_obj.type == "cpu" and getattr(torch._C, "_len_torch_function_stack", lambda: 1)() == 0:
             layer = spec.module(**kwargs)
+        else:
+            with torch.device(device_obj):
+                layer = spec.module(**kwargs)
+    finally:
+        if set_default and dtype != prev_dtype:
+            torch.set_default_dtype(prev_dtype)
     if not isinstance(layer, nn.Module):
         raise HNDLError("E_REGISTRY", f"{node.id}: operator {spec.alias} did not construct an nn.Module")
     if device_obj.type == "meta":
@@ -1342,7 +1370,7 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
 
     with registry.activated(), _initialization_rng(device, initialization_seed):
         for node in plan.nodes:
-            layer = construct(specs[node.id], node, device, dtype)
+            layer = construct(specs[node.id], node, device, dtype, initialization_seed=initialization_seed)
             check_ownership(layer, node.id)
             if node.id in unbounded:
                 total += _state_bytes(layer)

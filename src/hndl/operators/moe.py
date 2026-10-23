@@ -146,19 +146,113 @@ class MixtureOfExperts(nn.Module):
         else:
             weights = torch.softmax(values, dim=-1)
 
-        if torch.compiler.is_compiling():
-            gates = torch.zeros(flat.shape[0], len(self.experts),
-                                device=flat.device, dtype=weights.dtype).scatter(1, indices, weights)
-            out = sum(expert(flat) * gates[:, i : i + 1] for i, expert in enumerate(self.experts))
-            return out.reshape(x.shape)
+        N = flat.shape[0]
+        if N == 0:
+            return flat.reshape(x.shape)
 
+        E = len(self.experts)
+        token_ids = torch.arange(N, device=flat.device).unsqueeze(1).expand(-1, self.top_k).reshape(-1)
+        flat_expert_ids = indices.reshape(-1)
+        flat_weights = weights.reshape(-1, 1)
+
+        sort_order = torch.argsort(flat_expert_ids)
+        sorted_expert_ids = flat_expert_ids[sort_order]
+        sorted_token_ids = token_ids[sort_order]
+        sorted_weights = flat_weights[sort_order]
+        sorted_inputs = flat[sorted_token_ids]
+
+        elem_bytes = sorted_inputs.element_size()
+        stride_ok = not sorted_inputs.is_cuda or (
+            (self.d_model * elem_bytes) % 16 == 0 and (self.hidden * elem_bytes) % 16 == 0
+        )
+        use_grouped = (
+            hasattr(torch, "_grouped_mm")
+            and stride_ok
+            and sorted_inputs.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and (
+                not torch.compiler.is_compiling()
+                or sorted_inputs.dtype in (torch.float16, torch.bfloat16)
+            )
+        )
+
+        if use_grouped:
+            if torch.compiler.is_compiling():
+                counts = F.one_hot(sorted_expert_ids, num_classes=E).sum(dim=0)
+            else:
+                counts = torch.bincount(sorted_expert_ids, minlength=E)
+            offs = torch.cumsum(counts, dim=0, dtype=torch.int32)
+
+            if self.expert_kind == "swiglu":
+                gate_w = torch.stack([e.gate.weight for e in self.experts]).transpose(1, 2)
+                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
+                g = torch._grouped_mm(sorted_inputs, gate_w, offs)
+                u = torch._grouped_mm(sorted_inputs, up_w, offs)
+                if self.bias:
+                    gate_b = torch.stack([e.gate.bias for e in self.experts])
+                    up_b = torch.stack([e.up.bias for e in self.experts])
+                    g = g + gate_b[sorted_expert_ids]
+                    u = u + up_b[sorted_expert_ids]
+                act = F.silu(g) * u
+                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
+                expert_out = torch._grouped_mm(act, down_w, offs)
+                if self.bias:
+                    down_b = torch.stack([e.down.bias for e in self.experts])
+                    expert_out = expert_out + down_b[sorted_expert_ids]
+            else:
+                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
+                h = torch._grouped_mm(sorted_inputs, up_w, offs)
+                if self.bias:
+                    up_b = torch.stack([e.up.bias for e in self.experts])
+                    h = h + up_b[sorted_expert_ids]
+                act = self.experts[0].activation(h)
+                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
+                expert_out = torch._grouped_mm(act, down_w, offs)
+                if self.bias:
+                    down_b = torch.stack([e.down.bias for e in self.experts])
+                    expert_out = expert_out + down_b[sorted_expert_ids]
+        else:
+            counts = F.one_hot(sorted_expert_ids, num_classes=E).sum(dim=0)
+            offs = torch.cat([torch.zeros(1, dtype=torch.long, device=flat.device), torch.cumsum(counts, 0)[:-1]])
+            intra_idx = torch.arange(sorted_expert_ids.shape[0], device=flat.device) - offs[sorted_expert_ids]
+
+            C_max = N
+            packed_inputs = torch.zeros(E, C_max, self.d_model, device=flat.device, dtype=flat.dtype)
+            packed_inputs[sorted_expert_ids, intra_idx] = sorted_inputs
+
+            if self.expert_kind == "swiglu":
+                gate_w = torch.stack([e.gate.weight for e in self.experts]).transpose(1, 2)
+                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
+                g = torch.bmm(packed_inputs, gate_w)
+                u = torch.bmm(packed_inputs, up_w)
+                if self.bias:
+                    gate_b = torch.stack([e.gate.bias for e in self.experts]).unsqueeze(1)
+                    up_b = torch.stack([e.up.bias for e in self.experts]).unsqueeze(1)
+                    g = g + gate_b
+                    u = u + up_b
+                act = F.silu(g) * u
+                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
+                expert_out_bmm = torch.bmm(act, down_w)
+                if self.bias:
+                    down_b = torch.stack([e.down.bias for e in self.experts]).unsqueeze(1)
+                    expert_out_bmm = expert_out_bmm + down_b
+            else:
+                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
+                h = torch.bmm(packed_inputs, up_w)
+                if self.bias:
+                    up_b = torch.stack([e.up.bias for e in self.experts]).unsqueeze(1)
+                    h = h + up_b
+                act = self.experts[0].activation(h)
+                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
+                expert_out_bmm = torch.bmm(act, down_w)
+                if self.bias:
+                    down_b = torch.stack([e.down.bias for e in self.experts]).unsqueeze(1)
+                    expert_out_bmm = expert_out_bmm + down_b
+
+            expert_out = expert_out_bmm[sorted_expert_ids, intra_idx]
+
+        expert_out = expert_out * sorted_weights
         out = torch.zeros_like(flat)
-        for index, expert in enumerate(self.experts):
-            rows, cols = torch.where(indices == index)
-            if rows.numel() == 0:
-                continue
-            gate = weights[rows, cols].unsqueeze(-1)
-            out.index_add_(0, rows, expert(flat.index_select(0, rows)) * gate)
+        out.index_add_(0, sorted_token_ids, expert_out)
         return out.reshape(x.shape)
 
     def extra_repr(self):

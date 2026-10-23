@@ -151,6 +151,12 @@ class CrossAttention(nn.Module):
         if self.qk_norm == "rms_norm":
             self.q_norm = RMSNorm(self.eps, affine=True, D=self.head_dim)
             self.k_norm = RMSNorm(self.eps, affine=True, D=self.head_dim)
+        self._mask_cache = {}
+
+    def _apply(self, fn, recurse=True):
+        res = super()._apply(fn, recurse=recurse)
+        self._mask_cache.clear()
+        return res
 
     def forward(self, x, context):
         batch, positions, _ = x.shape
@@ -170,17 +176,21 @@ class CrossAttention(nn.Module):
         if self.logit_softcap > 0.0:
             if kv_heads != heads:
                 repeats = heads // kv_heads
-                k_rep = k.repeat_interleave(repeats, dim=1)
-                v_rep = v.repeat_interleave(repeats, dim=1)
+                q_view = q.view(batch, kv_heads, repeats, positions, head_dim)
+                k_view = k.unsqueeze(2).transpose(-2, -1)
+                scores = (q_view @ k_view) / math.sqrt(head_dim)
+                scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
+                weights = scores.softmax(dim=-1)
+                if self.dropout > 0.0 and self.training:
+                    weights = F.dropout(weights, p=self.dropout)
+                attended = (weights @ v.unsqueeze(2)).view(batch, heads, positions, head_dim)
             else:
-                k_rep = k
-                v_rep = v
-            scores = (q @ k_rep.transpose(-2, -1)) / math.sqrt(head_dim)
-            scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
-            weights = scores.softmax(dim=-1)
-            if self.dropout > 0.0 and self.training:
-                weights = F.dropout(weights, p=self.dropout)
-            attended = weights @ v_rep
+                scores = (q @ k.transpose(-2, -1)) / math.sqrt(head_dim)
+                scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
+                weights = scores.softmax(dim=-1)
+                if self.dropout > 0.0 and self.training:
+                    weights = F.dropout(weights, p=self.dropout)
+                attended = weights @ v
         else:
             attended = F.scaled_dot_product_attention(
                 q, k, v,

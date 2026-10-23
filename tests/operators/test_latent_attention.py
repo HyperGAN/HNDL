@@ -116,3 +116,21 @@ def test_reduced_precision_on_cuda(dtype):
     out = model(x=x)["output"]
     assert out.dtype == torch_dtype
     assert out.isfinite().all()
+
+
+def test_weight_absorption_inference_parity(device):
+    plan = resolve(
+        "latent_attention(4, 32, qk_nope_head_dim=16, qk_rope_head_dim=16, causal=True)",
+        input_shape=("B", 8, 64),
+        output_shape=("B", 8, 64),
+    )
+    model = build(plan, device=device)
+    module = model[plan.nodes[0].id]
+    x = torch.randn(2, 8, 64, device=device)
+    with torch.no_grad():
+        out_standard = module(x)
+        assert not module.is_weight_absorbed
+        module.absorb_weights()
+        assert module.is_weight_absorbed
+        out_absorbed = module(x)
+        torch.testing.assert_close(out_absorbed, out_standard, atol=1e-5, rtol=1e-5)

@@ -375,15 +375,30 @@ class Attention(nn.Module):
         else:
             self.positions = None
         self._rope_cache = {}
+        self._mask_cache = {}
+        self._causal_cache = {}
 
     def _apply(self, fn, recurse=True):
         res = super()._apply(fn, recurse=recurse)
         self._rope_cache.clear()
+        self._mask_cache.clear()
+        self._causal_cache.clear()
         return res
 
     def position_bias(self):
         """The learned ``[heads, T, T]`` additive bias gathered from the table."""
         return self.relative_position_bias_table[self.relative_position_index].permute(2, 0, 1).contiguous()
+
+    def _get_causal_bias(self, positions, device, dtype):
+        if torch.compiler.is_compiling():
+            return _causal_bias(positions, device, dtype)
+        key = (str(device), dtype)
+        cached = self._causal_cache.get(key)
+        if cached is not None and cached.shape[0] >= positions:
+            return cached[:positions, :positions]
+        cached = _causal_bias(positions, device, dtype)
+        self._causal_cache[key] = cached
+        return cached
 
     def _get_rope_tables(self, positions, device, dtype):
         if torch.compiler.is_compiling():
@@ -406,17 +421,23 @@ class Attention(nn.Module):
                                 f"but the input carries T={positions}")
             mask = self.position_bias().to(dtype=x.dtype)
             if self.causal:
-                mask = mask + _causal_bias(positions, x.device, mask.dtype)
+                mask = mask + self._get_causal_bias(positions, x.device, mask.dtype)
 
         if self.window_size > 0:
-            i = torch.arange(positions, device=x.device)[:, None]
-            j = torch.arange(positions, device=x.device)[None, :]
-            diff = i - j
-            if self.causal:
-                blocked = (diff < 0) | (diff >= self.window_size)
+            mask_key = (positions, self.window_size, self.causal, str(x.device), x.dtype)
+            if not torch.compiler.is_compiling() and mask_key in self._mask_cache:
+                w_mask = self._mask_cache[mask_key]
             else:
-                blocked = diff.abs() >= self.window_size
-            w_mask = torch.zeros((positions, positions), device=x.device, dtype=x.dtype).masked_fill(blocked, float("-inf"))
+                i = torch.arange(positions, device=x.device)[:, None]
+                j = torch.arange(positions, device=x.device)[None, :]
+                diff = i - j
+                if self.causal:
+                    blocked = (diff < 0) | (diff >= self.window_size)
+                else:
+                    blocked = diff.abs() >= self.window_size
+                w_mask = torch.zeros((positions, positions), device=x.device, dtype=x.dtype).masked_fill(blocked, float("-inf"))
+                if not torch.compiler.is_compiling():
+                    self._mask_cache[mask_key] = w_mask
             mask = w_mask if mask is None else mask + w_mask
 
         q = _split_heads(self.q_proj(x), self.heads, self.head_dim)
@@ -437,21 +458,33 @@ class Attention(nn.Module):
         if self.logit_softcap > 0.0:
             if self.kv_heads != self.heads:
                 repeats = self.heads // self.kv_heads
-                k_rep = k.repeat_interleave(repeats, dim=1)
-                v_rep = v.repeat_interleave(repeats, dim=1)
+                q_view = q.view(batch, self.kv_heads, repeats, positions, self.head_dim)
+                k_view = k.unsqueeze(2).transpose(-2, -1)
+                scores = (q_view @ k_view) / math.sqrt(self.head_dim)
+                scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
+                if mask is not None:
+                    if mask.dim() == 2:
+                        scores = scores + mask.view(1, 1, 1, positions, positions)
+                    else:
+                        scores = scores + mask.view(1, self.kv_heads, repeats, positions, positions)
+                elif self.causal:
+                    causal_bias = self._get_causal_bias(positions, x.device, scores.dtype)
+                    scores = scores + causal_bias.view(1, 1, 1, positions, positions)
+                weights = scores.softmax(dim=-1)
+                if self.dropout > 0.0 and self.training:
+                    weights = F.dropout(weights, p=self.dropout)
+                attended = (weights @ v.unsqueeze(2)).view(batch, self.heads, positions, self.head_dim)
             else:
-                k_rep = k
-                v_rep = v
-            scores = (q @ k_rep.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
-            if mask is not None:
-                scores = scores + mask
-            elif self.causal:
-                scores = scores + _causal_bias(positions, x.device, scores.dtype)
-            weights = scores.softmax(dim=-1)
-            if self.dropout > 0.0 and self.training:
-                weights = F.dropout(weights, p=self.dropout)
-            attended = weights @ v_rep
+                scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+                scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
+                if mask is not None:
+                    scores = scores + mask
+                elif self.causal:
+                    scores = scores + self._get_causal_bias(positions, x.device, scores.dtype)
+                weights = scores.softmax(dim=-1)
+                if self.dropout > 0.0 and self.training:
+                    weights = F.dropout(weights, p=self.dropout)
+                attended = weights @ v
         else:
             attended = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0,

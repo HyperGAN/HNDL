@@ -284,9 +284,19 @@ class GatedDeltaAttention(nn.Module):
 
         if self.conv_size > 0:
             pad = (self.conv_size - 1, 0)
-            q = F.silu(self.conv_q(F.pad(q.transpose(1, 2), pad))[..., :t].transpose(1, 2))
-            k = F.silu(self.conv_k(F.pad(k.transpose(1, 2), pad))[..., :t].transpose(1, 2))
-            v = F.silu(self.conv_v(F.pad(v.transpose(1, 2), pad))[..., :t].transpose(1, 2))
+            inner_dim = self.heads * self.head_dim
+            qkv = torch.cat([q, k, v], dim=-1)
+            qkv_pad = F.pad(qkv.transpose(1, 2), pad)
+            conv_w = torch.cat([self.conv_q.weight, self.conv_k.weight, self.conv_v.weight], dim=0)
+            conv_b = (
+                torch.cat([self.conv_q.bias, self.conv_k.bias, self.conv_v.bias], dim=0)
+                if self.conv_q.bias is not None
+                else None
+            )
+            qkv_conv = F.silu(
+                F.conv1d(qkv_pad, conv_w, conv_b, groups=3 * inner_dim)[..., :t].transpose(1, 2)
+            )
+            q, k, v = qkv_conv.chunk(3, dim=-1)
 
         q = q.view(b, t, self.heads, self.head_dim).permute(0, 2, 1, 3)
         k = k.view(b, t, self.heads, self.head_dim).permute(0, 2, 1, 3)
@@ -324,50 +334,78 @@ class GatedDeltaAttention(nn.Module):
         out = torch.zeros(b, self.heads, t, self.head_dim, device=x.device, dtype=calc_dtype)
         S = torch.zeros(b, self.heads, self.head_dim, self.head_dim, device=x.device, dtype=calc_dtype)
 
-        for start in range(0, t, self.chunk_size):
-            end = min(start + self.chunk_size, t)
-            c_len = end - start
+        C = self.chunk_size
+        N_full = t // C
 
-            qc = q_f[:, :, start:end]
-            kc = k_f[:, :, start:end]
-            vc = v_f[:, :, start:end]
-            betac = beta_f[:, :, start:end]
+        if N_full > 0:
+            full_len = N_full * C
+            q_full = q_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
+            k_full = k_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
+            v_full = v_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
+            beta_full = beta_f[:, :, :full_len].view(b, self.heads, N_full, C)
+            log_a_full = log_alpha[:, :, :full_len].view(b, self.heads, N_full, C, -1)
 
-            log_alphac = log_alpha[:, :, start:end]
+            cum_log_a = torch.cumsum(log_a_full, dim=3)
+            lambda_init = torch.exp(cum_log_a)
+            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 85.0
+            K_pos = k_full * lambda_init
+            K_neg = k_full * torch.exp((-cum_log_a).clamp(max=max_neg_exp)) * beta_full.unsqueeze(-1)
+            Q_pos = q_full * lambda_init
+
+            inner_k = torch.matmul(K_pos, K_neg.transpose(-2, -1))
+            inner_q = torch.matmul(Q_pos, K_neg.transpose(-2, -1))
+
+            A = torch.tril(inner_k, diagonal=-1)
+            B_mat = torch.tril(inner_q, diagonal=0)
+
+            E_intra = torch.linalg.solve_triangular(A, v_full, upper=False, unitriangular=True)
+            k_decay_init = lambda_init * k_full
+            K_solve = torch.linalg.solve_triangular(A, k_decay_init, upper=False, unitriangular=True)
+
+            lambda_end = torch.exp(cum_log_a[:, :, :, -1])
+            lambda_to_end = torch.exp(cum_log_a[:, :, :, -1:] - cum_log_a)
+            W = beta_full.unsqueeze(-1) * (lambda_to_end * k_full)
+            Q_decay = Q_pos
+
+            for c in range(N_full):
+                E_c = E_intra[:, :, c] - torch.matmul(K_solve[:, :, c], S)
+                o_intra = B_mat[:, :, c] @ E_c
+                o_inter = torch.matmul(Q_decay[:, :, c], S)
+                out[:, :, c * C : (c + 1) * C] = o_intra + o_inter
+                S = lambda_end[:, :, c].unsqueeze(-1) * S + W[:, :, c].transpose(-2, -1) @ E_c
+
+        rem_start = N_full * C
+        if rem_start < t:
+            qc = q_f[:, :, rem_start:t]
+            kc = k_f[:, :, rem_start:t]
+            vc = v_f[:, :, rem_start:t]
+            betac = beta_f[:, :, rem_start:t]
+
+            log_alphac = log_alpha[:, :, rem_start:t]
             cum_log_alpha = torch.cumsum(log_alphac, dim=2)
             lambda_init = torch.exp(cum_log_alpha)
+
+            max_neg_exp = 700.0 if calc_dtype == torch.float64 else 85.0
+            K_pos = kc * lambda_init
+            K_neg = kc * torch.exp((-cum_log_alpha).clamp(max=max_neg_exp)) * betac.unsqueeze(-1)
+            Q_pos = qc * lambda_init
+
+            inner_k = torch.matmul(K_pos, K_neg.transpose(-2, -1))
+            inner_q = torch.matmul(Q_pos, K_neg.transpose(-2, -1))
+
+            A = torch.tril(inner_k, diagonal=-1)
+            B_mat = torch.tril(inner_q, diagonal=0)
 
             k_decay_init = lambda_init * kc
             v_pred_inter = torch.matmul(k_decay_init, S)
             v_prime = vc - v_pred_inter
 
-            diff = (cum_log_alpha.unsqueeze(3) - cum_log_alpha.unsqueeze(2)).clamp(max=0.0)
-            lambda_mat = torch.exp(diff)
-
-            ki = kc.unsqueeze(3)
-            kj = kc.unsqueeze(2)
-            bj = betac.unsqueeze(2)
-
-            inner_k = (ki * lambda_mat * kj).sum(-1) * bj
-            strict_lower = torch.tril(
-                torch.ones(c_len, c_len, dtype=torch.bool, device=x.device), diagonal=-1
-            )
-            A = torch.where(strict_lower, inner_k, torch.zeros_like(inner_k))
-            A = A + torch.eye(c_len, dtype=calc_dtype, device=x.device)
-
             E = torch.linalg.solve_triangular(A, v_prime, upper=False, unitriangular=True)
-
-            qi = qc.unsqueeze(3)
-            inner_q = (qi * lambda_mat * kj).sum(-1) * bj
-            lower = torch.tril(
-                torch.ones(c_len, c_len, dtype=torch.bool, device=x.device), diagonal=0
-            )
-            B_mat = torch.where(lower, inner_q, torch.zeros_like(inner_q))
 
             o_intra = B_mat @ E
             q_decay_init = lambda_init * qc
             o_inter = torch.matmul(q_decay_init, S)
-            out[:, :, start:end] = o_intra + o_inter
+            out[:, :, rem_start:t] = o_intra + o_inter
 
             lambda_end = torch.exp(cum_log_alpha[:, :, -1])
             S_init_decayed = lambda_end.unsqueeze(-1) * S
