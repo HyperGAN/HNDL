@@ -23,9 +23,10 @@ def _relation(s):
         dtype = s.dtype("x")
         if dtype is not None and dtype not in INDEX_DTYPES:
             s.error("E_DTYPE", f"{source.location} consumes token ids; declare input_dtype=\"int64\" (got {dtype})")
-        out = s.shape("out")
-        if out is not None and len(out) == 3 and args["output"] in ("features", "logits"):
-            s.axis("x", 1, out[1])
+        if "out" in s.outputs and not isinstance(provider, sources.LocalProvider):
+            out = s.shape("out")
+            if out is not None and len(out) == 3 and args["output"] in ("features", "logits"):
+                s.axis("x", 1, out[1])
     else:
         s.rank("x", 4)
         dtype = s.dtype("x")

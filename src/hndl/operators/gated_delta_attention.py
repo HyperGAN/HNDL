@@ -82,40 +82,47 @@ def _reference(module):
 
         beta = torch.sigmoid(F.linear(x, module.b_proj.weight, module.b_proj.bias)).permute(0, 2, 1)
 
+        calc_dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
         if decay_kind == "channel":
             a_down = F.linear(x, module.alpha_down.weight, module.alpha_down.bias)
             a_up = F.linear(F.silu(a_down), module.alpha_up.weight, module.alpha_up.bias)
             a_logits = a_up.view(b, t, heads, head_dim).permute(0, 2, 1, 3)
-            rate = torch.exp(module.A_log).view(1, heads, 1, head_dim)
-            alpha = torch.exp(-rate * F.softplus(a_logits))
+            rate = torch.exp(module.A_log.to(calc_dtype)).view(1, heads, 1, head_dim)
+            log_alpha = -rate * F.softplus(a_logits.to(calc_dtype))
         else:
             a_logits = (
                 F.linear(x, module.alpha_proj.weight, module.alpha_proj.bias)
                 .permute(0, 2, 1)
                 .unsqueeze(-1)
             )
-            rate = torch.exp(module.A_log).view(1, heads, 1, 1)
-            alpha = torch.exp(-rate * F.softplus(a_logits))
+            rate = torch.exp(module.A_log.to(calc_dtype)).view(1, heads, 1, 1)
+            log_alpha = -rate * F.softplus(a_logits.to(calc_dtype))
+        alpha = torch.exp(log_alpha)
 
         g_down = F.linear(x, module.gate_down.weight, module.gate_down.bias)
         g_up = F.linear(F.silu(g_down), module.gate_up.weight, module.gate_up.bias)
         g = torch.sigmoid(g_up).view(b, t, heads, head_dim)
 
         out = []
-        S = torch.zeros(b, heads, head_dim, head_dim, device=x.device, dtype=x.dtype)
+        S = torch.zeros(b, heads, head_dim, head_dim, device=x.device, dtype=calc_dtype)
+        q_c = q.to(calc_dtype)
+        k_c = k.to(calc_dtype)
+        v_c = v.to(calc_dtype)
+        beta_c = beta.to(calc_dtype)
+        alpha_c = alpha.to(calc_dtype)
         for step in range(t):
-            a_t = alpha[:, :, step, :, None]
+            a_t = alpha_c[:, :, step, :, None]
             S_decay = a_t * S
-            v_pred = (S_decay.transpose(-2, -1) @ k[:, :, step, :, None]).squeeze(-1)
-            err = v[:, :, step] - v_pred
-            S = S_decay + beta[:, :, step, None, None] * (k[:, :, step, :, None] @ err[:, :, None, :])
-            o_step = (S.transpose(-2, -1) @ q[:, :, step, :, None]).squeeze(-1)
+            v_pred = (S_decay.transpose(-2, -1) @ k_c[:, :, step, :, None]).squeeze(-1)
+            err = v_c[:, :, step] - v_pred
+            S = S_decay + beta_c[:, :, step, None, None] * (k_c[:, :, step, :, None] @ err[:, :, None, :])
+            o_step = (S.transpose(-2, -1) @ q_c[:, :, step, :, None]).squeeze(-1)
             out.append(o_step)
 
         out = torch.stack(out, dim=2)
         out = out.permute(0, 2, 1, 3)
-        out = F.rms_norm(out, (head_dim,), eps=eps) * module.rms_norm_weight
-        out = out * g
+        out = F.rms_norm(out, (head_dim,), eps=eps) * module.rms_norm_weight.to(calc_dtype)
+        out = (out * g.to(calc_dtype)).to(x.dtype)
         out = out.reshape(b, t, inner_dim)
         return F.linear(out, module.o_proj.weight, module.o_proj.bias)
 
@@ -290,42 +297,44 @@ class GatedDeltaAttention(nn.Module):
 
         beta = torch.sigmoid(self.b_proj(x)).permute(0, 2, 1)
 
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
         if self.decay_kind == "channel":
             a_logits = (
                 self.alpha_up(F.silu(self.alpha_down(x)))
                 .view(b, t, self.heads, self.head_dim)
                 .permute(0, 2, 1, 3)
             )
-            rate = torch.exp(self.A_log).view(1, self.heads, 1, self.head_dim)
-            alpha = torch.exp(-rate * F.softplus(a_logits))
+            rate = torch.exp(self.A_log.to(calc_dtype)).view(1, self.heads, 1, self.head_dim)
+            log_alpha = -rate * F.softplus(a_logits.to(calc_dtype))
         else:
             a_logits = self.alpha_proj(x).permute(0, 2, 1).unsqueeze(-1)
-            rate = torch.exp(self.A_log).view(1, self.heads, 1, 1)
-            alpha = torch.exp(-rate * F.softplus(a_logits))
+            rate = torch.exp(self.A_log.to(calc_dtype)).view(1, self.heads, 1, 1)
+            log_alpha = -rate * F.softplus(a_logits.to(calc_dtype))
 
         g = torch.sigmoid(self.gate_up(F.silu(self.gate_down(x)))).view(
             b, t, self.heads, self.head_dim
         )
-        return q, k, v, beta, alpha, g
+        return q, k, v, beta, log_alpha, g
 
     def forward(self, x):
         b, t, _ = x.shape
-        q, k, v, beta, alpha, g = self._prepare_inputs(x)
-        out = torch.zeros_like(q)
-        S = torch.zeros(b, self.heads, self.head_dim, self.head_dim, device=x.device, dtype=x.dtype)
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        q, k, v, beta, log_alpha, g = self._prepare_inputs(x)
+        q_f, k_f, v_f, beta_f = q.to(calc_dtype), k.to(calc_dtype), v.to(calc_dtype), beta.to(calc_dtype)
+        out = torch.zeros(b, self.heads, t, self.head_dim, device=x.device, dtype=calc_dtype)
+        S = torch.zeros(b, self.heads, self.head_dim, self.head_dim, device=x.device, dtype=calc_dtype)
 
         for start in range(0, t, self.chunk_size):
             end = min(start + self.chunk_size, t)
             c_len = end - start
 
-            qc = q[:, :, start:end]
-            kc = k[:, :, start:end]
-            vc = v[:, :, start:end]
-            betac = beta[:, :, start:end]
-            alphac = alpha[:, :, start:end].clamp(min=1e-7)
+            qc = q_f[:, :, start:end]
+            kc = k_f[:, :, start:end]
+            vc = v_f[:, :, start:end]
+            betac = beta_f[:, :, start:end]
 
-            log_alpha = torch.log(alphac)
-            cum_log_alpha = torch.cumsum(log_alpha, dim=2)
+            log_alphac = log_alpha[:, :, start:end]
+            cum_log_alpha = torch.cumsum(log_alphac, dim=2)
             lambda_init = torch.exp(cum_log_alpha)
 
             k_decay_init = lambda_init * kc
@@ -344,14 +353,9 @@ class GatedDeltaAttention(nn.Module):
                 torch.ones(c_len, c_len, dtype=torch.bool, device=x.device), diagonal=-1
             )
             A = torch.where(strict_lower, inner_k, torch.zeros_like(inner_k))
-            A = A + torch.eye(c_len, dtype=x.dtype, device=x.device)
+            A = A + torch.eye(c_len, dtype=calc_dtype, device=x.device)
 
-            if A.dtype in (torch.float16, torch.bfloat16):
-                E = torch.linalg.solve_triangular(
-                    A.float(), v_prime.float(), upper=False, unitriangular=True
-                ).to(x.dtype)
-            else:
-                E = torch.linalg.solve_triangular(A, v_prime, upper=False, unitriangular=True)
+            E = torch.linalg.solve_triangular(A, v_prime, upper=False, unitriangular=True)
 
             qi = qc.unsqueeze(3)
             inner_q = (qi * lambda_mat * kj).sum(-1) * bj
@@ -374,7 +378,12 @@ class GatedDeltaAttention(nn.Module):
             S = S_init_decayed + S_update
 
         out = out.permute(0, 2, 1, 3)
-        out = F.rms_norm(out, (self.head_dim,), eps=self.eps) * self.rms_norm_weight
-        out = out * g
+        out = F.rms_norm(out, (self.head_dim,), eps=self.eps) * self.rms_norm_weight.to(calc_dtype)
+        out = (out * g.to(calc_dtype)).to(x.dtype)
         out = out.reshape(b, t, self.heads * self.head_dim)
         return self.o_proj(out)
+
+    def extra_repr(self):
+        return (f"heads={self.heads}, head_dim={self.head_dim}, "
+                f"decay_kind={self.decay_kind!r}, chunk_size={self.chunk_size}, "
+                f"conv_size={self.conv_size}")

@@ -24,6 +24,8 @@ class Registry:
         self._identities = {}
         self._pretrained_providers = {}
         self._pretrained_readouts = {}
+        self._pretrained_shape_fns = {}
+        self._pretrained_contracts = {}
 
     @property
     def aliases(self):
@@ -50,6 +52,10 @@ class Registry:
         registry = cls()
         registry._aliases = dict(_BUILTINS_TEMPLATE._aliases)
         registry._identities = dict(_BUILTINS_TEMPLATE._identities)
+        registry._pretrained_providers = dict(_BUILTINS_TEMPLATE._pretrained_providers)
+        registry._pretrained_readouts = dict(_BUILTINS_TEMPLATE._pretrained_readouts)
+        registry._pretrained_shape_fns = dict(_BUILTINS_TEMPLATE._pretrained_shape_fns)
+        registry._pretrained_contracts = dict(_BUILTINS_TEMPLATE._pretrained_contracts)
         return registry
 
     def _add(self, spec):
@@ -104,13 +110,30 @@ class Registry:
     def pretrained_providers(self):
         return tuple(self._pretrained_providers)
 
-    def pretrained_provider(self, name, build, readouts=None):
+    def pretrained_provider(self, name, build, readouts=None, *args, contract="tensor", shape_fn=None, **kwargs):
         """Register a trusted architecture builder for ``pretrained(..., provider=name)``.
 
         ``readouts`` optionally maps a name to a ``callable(model, x)`` returning
         one tensor, selected in configuration with ``readout="<name>"`` when the
         model's own ``forward`` is not what the network wants.
+
+        ``contract`` declares what inputs the model consumes: ``"tensor"`` (default,
+        floating-point), ``"ids"`` (rank 2 [B, T] int64 token IDs), or ``"pixels"``.
+
+        ``shape_fn`` optionally provides an explicit output shape calculation
+        ``callable(input_shape, output, **kwargs) -> tuple[int, ...]``, bypassing
+        PyTorch meta-device tracing during graph resolution.
         """
+        if len(args) == 1:
+            contract = args[0]
+        elif len(args) >= 2:
+            contract = args[0]
+            shape_fn = args[1]
+        if "contract" in kwargs:
+            contract = kwargs["contract"]
+        if "shape_fn" in kwargs:
+            shape_fn = kwargs["shape_fn"]
+
         if type(name) is not str or not name or len(name) > MAX_PROVIDER_NAME:
             raise HNDLError("E_REGISTRY", f"A pretrained provider name must be a string of 1-{MAX_PROVIDER_NAME} characters")
         if not callable(build):
@@ -119,8 +142,23 @@ class Registry:
             raise HNDLError("E_REGISTRY", f"Duplicate pretrained provider {name!r}")
         if readouts is not None and not isinstance(readouts, Mapping):
             raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} readouts must be a mapping of name to callable(model, x)")
+        if shape_fn is not None and not callable(shape_fn):
+            raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} shape_fn must be a callable")
+
+        if hasattr(contract, "kind"):
+            contract_str = contract.kind
+        elif isinstance(contract, str):
+            contract_str = contract
+        else:
+            raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} contract must be a string or Contract, got {type(contract).__name__}")
+        if contract_str not in ("tensor", "ids", "pixels"):
+            raise HNDLError("E_REGISTRY", f"Pretrained provider {name!r} contract must be 'tensor', 'ids', or 'pixels', got {contract_str!r}")
+
         self._pretrained_providers[name] = build
         self._pretrained_readouts[name] = {}
+        if shape_fn is not None:
+            self._pretrained_shape_fns[name] = shape_fn
+        self._pretrained_contracts[name] = contract_str
         for readout_name, readout in (readouts or {}).items():
             self.pretrained_readout(name, readout_name, readout)
         return build
@@ -143,6 +181,14 @@ class Registry:
     def pretrained_builder(self, name):
         """The registered builder for ``name``, or None."""
         return self._pretrained_providers.get(name)
+
+    def pretrained_shape_fn(self, name):
+        """The registered shape_fn for ``name``, or None."""
+        return self._pretrained_shape_fns.get(name)
+
+    def pretrained_contract(self, name):
+        """The registered contract kind for ``name``, defaulting to 'tensor'."""
+        return self._pretrained_contracts.get(name, "tensor")
 
     def pretrained_readouts(self, provider):
         """The readouts registered for ``provider``, as a name to callable mapping."""

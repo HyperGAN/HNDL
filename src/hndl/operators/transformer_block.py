@@ -169,9 +169,9 @@ class TransformerBlock(nn.Module):
     | LLaMA-style decoder | `transformer_block(heads, norm="rms_norm", causal=True)` |
     | CaiT / DINOv2 | `transformer_block(heads, layer_scale=True)` |
 
-    (LLaMA additionally uses a gated `swiglu` feed-forward and rotary
-    embeddings, which this block does not; compose `attention(rope=True)` and
-    `swiglu` by hand for that.)
+    (LLaMA-style architectures can use `ffn_kind="swiglu"` and `rope=True`
+    directly within `transformer_block`, or compose `attention(rope=True)` and
+    `swiglu` by hand.)
 
     **Train and eval.** ``dropout`` is passed to both branches — the attention
     weights and the feed-forward hidden activations — and is active in
@@ -198,7 +198,7 @@ class TransformerBlock(nn.Module):
 
         self.attn = Attention(
             heads=heads, causal=causal, dropout=dropout, bias=self.bias, rope=rope, D=D,
-            rope_theta=rope_theta, kv_heads=kv_heads, qk_norm=qk_norm,
+            rope_theta=rope_theta, kv_heads=kv_heads, qk_norm=qk_norm, eps=eps,
         )
 
         actual_hidden = hidden if hidden > 0 else (mlp_ratio * int(D))

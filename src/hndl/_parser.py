@@ -207,7 +207,8 @@ class Validator:
         if not elements or not all(isinstance(item, ast.Name) and _valid_name(item.id) for item in elements):
             self.reject("Assignment targets must be names or a flat tuple/list of names", node)
         names = [item.id for item in elements]
-        if len(set(names)) != len(names):
+        non_discard = [name for name in names if name != LOOP_TARGET]
+        if len(set(non_discard)) != len(non_discard):
             self.reject("Unpacking targets must be distinct", node)
         if any(name in self.aliases for name in names):
             self.reject("Registered operator aliases cannot be rebound", node, code="E_NAME")

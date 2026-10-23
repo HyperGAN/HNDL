@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`cast` runtime crash & buffer pollution remediation (B-01)**: Eliminated `_prototype` buffer pollution from module `state_dict()` and `buffers()` in `Cast`, added `"float64"` to `DTYPES`, and updated `GraphModule._effective_dtype` to track compute-domain ports and leave explicit integer, boolean, and float64 ports unchanged under `.half()` or `.to()`.
+- **`torch.compile` RoPE cache poisoning and device retention (B-02)**: Added cache clearing in `_apply()` across `RoPE`, `Attention`, and `LatentAttention` modules to eliminate device retention on `.to(device)` or `.cpu()`, bypassed caching when `torch.compiler.is_compiling()` is true, and added max-length cache slicing for variable-length sequence evaluation.
+- **`gated_delta_attention` float16 backward autograd stability (B-03)**: Evaluated log-space gating decay `log_alpha` and recurrence accumulation in `calc_dtype` (`float32`/`float64`), preventing reciprocal/exponential overflow and subsequent `NaN` gradients during reduced-precision backward passes.
+- **`grn` and `sinusoidal_embed` float16 numerical precision (B-04)**: Evaluated spatial channel L2 norm in float32 within `GRN` to prevent overflow on large spatial dimensions, and evaluated frequency angles in float32 while preserving `freqs` buffer precision across `.half()` in `SinusoidalEmbed`.
+- **`matmul._relation` rank inference monotonicity (B-05)**: Deferred rank guesses past Sweep 0 to maintain monotonic constraint narrowing and support backward rank inference from output contracts, and updated `Matmul` docstring to document rank 2, rank 3, and rank 4 batched matrix products.
+- **`conv1d(causal=True, stride > 1)` shape interval inference (B-06)**: Emitted exact pre-image length intervals `s.interval("x", length_axis, (out_len - 1) * stride + 1, out_len * stride)` instead of raising `E_AMBIGUOUS` during backward length resolution.
+- **`pretrained` native registry contract & shape_fn support (B-07)**: Native `contract` and `shape_fn` support implemented directly in `Registry.pretrained_provider`, eliminating monkey-patching in `pretrained.py`, inspecting signatures cleanly without trial-and-error exception swallowing, and guarding output port validation when `contract="ids"`.
+- **`adaln_zero` `gate=False` support and recipe alignments (B-08)**: Added `gate` parameter to `adaln_zero` supporting scale/shift modulation without residual gating, updated `dit_tiny.hndl` and `deepseek_moe_tiny.hndl` recipes with verified parameter counts and semantic sidecar digests.
+- **Multi-output unpacking multiple `_` discard targets (B-09)**: Permitted repeated wildcard target `_` in unpacking assignments without raising false `E_ASSIGN` duplicate target errors, and omitted `_` from unrolled loop local variable bindings.
+- **`l2_norm` dim validation, `transformer_block` `eps` propagation & `extra_repr` (B-10)**: Validated `dim` bounds in `l2_norm._relation`, forwarded `eps=eps` to `Attention` in `transformer_block`, and added informative `extra_repr()` implementations to all v0.9.0 operators.
+
 ## 0.9.0 (2026-10-17)
 
 - **MoE float16 backward autograd stability**: Clamped router score summation denominator to `1e-4` in `moe` sigmoid scoring, preventing reciprocal overflow to `+inf` and subsequent `NaN` gradients during float16 backward backpropagation.

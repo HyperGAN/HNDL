@@ -57,9 +57,12 @@ class _Interpreter:
             if type(value) is not tuple or len(names) != len(value) or not all(isinstance(item, Symbol) for item in value):
                 raise _error("E_OUTPUT_ARITY", "Tuple unpacking must match the declared tensor outputs",
                              self.where(statement["source"]))
-            self.locals.update(zip(names, value))
+            for name, val in zip(names, value):
+                if name != "_":
+                    self.locals[name] = val
         else:
-            self.locals[names[0]] = value
+            if names[0] != "_":
+                self.locals[names[0]] = value
 
     def for_statement(self, statement):
         capture = self.capture

@@ -253,11 +253,31 @@ class LatentAttention(nn.Module):
 
         self.o_proj = nn.Linear(self.heads * self.v_head_dim, self.D, bias=self.bias)
 
+    @property
+    def _rope_cache(self):
+        return getattr(self, "_cache", {})
+
+    def _apply(self, fn, recurse=True):
+        res = super()._apply(fn, recurse=recurse)
+        if hasattr(self, "_cache"):
+            self._cache.clear()
+        return res
+
+
     def _tables(self, positions, dim, device, dtype):
-        key = (positions, dim, str(device), dtype)
+        if torch.compiler.is_compiling():
+            calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
+            exponent = torch.arange(0, dim, 2, device=device, dtype=calc_dtype) / dim
+            inverse_frequency = self.rope_theta ** (-exponent)
+            angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
+            duplicated = torch.cat((angles, angles), dim=-1)
+            cos = duplicated.cos().to(dtype)
+            sin = duplicated.sin().to(dtype)
+            return cos, sin
+        key = (dim, str(device), dtype)
         hit = self._cache.get(key)
-        if hit is not None:
-            return hit
+        if hit is not None and hit[0].shape[0] >= positions:
+            return hit[0][:positions], hit[1][:positions]
         calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
         exponent = torch.arange(0, dim, 2, device=device, dtype=calc_dtype) / dim
         inverse_frequency = self.rope_theta ** (-exponent)
@@ -300,3 +320,8 @@ class LatentAttention(nn.Module):
         out_attn = F.scaled_dot_product_attention(q, k, v, scale=self.scale, is_causal=self.causal)
         out = self.o_proj(out_attn.transpose(1, 2).contiguous().view(b, t, self.heads * self.v_head_dim))
         return out
+
+    def extra_repr(self):
+        return (f"heads={self.heads}, kv_lora_rank={self.kv_lora_rank}, "
+                f"qk_nope_head_dim={self.qk_nope_head_dim}, qk_rope_head_dim={self.qk_rope_head_dim}, "
+                f"v_head_dim={self.v_head_dim}, causal={self.causal}")

@@ -41,7 +41,10 @@ def _relation(s):
             if in_len is not None:
                 s.axis("out", length_axis, (in_len - 1) // stride + 1)
             elif out_len is not None:
-                s.error("E_AMBIGUOUS", f"Causal conv1d with stride={stride} cannot uniquely infer input length from output length {out_len}")
+                if out_len <= 0:
+                    s.error("E_CONSTRAINT", "Causal conv1d output length must be positive")
+                else:
+                    s.interval("x", length_axis, (out_len - 1) * stride + 1, out_len * stride)
     else:
         conv_axis(s, length_axis, *(args[key] for key in ("kernel_size", "stride", "padding", "dilation")))
 
@@ -152,3 +155,11 @@ class Conv1d(nn.Conv1d):
         if self.channels_last:
             out = out.transpose(1, 2).contiguous()
         return out
+
+    def extra_repr(self):
+        s = super().extra_repr()
+        if self.causal:
+            s += ", causal=True"
+        if self.channels_last:
+            s += ", channels_last=True"
+        return s

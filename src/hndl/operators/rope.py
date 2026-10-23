@@ -102,11 +102,25 @@ class RoPE(nn.Module):
         self.theta = float(theta)
         self._cache = {}
 
+    def _apply(self, fn, recurse=True):
+        res = super()._apply(fn, recurse=recurse)
+        self._cache.clear()
+        return res
+
     def _tables(self, positions, head_dim, device, dtype):
-        key = (positions, head_dim, str(device), dtype)
+        if torch.compiler.is_compiling():
+            calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
+            exponent = torch.arange(0, head_dim, 2, device=device, dtype=calc_dtype) / head_dim
+            inverse_frequency = self.theta ** (-exponent)
+            angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
+            duplicated = torch.cat((angles, angles), dim=-1)
+            cos = duplicated.cos().to(dtype)[None, :, None, :]
+            sin = duplicated.sin().to(dtype)[None, :, None, :]
+            return cos, sin
+        key = (head_dim, str(device), dtype)
         hit = self._cache.get(key)
-        if hit is not None:
-            return hit
+        if hit is not None and hit[0].shape[1] >= positions:
+            return hit[0][:, :positions, :, :], hit[1][:, :positions, :, :]
         calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
         exponent = torch.arange(0, head_dim, 2, device=device, dtype=calc_dtype) / head_dim
         inverse_frequency = self.theta ** (-exponent)
@@ -124,3 +138,6 @@ class RoPE(nn.Module):
         xh = x.view(b, t, self.heads, dh)
         rotated = xh * cos + _rotate_half(xh) * sin
         return rotated.view(b, t, d)
+
+    def extra_repr(self):
+        return f"heads={self.heads}, theta={self.theta}"

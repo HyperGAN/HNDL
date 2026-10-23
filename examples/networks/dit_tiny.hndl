@@ -14,7 +14,8 @@ for _ in range(2):
     f = swiglu(normed_ffn, 384, bias=False, name="ffn")
     x = add(x, broadcast_mul(f, gate_ffn), name="ffn_res")
 
-normed_out, _ = adaln_zero(x, cond, name="final_adaln")
-reshape(normed_out, 128, 8, 8, name="to_spatial")
+normed_out = adaln_zero(x, cond, gate=False, name="final_adaln")
+transpose(normed_out, 1, 2, name="tokens_to_channels")
+reshape(128, 8, 8, name="to_spatial")
 conv(48, kernel_size=1, name="unpatchify")
 pixel_shuffle(4, name="to_pixels")

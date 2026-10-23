@@ -7,7 +7,7 @@ for _ in range(2):
     h = add(h, a, name="attn_res")
     n = rms_norm(h, name="ffn_norm")
     shared = swiglu(n, 256, bias=False, name="shared_expert")
-    routed = moe(n, 4, 256, top_k=2, activation="silu", name="routed_experts")
+    routed = moe(n, 4, 256, top_k=2, expert_kind="swiglu", bias=False, scoring="sigmoid", name="routed_experts", init={"router.weight": normal(std=0.02)})
     combined = add(shared, routed, name="moe_sum")
     h = add(h, combined, name="ffn_res")
 

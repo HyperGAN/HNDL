@@ -10,8 +10,10 @@ def _reference(module):
     gamma, beta, eps = module.gamma, module.beta, module.eps
 
     def run(x):
-        gx = torch.sqrt(torch.sum(x**2, dim=(2, 3), keepdim=True) + eps)
-        nx = gx / (gx.mean(dim=1, keepdim=True) + eps)
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        x_calc = x.to(calc_dtype)
+        gx = torch.sqrt(torch.sum(x_calc**2, dim=(2, 3), keepdim=True) + eps)
+        nx = (gx / (gx.mean(dim=1, keepdim=True) + eps)).to(x.dtype)
         return gamma * (x * nx) + beta + x
 
     return run
@@ -59,6 +61,11 @@ class GRN(nn.Module):
         self.beta = nn.Parameter(torch.zeros(1, int(C), 1, 1))
 
     def forward(self, x):
-        gx = torch.sqrt(torch.sum(x**2, dim=(2, 3), keepdim=True) + self.eps)
-        nx = gx / (gx.mean(dim=1, keepdim=True) + self.eps)
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        x_calc = x.to(calc_dtype)
+        gx = torch.sqrt(torch.sum(x_calc**2, dim=(2, 3), keepdim=True) + self.eps)
+        nx = (gx / (gx.mean(dim=1, keepdim=True) + self.eps)).to(x.dtype)
         return self.gamma * (x * nx) + self.beta + x
+
+    def extra_repr(self):
+        return f"eps={self.eps}"

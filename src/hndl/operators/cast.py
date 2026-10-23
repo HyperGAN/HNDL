@@ -20,7 +20,7 @@ def _reference(module):
     target = module.target_dtype
 
     def run(x):
-        dt = module._sink.dtype if target == "compute" else _TORCH_DTYPES[target]
+        dt = module._prototype.dtype if target == "compute" else _TORCH_DTYPES[target]
         return x.to(dt)
 
     return run
@@ -55,8 +55,21 @@ class Cast(nn.Module):
     def __init__(self, dtype="compute"):
         super().__init__()
         self.target_dtype = dtype
-        self.register_buffer("_sink", torch.empty(0))
+        self._prototype = torch.empty(0)
+
+    @property
+    def dtype(self):
+        return self._prototype.dtype
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        self._prototype = fn(self._prototype)
+        return self
 
     def forward(self, x):
-        target = self._sink.dtype if self.target_dtype == "compute" else _TORCH_DTYPES[self.target_dtype]
+        target = self._prototype.dtype if self.target_dtype == "compute" else _TORCH_DTYPES[self.target_dtype]
         return x.to(target)
+
+    def extra_repr(self):
+        return f"dtype={self.target_dtype!r}"
+

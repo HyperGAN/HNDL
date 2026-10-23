@@ -7,6 +7,19 @@ from torch.nn import functional as F
 from ..operator import Arg, Example, operator
 
 
+def _relation(s):
+    shape = s.shape("x") or s.shape("out")
+    if shape is None:
+        return
+    dim = s.args["dim"]
+    rank = len(shape)
+    axis = dim + rank if dim < 0 else dim
+    if not 0 <= axis < rank:
+        s.error("E_ARGUMENT", f"dim={dim} is out of range for a rank-{rank} tensor")
+    if axis == 0:
+        s.error("E_ARGUMENT", f"dim={dim} selects the batch axis; l2_norm must normalize a non-batch axis")
+
+
 def _reference(module):
     dim = module.dim
     eps = module.eps
@@ -22,8 +35,10 @@ def _reference(module):
     "l2_norm",
     summary="Parameter-free L2 normalization along a specified axis.",
     shape="x[B, ...] -> out[B, ...]",
+    relation=_relation,
+    shape_text="out has the shape of x; dim must resolve to a non-batch axis",
     args={
-        "dim": Arg(int, -1, positional=False, help="Axis along which L2 normalization is computed."),
+        "dim": Arg(int, -1, positional=True, help="Axis along which L2 normalization is computed."),
         "eps": Arg(
             float,
             1e-6,
@@ -58,3 +73,6 @@ class L2Norm(nn.Module):
 
     def forward(self, x):
         return F.normalize(x, p=2.0, dim=self.dim, eps=self.eps)
+
+    def extra_repr(self):
+        return f"dim={self.dim}, eps={self.eps}"

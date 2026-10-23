@@ -376,16 +376,24 @@ class Attention(nn.Module):
             self.positions = None
         self._rope_cache = {}
 
+    def _apply(self, fn, recurse=True):
+        res = super()._apply(fn, recurse=recurse)
+        self._rope_cache.clear()
+        return res
+
     def position_bias(self):
         """The learned ``[heads, T, T]`` additive bias gathered from the table."""
         return self.relative_position_bias_table[self.relative_position_index].permute(2, 0, 1).contiguous()
 
     def _get_rope_tables(self, positions, device, dtype):
-        key = (positions, device, dtype, self.rope_theta)
+        if torch.compiler.is_compiling():
+            return _rope_tables(positions, self.head_dim, device, dtype, theta=self.rope_theta)
+        key = (str(device), dtype, self.rope_theta)
         cached = self._rope_cache.get(key)
-        if cached is None:
-            cached = _rope_tables(positions, self.head_dim, device, dtype, theta=self.rope_theta)
-            self._rope_cache[key] = cached
+        if cached is not None and cached[0].shape[2] >= positions:
+            return cached[0][:, :, :positions, :], cached[1][:, :, :positions, :]
+        cached = _rope_tables(positions, self.head_dim, device, dtype, theta=self.rope_theta)
+        self._rope_cache[key] = cached
         return cached
 
     def forward(self, x):

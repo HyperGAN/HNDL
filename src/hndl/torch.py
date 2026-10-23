@@ -19,6 +19,7 @@ from torch import nn
 from torch.nn.modules import module as _torch_module
 
 from .errors import HNDLError, describe_iterations
+from .operator import COMPUTE_DTYPES
 from .settings import MATRIX_SCHEMES
 from .types import _is_chain, batch_multiple, contract_header
 
@@ -31,10 +32,11 @@ if TYPE_CHECKING:
 SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes",
                              "_input_names", "_input_set", "_input_dtypes", "_output_dtypes",
                              "_build_dtype", "_node_labels", "_single_output",
-                             "_spec_inputs", "_spec_outputs", "_spec_in", "_spec_out"})
+                             "_spec_inputs", "_spec_outputs", "_spec_in", "_spec_out",
+                             "_symbolic_compute_ports", "_output_is_compute"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
-          "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
+          "float64": torch.float64, "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
 
 #: Distinguishes "no batch resolved yet" from a legitimately resolved ``None``.
 _UNSET = object()
@@ -254,15 +256,49 @@ class GraphModule(nn.Module):
         self._input_dtypes = MappingProxyType(
             {name: DTYPES[entry["dtype"]] for name, entry in plan.inputs.items()})
         self._port_dtypes = {}
+        self._symbolic_compute_ports = set()
         produced = {f"input:{name}": entry["dtype"] for name, entry in plan.inputs.items()}
+        produced_is_compute = {f"input:{name}": entry["dtype"] in COMPUTE_DTYPES for name, entry in plan.inputs.items()}
         for node in plan.nodes:
             spec = plan.registry.by_identity(node.op)
-            declared = {port: spec.port_dtype(port, plan.dtype) for port in (*node.inputs, *node.outputs)}
+            declared = {}
+            for port in (*node.inputs, *node.outputs):
+                if spec._variadic_member(spec.variadic, port):
+                    raw_d = spec.inputs[0].dtype
+                elif spec._variadic_member(spec.variadic_output, port):
+                    raw_d = spec.outputs[0].dtype
+                else:
+                    raw_d = spec._port_dtypes.get(port, "compute")
+
+                if spec.identity == "cast" and "dtype" in node.args and port in spec.output_ports:
+                    target_dtype = node.args["dtype"]
+                    declared[port] = plan.dtype if target_dtype == "compute" else target_dtype
+                    if target_dtype == "compute":
+                        self._symbolic_compute_ports.add((node.id, port))
+                elif port in node.inputs and raw_d == "any":
+                    producer_ref = node.inputs[port]
+                    if produced_is_compute.get(producer_ref, False):
+                        self._symbolic_compute_ports.add((node.id, port))
+                    declared[port] = spec.port_dtype(port, plan.dtype)
+                else:
+                    d = spec.port_dtype(port, plan.dtype)
+                    declared[port] = d
+                    if raw_d == "compute":
+                        self._symbolic_compute_ports.add((node.id, port))
             self._port_dtypes[node.id] = {port: None if name == "any" else DTYPES[name] for port, name in declared.items()}
             for port in node.outputs:
-                produced[f"node:{node.id}/{port}"] = plan.dtype if declared[port] == "any" else declared[port]
+                ref = f"node:{node.id}/{port}"
+                if spec.identity == "cast" and "dtype" in node.args:
+                    target_dtype = node.args["dtype"]
+                    produced[ref] = plan.dtype if target_dtype == "compute" else target_dtype
+                    produced_is_compute[ref] = (target_dtype == "compute")
+                else:
+                    produced[ref] = plan.dtype if declared[port] == "any" else declared[port]
+                    produced_is_compute[ref] = (declared[port] == "compute" or declared[port] == "any")
+
         self._output_dtypes = MappingProxyType(
             {name: DTYPES[produced[entry["ref"]]] for name, entry in plan.outputs.items()})
+        self._output_is_compute = {name: produced_is_compute.get(entry["ref"], False) for name, entry in plan.outputs.items()}
         # What an error needs to name a node: its operation and source position,
         # including the loop iterations a config unrolled it from.
         self._node_labels = MappingProxyType(
@@ -357,7 +393,7 @@ class GraphModule(nn.Module):
         self._state_seen = None
         return self
 
-    def _effective_dtype(self, dtype):
+    def _effective_dtype(self, dtype, is_compute=True):
         """The dtype a port carries now, after any floating-point cast.
 
         Ports declared at the plan's compute dtype follow the module through
@@ -366,6 +402,8 @@ class GraphModule(nn.Module):
         ports declared ``any`` are untouched, because those casts leave
         non-floating state alone.
         """
+        if not is_compute:
+            return dtype
         return self._runtime_dtype if dtype is not None and dtype == self._build_dtype else dtype
 
     # -- errors -------------------------------------------------------------
@@ -446,7 +484,7 @@ class GraphModule(nn.Module):
         effective = self._effective_dtype
         for port, value in zip(self._port_orders[node_id], bound):
             spec = self._spec_in[node_id][port]
-            dtype = effective(self._port_dtypes[node_id][port])
+            dtype = effective(self._port_dtypes[node_id][port], (node_id, port) in self._symbolic_compute_ports)
             lines.append(f"  input {port!r}: got {_tensor_text(value)}; contract "
                          f"{_contract_text(spec, batch)}:{_dtype_text(dtype)} on {self._runtime_device}")
         if type(error).__module__.startswith(("torch._dynamo", "torch._inductor")):
@@ -667,17 +705,17 @@ class GraphModule(nn.Module):
                        for node, ports in self._spec_in.items()}
         expected_out = {node: {p: resolve(s, batch) for p, s in ports.items()}
                         for node, ports in self._spec_out.items()}
-        effdt = {node: {p: effective(d) for p, d in ports.items()}
+        effdt = {node: {p: effective(d, (node, p) in self._symbolic_compute_ports) for p, d in ports.items()}
                  for node, ports in self._port_dtypes.items()}
         compiled = (
             batch, self._runtime_dtype,
             tuple((name, f"input:{name}", resolve(self._spec_inputs[name], batch),
-                   effective(self._input_dtypes[name]),
+                   effective(self._input_dtypes[name], self.plan.inputs[name]["dtype"] in COMPUTE_DTYPES),
                    (f"input {name!r}", self._spec_inputs[name], None))
                   for name in self._input_names),
             self._build_program(expected_in, expected_out, effdt),
             tuple((name, entry["ref"], resolve(self._spec_outputs[name], batch),
-                   effective(self._output_dtypes[name]),
+                   effective(self._output_dtypes[name], self._output_is_compute.get(name, False)),
                    (f"output {name!r}", self._spec_outputs[name], None))
                   for name, entry in self.plan.outputs.items()))
         if cache:

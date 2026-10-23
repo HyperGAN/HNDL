@@ -6,6 +6,6 @@
     "cond": ["B", 128]
   },
   "output_shape": ["B", 3, 32, 32],
-  "parameters": 695472,
-  "reference": "Architecture follows Peebles & Xie 2023, \"Scalable Diffusion Models with Transformers\" (DiT, ICCV 2023, arXiv:2212.09748); parameter count checked against plain PyTorch: patch_stem 128·3·4·4+128 = 6,272, pos_emb 64·128 = 8,192, 2 DiT blocks each (attn_adaln 128·384+384 = 49,536, attn 4·(128·128+128)+64 = 66,112, ffn_adaln 128·384+384 = 49,536, SwiGLU 3·(128·384) = 147,456; block total 312,640) = 625,280, final_adaln 49,536, unpatchify 48·128·1·1+48 = 6,192, pixel_shuffle 0; total 6,272 + 8,192 + 625,280 + 49,536 + 6,192 = 695,472."
+  "parameters": 678960,
+  "reference": "Architecture follows Peebles & Xie 2023, \"Scalable Diffusion Models with Transformers\" (DiT, ICCV 2023, arXiv:2212.09748); parameter count checked against plain PyTorch: patch_stem 128·3·4·4+128 = 6,272, pos_emb 64·128 = 8,192, 2 DiT blocks each (attn_adaln 128·384+384 = 49,536, attn 4·(128·128+128)+64 = 66,112, ffn_adaln 128·384+384 = 49,536, SwiGLU 3·(128·384) = 147,456; block total 312,640) = 625,280, final_adaln 128·256+256 = 33,024, unpatchify 48·128·1·1+48 = 6,192, pixel_shuffle 0; total 6,272 + 8,192 + 625,280 + 33,024 + 6,192 = 678,960."
 }
