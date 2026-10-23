@@ -89,3 +89,12 @@ def test_dims_may_be_given_positionally_or_by_keyword():
 def test_invalid_axis_lists_and_contradictions_report_their_code(source, input_shape, output_shape, code):
     with pytest.raises(HNDLError, match=code):
         resolve(source, input_shape=input_shape, output_shape=output_shape)
+
+
+def test_permute_rank_5(device):
+    plan = resolve("permute(4, 1, 2, 3)", input_shape=("B", 2, 3, 4, 5), output_shape=("B", 5, 2, 3, 4))
+    model = build(plan, device=device)
+    x = torch.randn(2, 2, 3, 4, 5, device=device)
+    out = model(x=x)["output"]
+    assert out.shape == (2, 5, 2, 3, 4)
+    torch.testing.assert_close(out, x.permute(0, 4, 1, 2, 3))

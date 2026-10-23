@@ -21,11 +21,12 @@ x[B, ..., D] -> out[B, ..., D]
 | --- | --- | --- | --- | --- |
 | `experts` (positional) | int | required | >= 1; <= 2147483647 | Number of feed-forward experts. |
 | `hidden` (positional) | int | required | >= 1; <= 2147483647 | Inner width of every expert's feed-forward. |
-| `top_k` | int | `2` | >= 1 | Experts each token is routed to; must not exceed experts. |
+| `top_k` (positional) | int | `2` | >= 1 | Experts each token is routed to; must not exceed experts. |
 | `activation` | str | `"gelu"` | one of `gelu`, `gelu_tanh`, `relu`, `silu`, `quick_gelu` | Nonlinearity inside each expert: "gelu", "gelu_tanh", "relu" or "silu". |
 | `expert_kind` | str | `"mlp"` | one of `mlp`, `swiglu` | Expert architecture: "mlp" (2-layer) or "swiglu" (3-projection gated). |
 | `bias` | bool | `True` | — | Enable learned biases in expert projections. |
 | `scoring` | str | `"softmax"` | one of `softmax`, `sigmoid` | Routing gate affinity normalization: "softmax" or "sigmoid". |
+| `routed_scaling_factor` | float | `1.0` | > 0.0 | Multiplier applied to routed expert outputs. |
 
 ## Description
 

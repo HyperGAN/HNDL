@@ -27,6 +27,9 @@ x[B, T, D] -> out[B, T, D]
 | `v_head_dim` | int | `0` | >= 0 | Value head dimension; 0 defaults to qk_nope_head_dim. |
 | `causal` | bool | `True` | — | Apply causal autoregressive attention mask. |
 | `rope_theta` | float | `10000.0` | > 1.0 | RoPE base frequency theta. |
+| `rope_scaling` | str | `"none"` | one of `none`, `linear`, `ntk`, `yarn`, `llama3` | Frequency scaling algorithm for RoPE context extension. |
+| `rope_scale` | float | `1.0` | > 0.0 | Frequency scale factor for context extension. |
+| `spatial_shape` | pair | `(0, 0)` | >= 0 | Token grid (H, W) for 2D axial RoPE, row-major with H*W == T. |
 | `bias` | bool | `False` | — | Add learned bias to all projections. |
 | `softmax_scale` | float | `0.0` | >= 0.0 | Softmax scale factor; 0 defaults to 1 / sqrt(qk_nope_head_dim + qk_rope_head_dim). |
 

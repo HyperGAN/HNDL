@@ -21,7 +21,7 @@ Relation: `out[i] == x[dims[i - 1]] for every non-batch axis i; rank == len(dims
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `dims` (positional) | ints | `()` | >= 1; <= 3 | The non-batch axes 1..rank-1 of the input in their new order, given positionally: permute(3, 1, 2) sends axis 3 to position 1. The batch axis 0 is implicit and cannot be listed. The length fixes the rank. |
+| `dims` (positional) | ints | `()` | >= 1; <= 4 | The non-batch axes 1..rank-1 of the input in their new order, given positionally: permute(3, 1, 2) sends axis 3 to position 1. The batch axis 0 is implicit and cannot be listed. The length fixes the rank. |
 
 Positional values fill `dims`.
 

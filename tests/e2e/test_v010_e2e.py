@@ -783,7 +783,7 @@ class TestTier2BoundaryCornerCases:
         source = "dy_tanh(dim=16, name='dyt')\n"
         model = network(source, input_shape=("B", 8, 16), output_shape=("B", 8, 16), device=device)
         # Extreme inputs
-        x_extreme = torch.tensor([[[1e4] * 16]], device=device)
+        x_extreme = torch.tensor([[[1e4] * 16] * 8], device=device)
         out = model(x_extreme)
         assert out.isfinite().all()
 

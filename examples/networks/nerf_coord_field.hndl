@@ -1,0 +1,18 @@
+# Neural Radiance Field (NeRF) coordinate field: random Fourier feature mapping,
+# sinusoidal positional embeddings, multi-layer perceptron trunk, rotary embeddings,
+# and split prediction for view-independent density and RGB color.
+
+f_emb = fourier_features(coords, 16)
+s_emb = sinusoidal_embed(coords, 24)
+h = concat(f_emb, s_emb, axis=1)
+h = linear(h, 64, name="trunk1")
+h = relu(h)
+h = reshape(h, 4, 16)
+h = rope(h, heads=2)
+h = reshape(h, 64)
+h = linear(h, 64, name="trunk2")
+h = relu(h)
+h = linear(h, 4, name="head")
+rgb, density = split(h, size=3, dim=1)
+rgb = dy_tanh(rgb, dim=3, name="rgb_act")
+density = relu(density, name="density_act")

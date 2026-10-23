@@ -33,7 +33,7 @@ MAX_NAME_LENGTH = 64
 MAX_DIMENSION_LITERAL = 2**31 - 1
 MAX_INTEGER_ARGUMENT = 2**63 - 1
 MAX_STRING_BYTES = 16_384
-SUPPORTED_RANKS = (2, 3, 4)
+SUPPORTED_RANKS = (2, 3, 4, 5)
 COMPUTE_DTYPES = ("float32", "float16", "bfloat16")
 INDEX_DTYPES = ("int64", "int32", "bool")
 RESERVED = frozenset({"name", "policy", "init", "trainable"})
@@ -227,6 +227,8 @@ class Arg(Immutable):
                 raise HNDLError("E_ARGUMENT", f"{name} must be finite") from None
             if not math.isfinite(value):
                 raise HNDLError("E_ARGUMENT", f"{name} must be finite")
+        elif name == "groups" and value == "depthwise":
+            return "depthwise"
         elif type(value) is not self.type:
             raise HNDLError("E_ARGUMENT", f"{name} must have type {self.type.__name__}")
         if self.type is int and abs(value) > MAX_INTEGER_ARGUMENT:
@@ -326,7 +328,7 @@ def _parse_pattern(text, port):
     entries = [entry.strip() for entry in text.split(",")] if text.strip() else []
     if not entries:
         _registry_error(f"Shape pattern for {port} must list at least the batch axis")
-    if len(entries) > 5:
+    if len(entries) > 6:
         _registry_error(f"Shape pattern for {port} exceeds the supported rank")
     dims = []
     seen_ellipsis = False

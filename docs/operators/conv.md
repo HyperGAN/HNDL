@@ -17,7 +17,7 @@ Relation: `H_out = floor((H_in + 2*padding - dilation*(kernel_size - 1) - 1) / s
 | `x` | input | `x[B, C_in, H_in, W_in]` | compute |
 | `out` | output | `out[B, C_out, H_out, W_out]` | compute |
 
-**Policies:** `policy="down2"` (spatial.down2@1: kernel_size=4, stride=2, padding=1, dilation=1, groups=1)
+**Policies:** `policy="down2"` (spatial.down2@1: kernel_size=4, stride=2, padding=1, dilation=1, groups=1), `policy="same3"` (spatial.same3@1: kernel_size=3, stride=1, padding=1, dilation=1)
 
 ## Arguments
 

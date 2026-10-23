@@ -45,3 +45,38 @@ def test_reshape_built_plan(device):
 def test_reshape_incompatible_dimensions():
     with pytest.raises(HNDLError, match="E_CONSTRAINT|E_RESHAPE"):
         resolve("reshape(8, 4, 5)", input_shape=("B", 128), output_shape=("B", 8, 4, 5))
+
+
+def test_reshape_negative_dimension(device):
+    plan = resolve("reshape(8, -1)", input_shape=("B", 128), output_shape=("B", 8, 16))
+    assert plan.nodes[0].args["shape"] == (8, 16)
+    model = build(plan, device=device)
+    x = torch.randn(2, 128, device=device)
+    assert model(x=x)["output"].shape == (2, 8, 16)
+
+    plan2 = resolve("reshape(-1, 8)", input_shape=("B", 128), output_shape=("B", 16, 8))
+    assert plan2.nodes[0].args["shape"] == (16, 8)
+
+    plan3 = resolve("reshape(-1)", input_shape=("B", 2, 4, 4), output_shape=("B", 32))
+    assert plan3.nodes[0].args["shape"] == (32,)
+
+    # Rank 5 with negative dimension
+    plan4 = resolve("reshape(2, 3, -1, 5)", input_shape=("B", 120), output_shape=("B", 2, 3, 4, 5))
+    assert plan4.nodes[0].args["shape"] == (2, 3, 4, 5)
+    model4 = build(plan4, device=device)
+    x4 = torch.randn(2, 120, device=device)
+    assert model4(x=x4)["output"].shape == (2, 2, 3, 4, 5)
+
+
+def test_reshape_negative_dimension_validation_errors():
+    with pytest.raises(HNDLError, match="At most one -1 dimension permitted"):
+        resolve("reshape(-1, -1)", input_shape=("B", 64), output_shape=("B", 8, 8))
+
+    with pytest.raises(HNDLError, match="Dimensions must be positive or -1"):
+        resolve("reshape(0, 16)", input_shape=("B", 64), output_shape=("B", 4, 16))
+
+    with pytest.raises(HNDLError, match="shape must be >= -1"):
+        resolve("reshape(-2, 16)", input_shape=("B", 64), output_shape=("B", 4, 16))
+
+    with pytest.raises(HNDLError, match="at most four dimensions"):
+        resolve("reshape(2, 2, 2, 2, 2)", input_shape=("B", 32), output_shape=("B", 2, 2, 2, 2, 2))

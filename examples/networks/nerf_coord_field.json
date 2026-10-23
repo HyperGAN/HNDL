@@ -1,0 +1,13 @@
+{
+  "title": "NeRF Continuous Coordinate Radiance Field",
+  "description": "A neural radiance field coordinate network: combined random Fourier and log-spaced sinusoidal positional features on 3D spatial coordinates, MLP trunk with rotary embeddings, and split outputs for RGB color and volume density.",
+  "input_shape": {
+    "coords": ["B", 3]
+  },
+  "output_shape": {
+    "rgb": ["B", 3],
+    "density": ["B", 1]
+  },
+  "parameters": 8075,
+  "reference": "Architecture follows Mildenhall et al. 2020, \"NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis\" (arXiv:2003.08934) and Tancik et al. 2020, \"Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains\" (NeurIPS 2020); parameter count checked against plain PyTorch: trunk1 56·64+64 = 3,648, trunk2 64·64+64 = 4,160, head 64·4+4 = 260, rgb_act dy_tanh(dim=3, affine=True) 1 + 3 + 3 = 7; total = 3,648 + 4,160 + 260 + 7 = 8,075."
+}

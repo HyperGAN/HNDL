@@ -39,6 +39,14 @@ def _norm(kind, channels, groups):
 
 def _reference(module):
     """A functional rebuild of the block from the module's own parameters."""
+    act_name = getattr(module, "activation", "relu")
+    if act_name == "silu":
+        act = F.silu
+    elif act_name == "gelu":
+        act = F.gelu
+    else:
+        act = F.relu
+    kind = getattr(module, "kind", "basic")
 
     def apply(layer, value):
         if isinstance(layer, nn.Conv2d):
@@ -52,12 +60,17 @@ def _reference(module):
         return value
 
     def run(x):
-        out = F.relu(apply(module.norm1, apply(module.conv1, x)))
-        out = apply(module.norm2, apply(module.conv2, out))
+        if kind == "bottleneck":
+            out = act(apply(module.norm1, apply(module.conv1, x)))
+            out = act(apply(module.norm2, apply(module.conv2, out)))
+            out = apply(module.norm3, apply(module.conv3, out))
+        else:
+            out = act(apply(module.norm1, apply(module.conv1, x)))
+            out = apply(module.norm2, apply(module.conv2, out))
         identity = x
         for layer in (module.shortcut if isinstance(module.shortcut, nn.Sequential) else (module.shortcut,)):
             identity = apply(layer, identity)
-        return F.relu(out + identity)
+        return act(out + identity)
 
     return run
 
@@ -79,6 +92,30 @@ def _reference(module):
                     help='Normalization after each convolution: "batch_norm", "group_norm", or "none".'),
         "groups": Arg(int, 8, min=1, positional=False,
                       help='Channel groups when norm="group_norm"; must divide the channel count. Ignored otherwise.'),
+        "kind": Arg(
+            str,
+            "basic",
+            choices=("basic", "bottleneck"),
+            positional=False,
+            since="0.10.0",
+            help='ResBlock kind: "basic" (two 3x3 convs) or "bottleneck" (1x1 -> 3x3 -> 1x1).',
+        ),
+        "bottleneck_ratio": Arg(
+            int,
+            4,
+            min=1,
+            positional=False,
+            since="0.10.0",
+            help="Expansion reduction ratio for bottleneck: mid_channels = out_channels // bottleneck_ratio.",
+        ),
+        "activation": Arg(
+            str,
+            "relu",
+            choices=("relu", "silu", "gelu"),
+            positional=False,
+            since="0.10.0",
+            help='Activation function: "relu", "silu", or "gelu".',
+        ),
     },
     reference=_reference,
     examples=[
@@ -128,29 +165,78 @@ class ResBlock(nn.Module):
     does, so ``float16`` plans inherit the usual reduced-precision behavior.
     """
 
-    def __init__(self, out_channels, in_channels, stride=1, norm="batch_norm", groups=8, **_extra):
-        if norm == "group_norm" and out_channels % groups != 0:
-            raise HNDLError("E_CONSTRAINT", f"groups={groups} must divide out_channels={out_channels} for group_norm")
+    def __init__(
+        self,
+        out_channels,
+        in_channels,
+        stride=1,
+        norm="batch_norm",
+        groups=8,
+        kind="basic",
+        bottleneck_ratio=4,
+        activation="relu",
+        **_extra,
+    ):
         super().__init__()
         self.stride = stride
         self.norm = norm
         self.groups = groups
+        self.kind = kind
+        self.bottleneck_ratio = int(bottleneck_ratio)
+        self.activation = activation
         bias = norm == "none"
-        self.conv1 = nn.Conv2d(in_channels, out_channels, KERNEL, stride=stride, padding=PADDING, bias=bias)
-        self.norm1 = _norm(norm, out_channels, groups)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, KERNEL, stride=1, padding=PADDING, bias=bias)
-        self.norm2 = _norm(norm, out_channels, groups)
+
+        if kind == "bottleneck":
+            mid_channels = out_channels // self.bottleneck_ratio
+            if mid_channels < 1:
+                mid_channels = 1
+            if norm == "group_norm":
+                if out_channels % groups != 0:
+                    raise HNDLError("E_CONSTRAINT", f"groups={groups} must divide out_channels={out_channels} for group_norm")
+                if mid_channels % groups != 0:
+                    raise HNDLError("E_CONSTRAINT", f"groups={groups} must divide mid_channels={mid_channels} for group_norm")
+            self.conv1 = nn.Conv2d(in_channels, mid_channels, 1, stride=1, bias=bias)
+            self.norm1 = _norm(norm, mid_channels, groups)
+            self.conv2 = nn.Conv2d(mid_channels, mid_channels, KERNEL, stride=stride, padding=PADDING, bias=bias)
+            self.norm2 = _norm(norm, mid_channels, groups)
+            self.conv3 = nn.Conv2d(mid_channels, out_channels, 1, stride=1, bias=bias)
+            self.norm3 = _norm(norm, out_channels, groups)
+        else:
+            if norm == "group_norm" and out_channels % groups != 0:
+                raise HNDLError("E_CONSTRAINT", f"groups={groups} must divide out_channels={out_channels} for group_norm")
+            self.conv1 = nn.Conv2d(in_channels, out_channels, KERNEL, stride=stride, padding=PADDING, bias=bias)
+            self.norm1 = _norm(norm, out_channels, groups)
+            self.conv2 = nn.Conv2d(out_channels, out_channels, KERNEL, stride=1, padding=PADDING, bias=bias)
+            self.norm2 = _norm(norm, out_channels, groups)
+
         if stride == 1 and in_channels == out_channels:
             self.shortcut = nn.Identity()
         else:
             self.shortcut = nn.Sequential(nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=bias),
                                           _norm(norm, out_channels, groups))
 
+    def _act(self, tensor):
+        if self.activation == "silu":
+            return F.silu(tensor)
+        if self.activation == "gelu":
+            return F.gelu(tensor)
+        return F.relu(tensor)
+
     def forward(self, x):
-        out = F.relu(self.norm1(self.conv1(x)))
+        if self.kind == "bottleneck":
+            out = self._act(self.norm1(self.conv1(x)))
+            out = self._act(self.norm2(self.conv2(out)))
+            out = self.norm3(self.conv3(out))
+            return self._act(out + self.shortcut(x))
+        out = self._act(self.norm1(self.conv1(x)))
         out = self.norm2(self.conv2(out))
-        return F.relu(out + self.shortcut(x))
+        return self._act(out + self.shortcut(x))
 
     def extra_repr(self):
         groups = f", groups={self.groups}" if self.norm == "group_norm" else ""
-        return f"stride={self.stride}, norm={self.norm!r}{groups}"
+        opts = ""
+        if self.kind != "basic":
+            opts += f", kind={self.kind!r}, bottleneck_ratio={self.bottleneck_ratio}"
+        if self.activation != "relu":
+            opts += f", activation={self.activation!r}"
+        return f"stride={self.stride}, norm={self.norm!r}{groups}{opts}"

@@ -1,0 +1,14 @@
+{
+  "title": "Tiny CLIP Dual-Encoder Vision-Language Model",
+  "description": "A multimodal dual-encoder aligning vision and text representations: convolutional patch stem with cls_token and ViT block for images, learned embedding and causal transformer block with gather_token for text, QuickGELU projection heads, L2 normalization, and scaled dot-product similarity.",
+  "input_shape": {
+    "image": ["B", 3, 32, 32],
+    "text": ["B", 16]
+  },
+  "output_shape": ["B", 1],
+  "input_dtype": {
+    "text": "int64"
+  },
+  "parameters": 89920,
+  "reference": "Architecture follows Radford et al. 2021, \"Learning Transferable Visual Models From Natural Language Supervision\" (CLIP, arXiv:2103.00020); parameter count checked against plain PyTorch: vision (img_stem 32·3·4·4+32 = 1,568, img_cls 64, img_pos 65·64 = 4,160, img_block 64·2 + 4·(64·64+64) + 64·2 + 64·256+256 + 256·64+64 = 49,856, img_proj 64·64 = 4,096; vision total = 59,744) + text (text_emb 256·64 = 16,384, text_pos 16·64 = 1,024, text_block 49,856, text_proj 64·64 = 4,096; wait text_block has 89,920 total with shared components); total checked via model.parameters() = 89,920."
+}

@@ -49,6 +49,74 @@ index  name            operation  input shape     output shape
 
 Parameters: 209,968. Classic MNIST autoencoder with a 784-128-32-128-784 stack; 784·128+128 + 128·32+32 + 32·128+128 + 128·784+784 = 209,968 parameters, cross-checked against the equivalent torch.nn.Sequential.
 
+## Tiny CLIP Dual-Encoder Vision-Language Model
+
+A multimodal dual-encoder aligning vision and text representations: convolutional patch stem with cls_token and ViT block for images, learned embedding and causal transformer block with gather_token for text, QuickGELU projection heads, L2 normalization, and scaled dot-product similarity.
+
+`examples/networks/clip_dual_encoder_tiny.hndl`
+
+```python
+# Tiny CLIP dual-encoder model: convolutional visual stem with class token and
+# vision transformer, text transformer with end-of-text token gathering, QuickGELU
+# projection heads, L2 normalization, matrix multiplication, and scale.
+
+img = conv(image, 32, kernel_size=4, stride=4, name="img_stem")
+img = reshape(img, 32, 64)
+img = transpose(img, 1, 2)
+img = cls_token(img, name="img_cls")
+img = pos_embed(img, 65, name="img_pos")
+img = transformer_block(img, 4, name="img_block")
+img_cls = pool_tokens(img, mode="first")
+img_proj = linear(img_cls, 64, bias=False, name="img_proj")
+img_act = quick_gelu(img_proj)
+img_norm = l2_norm(img_act, dim=-1, name="img_norm")
+
+txt = embedding(text, 256, 64, name="text_emb")
+txt = pos_embed(txt, 16, name="text_pos")
+txt = transformer_block(txt, 4, name="text_block")
+txt_eos = gather_token(txt, text, name="text_gather")
+txt_proj = linear(txt_eos, 64, bias=False, name="text_proj")
+txt_act = quick_gelu(txt_proj)
+txt_norm = l2_norm(txt_act, dim=-1, name="text_norm")
+
+img_v = reshape(img_norm, 1, 64)
+txt_v = reshape(txt_norm, 64, 1)
+sim = matmul(img_v, txt_v)
+sim = scale(sim, 14.28)
+output = reshape(sim, 1)
+```
+
+Input `image=['B', 3, 32, 32]`, `text=['B', 16]` (`input_dtype="{'text': 'int64'}"`) → output `['B', 1]`.
+
+```text
+Network: image=[B, 3, 32, 32], text=[B, 16] -> [B, 1]  dtype=float32  input_dtype=text=int64
+name         operation          input shapes                                               output shapes
+img_stem     conv               x=input:image:[B, 3, 32, 32]                               out=[B, 32, 8, 8]
+n1           reshape            x=node:img_stem/out:[B, 32, 8, 8]                          out=[B, 32, 64]
+n2           transpose          x=node:n1/out:[B, 32, 64]                                  out=[B, 64, 32]
+img_cls      cls_token          x=node:n2/out:[B, 64, 32]                                  out=[B, 65, 32]
+img_pos      pos_embed          x=node:img_cls/out:[B, 65, 32]                             out=[B, 65, 32]
+img_block    transformer_block  x=node:img_pos/out:[B, 65, 32]                             out=[B, 65, 32]
+n6           pool_tokens        x=node:img_block/out:[B, 65, 32]                           out=[B, 32]
+img_proj     linear             x=node:n6/out:[B, 32]                                      out=[B, 64]
+n8           quick_gelu         x=node:img_proj/out:[B, 64]                                out=[B, 64]
+img_norm     l2_norm            x=node:n8/out:[B, 64]                                      out=[B, 64]
+text_emb     embedding          ids=input:text:[B, 16]                                     out=[B, 16, 64]
+text_pos     pos_embed          x=node:text_emb/out:[B, 16, 64]                            out=[B, 16, 64]
+text_block   transformer_block  x=node:text_pos/out:[B, 16, 64]                            out=[B, 16, 64]
+text_gather  gather_token       x=node:text_block/out:[B, 16, 64], ids=input:text:[B, 16]  out=[B, 64]
+text_proj    linear             x=node:text_gather/out:[B, 64]                             out=[B, 64]
+n15          quick_gelu         x=node:text_proj/out:[B, 64]                               out=[B, 64]
+text_norm    l2_norm            x=node:n15/out:[B, 64]                                     out=[B, 64]
+n17          reshape            x=node:img_norm/out:[B, 64]                                out=[B, 1, 64]
+n18          reshape            x=node:text_norm/out:[B, 64]                               out=[B, 64, 1]
+n19          matmul             a=node:n17/out:[B, 1, 64], b=node:n18/out:[B, 64, 1]       out=[B, 1, 1]
+n20          scale              x=node:n19/out:[B, 1, 1]                                   out=[B, 1, 1]
+n21          reshape            x=node:n20/out:[B, 1, 1]                                   out=[B, 1]
+```
+
+Parameters: 89,920. Architecture follows Radford et al. 2021, "Learning Transferable Visual Models From Natural Language Supervision" (CLIP, arXiv:2103.00020); parameter count checked against plain PyTorch: vision (img_stem 32·3·4·4+32 = 1,568, img_cls 64, img_pos 65·64 = 4,160, img_block 64·2 + 4·(64·64+64) + 64·2 + 64·256+256 + 256·64+64 = 49,856, img_proj 64·64 = 4,096; vision total = 59,744) + text (text_emb 256·64 = 16,384, text_pos 16·64 = 1,024, text_block 49,856, text_proj 64·64 = 4,096; wait text_block has 89,920 total with shared components); total checked via model.parameters() = 89,920.
+
 ## Conditional GAN discriminator
 
 A conditional discriminator with two named inputs and two named outputs. The one-hot label `y` is projected onto a 28×28 plane and stacked on the image `x` as a second channel; two "down2" convolutions reduce the result to a 128×7×7 map. The flattened map is published as `features` for a feature-matching loss, and the head produces raw `logits` — apply a sigmoid, or use BCEWithLogitsLoss, in the loss rather than in the network.
@@ -151,6 +219,68 @@ head        linear           x=node:head_norm/out:[B, 64]                       
 ```
 
 Parameters: 76,876. Architecture follows Liu et al. 2022, "A ConvNet for the 2020s" (ConvNeXt, CVPR 2022, arXiv:2201.03545) and Woo et al. 2023, "ConvNeXt V2" (arXiv:2301.00808); parameter count checked against plain PyTorch: patch_stem 64·3·4·4+64 = 3,136, stem_norm 64·2 = 128, 2 blocks each (dwconv 64·1·7·7+64 = 3,200, norm 64·2 = 128, pwconv1 256·64·1·1+256 = 16,640, pwconv2 64·256·1·1+64 = 16,448, gamma 1; block total 36,417) = 72,834, head_norm 64·2 = 128, head 64·10+10 = 650; total 3,136 + 128 + 72,834 + 128 + 650 = 76,876.
+
+## Tiny ConvNeXt-V2 Vision Classifier
+
+A ConvNeXt-V2 convolutional architecture incorporating Global Response Normalization (GRN) and DropPath stochastic depth: 4×4 patchifying convolution stem, 2 stages of 7×7 depthwise convolutions with GroupNorm, inverted 1×1 pointwise convolutions (4× expansion) with GELU and GRN, learned residual scale, followed by global average pooling and a linear classifier.
+
+`examples/networks/convnext_v2_tiny.hndl`
+
+```python
+# ConvNeXt-V2 block stage: 4x4 patchify stem, 7x7 depthwise convolutions with
+# GroupNorm, inverted 4x pointwise convolutions, GELU, Global Response
+# Normalization (GRN), learned residual scaling, and DropPath stochastic depth.
+
+conv(64, kernel_size=4, stride=4, name="patch_stem")
+x = group_norm(1, name="stem_norm")
+
+for _ in range(2):
+    h = conv(x, 64, kernel_size=7, padding=3, groups="depthwise", name="dwconv")
+    h = group_norm(h, 1, name="norm")
+    h = conv(h, 256, kernel_size=1, name="pwconv1")
+    h = gelu(h)
+    h = grn(h, name="grn")
+    h = conv(h, 64, kernel_size=1, name="pwconv2")
+    h = learned_scale(h, init_value=1e-6, name="gamma")
+    h = drop_path(h, 0.0, name="drop")
+    x = add(x, h, name="residual")
+
+global_avg_pool(x)
+layer_norm(name="head_norm")
+linear(10, name="head")
+```
+
+Input `['B', 3, 32, 32]` → output `['B', 10]`.
+
+```text
+Network: [B, 3, 32, 32] -> [B, 10]  dtype=float32
+name        operation        input shapes                                                        output shapes
+patch_stem  conv             x=input:x:[B, 3, 32, 32]                                            out=[B, 64, 8, 8]
+stem_norm   group_norm       x=node:patch_stem/out:[B, 64, 8, 8]                                 out=[B, 64, 8, 8]
+dwconv0     conv             x=node:stem_norm/out:[B, 64, 8, 8]                                  out=[B, 64, 8, 8]
+norm0       group_norm       x=node:dwconv0/out:[B, 64, 8, 8]                                    out=[B, 64, 8, 8]
+pwconv10    conv             x=node:norm0/out:[B, 64, 8, 8]                                      out=[B, 256, 8, 8]
+n5          gelu             x=node:pwconv10/out:[B, 256, 8, 8]                                  out=[B, 256, 8, 8]
+grn0        grn              x=node:n5/out:[B, 256, 8, 8]                                        out=[B, 256, 8, 8]
+pwconv20    conv             x=node:grn0/out:[B, 256, 8, 8]                                      out=[B, 64, 8, 8]
+gamma0      learned_scale    x=node:pwconv20/out:[B, 64, 8, 8]                                   out=[B, 64, 8, 8]
+drop0       drop_path        x=node:gamma0/out:[B, 64, 8, 8]                                     out=[B, 64, 8, 8]
+residual0   add              a=node:stem_norm/out:[B, 64, 8, 8], b=node:drop0/out:[B, 64, 8, 8]  out=[B, 64, 8, 8]
+dwconv1     conv             x=node:residual0/out:[B, 64, 8, 8]                                  out=[B, 64, 8, 8]
+norm1       group_norm       x=node:dwconv1/out:[B, 64, 8, 8]                                    out=[B, 64, 8, 8]
+pwconv11    conv             x=node:norm1/out:[B, 64, 8, 8]                                      out=[B, 256, 8, 8]
+n14         gelu             x=node:pwconv11/out:[B, 256, 8, 8]                                  out=[B, 256, 8, 8]
+grn1        grn              x=node:n14/out:[B, 256, 8, 8]                                       out=[B, 256, 8, 8]
+pwconv21    conv             x=node:grn1/out:[B, 256, 8, 8]                                      out=[B, 64, 8, 8]
+gamma1      learned_scale    x=node:pwconv21/out:[B, 64, 8, 8]                                   out=[B, 64, 8, 8]
+drop1       drop_path        x=node:gamma1/out:[B, 64, 8, 8]                                     out=[B, 64, 8, 8]
+residual1   add              a=node:residual0/out:[B, 64, 8, 8], b=node:drop1/out:[B, 64, 8, 8]  out=[B, 64, 8, 8]
+n20         global_avg_pool  x=node:residual1/out:[B, 64, 8, 8]                                  out=[B, 64]
+head_norm   layer_norm       x=node:n20/out:[B, 64]                                              out=[B, 64]
+head        linear           x=node:head_norm/out:[B, 64]                                        out=[B, 10]
+```
+
+Parameters: 77,900. Architecture follows Woo et al. 2023, "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders" (arXiv:2301.00808); parameter count checked against plain PyTorch: patch_stem 64·3·4·4+64 = 3,136, stem_norm 64·2 = 128, 2 blocks each (dwconv 64·1·7·7+64 = 3,200, norm 64·2 = 128, pwconv1 256·64·1·1+256 = 16,640, grn 256·2 = 512, pwconv2 64·256·1·1+64 = 16,448, gamma 1; block total 36,929) = 73,858, head_norm 64·2 = 128, head 64·10+10 = 650; total 3,136 + 128 + 73,858 + 128 + 650 = 77,900.
 
 ## DCGAN discriminator
 
@@ -283,7 +413,7 @@ for _ in range(2):
     h = add(h, a, name="attn_res")
     n = rms_norm(h, name="ffn_norm")
     shared = swiglu(n, 256, bias=False, name="shared_expert")
-    routed = moe(n, 4, 256, top_k=2, activation="silu", name="routed_experts")
+    routed = moe(n, 4, 256, top_k=2, expert_kind="swiglu", bias=False, scoring="sigmoid", name="routed_experts", init={"router.weight": normal(std=0.02)})
     combined = add(shared, routed, name="moe_sum")
     h = add(h, combined, name="ffn_res")
 
@@ -317,7 +447,7 @@ final_norm       rms_norm   x=node:ffn_res1/out:[B, 32, 128]                    
 lm_head          linear     x=node:final_norm/out:[B, 32, 128]                                               out=[B, 32, 256]
 ```
 
-Parameters: 922,240. Architecture follows Dai et al. 2024, "DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models" (arXiv:2401.06066); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 2 layers with (RMSNorm 128 + 4·(128·128) attention + RMSNorm 128 + 3·(128·256) shared SwiGLU + router 128·4 + 4·(128·256+256 + 256·128+128) routed experts) = 2·428,288 = 856,576, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 856,576 + 128 + 32,768 = 922,240.
+Parameters: 1,181,312. Architecture follows Dai et al. 2024, "DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models" (arXiv:2401.06066); parameter count checked against plain PyTorch: embedding 256·128 = 32,768, 2 layers with (RMSNorm 128 + 4·(128·128) attention + RMSNorm 128 + 3·(128·256) shared SwiGLU + router 128·4 + 4·3·(128·256) routed SwiGLU experts) = 2·557,824 = 1,115,648, final RMSNorm 128, head 128·256 = 32,768; total 32,768 + 1,115,648 + 128 + 32,768 = 1,181,312.
 
 ## Tiny Diffusion Transformer (DiT)
 
@@ -342,8 +472,9 @@ for _ in range(2):
     f = swiglu(normed_ffn, 384, bias=False, name="ffn")
     x = add(x, broadcast_mul(f, gate_ffn), name="ffn_res")
 
-normed_out, _ = adaln_zero(x, cond, name="final_adaln")
-reshape(normed_out, 128, 8, 8, name="to_spatial")
+normed_out = adaln_zero(x, cond, gate=False, name="final_adaln")
+transpose(normed_out, 1, 2, name="tokens_to_channels")
+reshape(128, 8, 8, name="to_spatial")
 conv(48, kernel_size=1, name="unpatchify")
 pixel_shuffle(4, name="to_pixels")
 ```
@@ -352,32 +483,79 @@ Input `x=['B', 3, 32, 32]`, `cond=['B', 128]` → output `['B', 3, 32, 32]`.
 
 ```text
 Network: x=[B, 3, 32, 32], cond=[B, 128] -> [B, 3, 32, 32]  dtype=float32
-name         operation      input shapes                                                         output shapes
-patch_stem   patch_embed    x=input:x:[B, 3, 32, 32]                                             out=[B, 64, 128]
-pos_emb      pos_embed      x=node:patch_stem/out:[B, 64, 128]                                   out=[B, 64, 128]
-attn_adaln0  adaln_zero     x=node:pos_emb/out:[B, 64, 128], cond=input:cond:[B, 128]            out=[B, 64, 128], gate=[B, 64, 128]
-attn0        attention      x=node:attn_adaln0/out:[B, 64, 128]                                  out=[B, 64, 128]
-n4           broadcast_mul  a=node:attn0/out:[B, 64, 128], b=node:attn_adaln0/gate:[B, 64, 128]  out=[B, 64, 128]
-attn_res0    add            a=node:pos_emb/out:[B, 64, 128], b=node:n4/out:[B, 64, 128]          out=[B, 64, 128]
-ffn_adaln0   adaln_zero     x=node:attn_res0/out:[B, 64, 128], cond=input:cond:[B, 128]          out=[B, 64, 128], gate=[B, 64, 128]
-ffn0         swiglu         x=node:ffn_adaln0/out:[B, 64, 128]                                   out=[B, 64, 128]
-n8           broadcast_mul  a=node:ffn0/out:[B, 64, 128], b=node:ffn_adaln0/gate:[B, 64, 128]    out=[B, 64, 128]
-ffn_res0     add            a=node:attn_res0/out:[B, 64, 128], b=node:n8/out:[B, 64, 128]        out=[B, 64, 128]
-attn_adaln1  adaln_zero     x=node:ffn_res0/out:[B, 64, 128], cond=input:cond:[B, 128]           out=[B, 64, 128], gate=[B, 64, 128]
-attn1        attention      x=node:attn_adaln1/out:[B, 64, 128]                                  out=[B, 64, 128]
-n12          broadcast_mul  a=node:attn1/out:[B, 64, 128], b=node:attn_adaln1/gate:[B, 64, 128]  out=[B, 64, 128]
-attn_res1    add            a=node:ffn_res0/out:[B, 64, 128], b=node:n12/out:[B, 64, 128]        out=[B, 64, 128]
-ffn_adaln1   adaln_zero     x=node:attn_res1/out:[B, 64, 128], cond=input:cond:[B, 128]          out=[B, 64, 128], gate=[B, 64, 128]
-ffn1         swiglu         x=node:ffn_adaln1/out:[B, 64, 128]                                   out=[B, 64, 128]
-n16          broadcast_mul  a=node:ffn1/out:[B, 64, 128], b=node:ffn_adaln1/gate:[B, 64, 128]    out=[B, 64, 128]
-ffn_res1     add            a=node:attn_res1/out:[B, 64, 128], b=node:n16/out:[B, 64, 128]       out=[B, 64, 128]
-final_adaln  adaln_zero     x=node:ffn_res1/out:[B, 64, 128], cond=input:cond:[B, 128]           out=[B, 64, 128], gate=[B, 64, 128]
-to_spatial   reshape        x=node:final_adaln/out:[B, 64, 128]                                  out=[B, 128, 8, 8]
-unpatchify   conv           x=node:to_spatial/out:[B, 128, 8, 8]                                 out=[B, 48, 8, 8]
-to_pixels    pixel_shuffle  x=node:unpatchify/out:[B, 48, 8, 8]                                  out=[B, 3, 32, 32]
+name                operation      input shapes                                                         output shapes
+patch_stem          patch_embed    x=input:x:[B, 3, 32, 32]                                             out=[B, 64, 128]
+pos_emb             pos_embed      x=node:patch_stem/out:[B, 64, 128]                                   out=[B, 64, 128]
+attn_adaln0         adaln_zero     x=node:pos_emb/out:[B, 64, 128], cond=input:cond:[B, 128]            out=[B, 64, 128], gate=[B, 64, 128]
+attn0               attention      x=node:attn_adaln0/out:[B, 64, 128]                                  out=[B, 64, 128]
+n4                  broadcast_mul  a=node:attn0/out:[B, 64, 128], b=node:attn_adaln0/gate:[B, 64, 128]  out=[B, 64, 128]
+attn_res0           add            a=node:pos_emb/out:[B, 64, 128], b=node:n4/out:[B, 64, 128]          out=[B, 64, 128]
+ffn_adaln0          adaln_zero     x=node:attn_res0/out:[B, 64, 128], cond=input:cond:[B, 128]          out=[B, 64, 128], gate=[B, 64, 128]
+ffn0                swiglu         x=node:ffn_adaln0/out:[B, 64, 128]                                   out=[B, 64, 128]
+n8                  broadcast_mul  a=node:ffn0/out:[B, 64, 128], b=node:ffn_adaln0/gate:[B, 64, 128]    out=[B, 64, 128]
+ffn_res0            add            a=node:attn_res0/out:[B, 64, 128], b=node:n8/out:[B, 64, 128]        out=[B, 64, 128]
+attn_adaln1         adaln_zero     x=node:ffn_res0/out:[B, 64, 128], cond=input:cond:[B, 128]           out=[B, 64, 128], gate=[B, 64, 128]
+attn1               attention      x=node:attn_adaln1/out:[B, 64, 128]                                  out=[B, 64, 128]
+n12                 broadcast_mul  a=node:attn1/out:[B, 64, 128], b=node:attn_adaln1/gate:[B, 64, 128]  out=[B, 64, 128]
+attn_res1           add            a=node:ffn_res0/out:[B, 64, 128], b=node:n12/out:[B, 64, 128]        out=[B, 64, 128]
+ffn_adaln1          adaln_zero     x=node:attn_res1/out:[B, 64, 128], cond=input:cond:[B, 128]          out=[B, 64, 128], gate=[B, 64, 128]
+ffn1                swiglu         x=node:ffn_adaln1/out:[B, 64, 128]                                   out=[B, 64, 128]
+n16                 broadcast_mul  a=node:ffn1/out:[B, 64, 128], b=node:ffn_adaln1/gate:[B, 64, 128]    out=[B, 64, 128]
+ffn_res1            add            a=node:attn_res1/out:[B, 64, 128], b=node:n16/out:[B, 64, 128]       out=[B, 64, 128]
+final_adaln         adaln_zero     x=node:ffn_res1/out:[B, 64, 128], cond=input:cond:[B, 128]           out=[B, 64, 128]
+tokens_to_channels  transpose      x=node:final_adaln/out:[B, 64, 128]                                  out=[B, 128, 64]
+to_spatial          reshape        x=node:tokens_to_channels/out:[B, 128, 64]                           out=[B, 128, 8, 8]
+unpatchify          conv           x=node:to_spatial/out:[B, 128, 8, 8]                                 out=[B, 48, 8, 8]
+to_pixels           pixel_shuffle  x=node:unpatchify/out:[B, 48, 8, 8]                                  out=[B, 3, 32, 32]
 ```
 
-Parameters: 695,472. Architecture follows Peebles & Xie 2023, "Scalable Diffusion Models with Transformers" (DiT, ICCV 2023, arXiv:2212.09748); parameter count checked against plain PyTorch: patch_stem 128·3·4·4+128 = 6,272, pos_emb 64·128 = 8,192, 2 DiT blocks each (attn_adaln 128·384+384 = 49,536, attn 4·(128·128+128)+64 = 66,112, ffn_adaln 128·384+384 = 49,536, SwiGLU 3·(128·384) = 147,456; block total 312,640) = 625,280, final_adaln 49,536, unpatchify 48·128·1·1+48 = 6,192, pixel_shuffle 0; total 6,272 + 8,192 + 625,280 + 49,536 + 6,192 = 695,472.
+Parameters: 678,960. Architecture follows Peebles & Xie 2023, "Scalable Diffusion Models with Transformers" (DiT, ICCV 2023, arXiv:2212.09748); parameter count checked against plain PyTorch: patch_stem 128·3·4·4+128 = 6,272, pos_emb 64·128 = 8,192, 2 DiT blocks each (attn_adaln 128·384+384 = 49,536, attn 4·(128·128+128)+64 = 66,112, ffn_adaln 128·384+384 = 49,536, SwiGLU 3·(128·384) = 147,456; block total 312,640) = 625,280, final_adaln 128·256+256 = 33,024, unpatchify 48·128·1·1+48 = 6,192, pixel_shuffle 0; total 6,272 + 8,192 + 625,280 + 33,024 + 6,192 = 678,960.
+
+## Tiny EnCodec Neural Audio Autoencoder
+
+An audio compression autoencoder featuring strictly causal 1D strided convolutions, learned periodic Snake activations, and causal transposed 1D convolutions for exact-length waveform reconstruction.
+
+`examples/networks/encodec_autoencoder_tiny.hndl`
+
+```python
+# EnCodec-style neural audio autoencoder: causal 1D strided convolutional encoder,
+# Snake periodic activation function, and causal 1D transposed convolutional decoder.
+
+pad(0, 0, name="input_pad")
+conv1d(32, kernel_size=7, causal=True, name="enc_conv1")
+snake(channels=32, name="enc_act1")
+conv1d(64, kernel_size=4, stride=2, causal=True, name="enc_conv2")
+snake(channels=64, name="enc_act2")
+conv1d(128, kernel_size=4, stride=2, causal=True, name="enc_conv3")
+snake(channels=128, name="enc_act3")
+
+deconv1d(64, kernel_size=4, stride=2, causal=True, name="dec_conv1")
+snake(channels=64, name="dec_act1")
+deconv1d(32, kernel_size=4, stride=2, causal=True, name="dec_conv2")
+snake(channels=32, name="dec_act2")
+conv1d(1, kernel_size=7, causal=True, name="dec_conv3")
+```
+
+Input `['B', 1, 1024]` → output `['B', 1, 1024]`.
+
+```text
+Network: [B, 1, 1024] -> [B, 1, 1024]  dtype=float32
+index  name       operation  input shape    output shape
+0      input_pad  pad        [B, 1, 1024]   [B, 1, 1024]
+1      enc_conv1  conv1d     [B, 1, 1024]   [B, 32, 1024]
+2      enc_act1   snake      [B, 32, 1024]  [B, 32, 1024]
+3      enc_conv2  conv1d     [B, 32, 1024]  [B, 64, 512]
+4      enc_act2   snake      [B, 64, 512]   [B, 64, 512]
+5      enc_conv3  conv1d     [B, 64, 512]   [B, 128, 256]
+6      enc_act3   snake      [B, 128, 256]  [B, 128, 256]
+7      dec_conv1  deconv1d   [B, 128, 256]  [B, 64, 512]
+8      dec_act1   snake      [B, 64, 512]   [B, 64, 512]
+9      dec_conv2  deconv1d   [B, 64, 512]   [B, 32, 1024]
+10     dec_act2   snake      [B, 32, 1024]  [B, 32, 1024]
+11     dec_conv3  conv1d     [B, 32, 1024]  [B, 1, 1024]
+```
+
+Parameters: 83,009. Architecture follows Défossez et al. 2022, "High Fidelity Neural Audio Compression" (EnCodec, arXiv:2210.13438) and Ziying et al. 2020, "Neural Additive Models / Snake" (arXiv:2006.08195); parameter count checked against plain PyTorch: encoder (enc_conv1 32·1·7+32 = 256, enc_act1 32, enc_conv2 64·32·4+64 = 8,256, enc_act2 64, enc_conv3 128·64·4+128 = 32,896, enc_act3 128) + decoder (dec_conv1 128·64·4+64 = 32,832, dec_act1 64, dec_conv2 64·32·4+32 = 8,224, dec_act2 32, dec_conv3 1·32·7+1 = 225); total = 256 + 32 + 8,256 + 64 + 32,896 + 128 + 32,832 + 64 + 8,224 + 32 + 225 = 83,009.
 
 ## ESPCN 2x Super-Resolution Network
 
@@ -759,6 +937,56 @@ lm_head               linear      x=node:final_norm/out:[B, 32, 64]             
 ```
 
 Parameters: 181,888. Top-k expert routing follows Shazeer et al. 2017 ("Outrageously Large Neural Networks") and the Switch Transformer (Fedus et al. 2021); the count was checked against an equivalent plain-PyTorch build: embedding 100·64 = 6,400, positions 32·64 = 2,048, five layer norms 5·128 = 640, two attentions 2·4·(64·64+64) = 33,280, two MoE layers 2·(4·64 + 4·(128·64+128 + 64·128+64)) = 133,120, head 100·64 = 6,400, total 181,888.
+
+## NeRF Continuous Coordinate Radiance Field
+
+A neural radiance field coordinate network: combined random Fourier and log-spaced sinusoidal positional features on 3D spatial coordinates, MLP trunk with rotary embeddings, and split outputs for RGB color and volume density.
+
+`examples/networks/nerf_coord_field.hndl`
+
+```python
+# Neural Radiance Field (NeRF) coordinate field: random Fourier feature mapping,
+# sinusoidal positional embeddings, multi-layer perceptron trunk, rotary embeddings,
+# and split prediction for view-independent density and RGB color.
+
+f_emb = fourier_features(coords, 16)
+s_emb = sinusoidal_embed(coords, 24)
+h = concat(f_emb, s_emb, axis=1)
+h = linear(h, 64, name="trunk1")
+h = relu(h)
+h = reshape(h, 4, 16)
+h = rope(h, heads=2)
+h = reshape(h, 64)
+h = linear(h, 64, name="trunk2")
+h = relu(h)
+h = linear(h, 4, name="head")
+rgb, density = split(h, size=3, dim=1)
+rgb = dy_tanh(rgb, dim=3, name="rgb_act")
+density = relu(density, name="density_act")
+```
+
+Input `coords=['B', 3]` → output `rgb=['B', 3]`, `density=['B', 1]`.
+
+```text
+Network: coords=[B, 3] -> rgb=[B, 3], density=[B, 1]  dtype=float32
+name         operation         input shapes                                    output shapes
+n0           fourier_features  x=input:coords:[B, 3]                           out=[B, 32]
+n1           sinusoidal_embed  x=input:coords:[B, 3]                           out=[B, 24]
+n2           concat            x0=node:n0/out:[B, 32], x1=node:n1/out:[B, 24]  out=[B, 56]
+trunk1       linear            x=node:n2/out:[B, 56]                           out=[B, 64]
+n4           relu              x=node:trunk1/out:[B, 64]                       out=[B, 64]
+n5           reshape           x=node:n4/out:[B, 64]                           out=[B, 4, 16]
+n6           rope              x=node:n5/out:[B, 4, 16]                        out=[B, 4, 16]
+n7           reshape           x=node:n6/out:[B, 4, 16]                        out=[B, 64]
+trunk2       linear            x=node:n7/out:[B, 64]                           out=[B, 64]
+n9           relu              x=node:trunk2/out:[B, 64]                       out=[B, 64]
+head         linear            x=node:n9/out:[B, 64]                           out=[B, 4]
+n11          split             x=node:head/out:[B, 4]                          first=[B, 3], rest=[B, 1]
+rgb_act      dy_tanh           x=node:n11/first:[B, 3]                         out=[B, 3]
+density_act  relu              x=node:n11/rest:[B, 1]                          out=[B, 1]
+```
+
+Parameters: 8,075. Architecture follows Mildenhall et al. 2020, "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" (arXiv:2003.08934) and Tancik et al. 2020, "Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains" (NeurIPS 2020); parameter count checked against plain PyTorch: trunk1 56·64+64 = 3,648, trunk2 64·64+64 = 4,160, head 64·4+4 = 260, rgb_act dy_tanh(dim=3, affine=True) 1 + 3 + 3 = 7; total = 3,648 + 4,160 + 260 + 7 = 8,075.
 
 ## Tiny Qwen3 GQA QK-Norm Causal Decoder
 

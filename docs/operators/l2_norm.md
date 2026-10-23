@@ -10,6 +10,8 @@ Parameter-free L2 normalization along a specified axis.
 x[B, ...] -> out[B, ...]
 ```
 
+Relation: `out has the shape of x; dim must resolve to a non-batch axis`
+
 | Port | Direction | Pattern | dtype |
 | --- | --- | --- | --- |
 | `x` | input | `x[B, ...]` | compute |
@@ -19,7 +21,7 @@ x[B, ...] -> out[B, ...]
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `dim` | int | `-1` | — | Axis along which L2 normalization is computed. |
+| `dim` (positional) | int | `-1` | — | Axis along which L2 normalization is computed. |
 | `eps` | float | `1e-06` | > 0 | Small positive constant to avoid division by zero. |
 
 ## Description

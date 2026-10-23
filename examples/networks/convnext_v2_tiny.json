@@ -1,0 +1,8 @@
+{
+  "title": "Tiny ConvNeXt-V2 Vision Classifier",
+  "description": "A ConvNeXt-V2 convolutional architecture incorporating Global Response Normalization (GRN) and DropPath stochastic depth: 4×4 patchifying convolution stem, 2 stages of 7×7 depthwise convolutions with GroupNorm, inverted 1×1 pointwise convolutions (4× expansion) with GELU and GRN, learned residual scale, followed by global average pooling and a linear classifier.",
+  "input_shape": ["B", 3, 32, 32],
+  "output_shape": ["B", 10],
+  "parameters": 77900,
+  "reference": "Architecture follows Woo et al. 2023, \"ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders\" (arXiv:2301.00808); parameter count checked against plain PyTorch: patch_stem 64·3·4·4+64 = 3,136, stem_norm 64·2 = 128, 2 blocks each (dwconv 64·1·7·7+64 = 3,200, norm 64·2 = 128, pwconv1 256·64·1·1+256 = 16,640, grn 256·2 = 512, pwconv2 64·256·1·1+64 = 16,448, gamma 1; block total 36,929) = 73,858, head_norm 64·2 = 128, head 64·10+10 = 650; total 3,136 + 128 + 73,858 + 128 + 650 = 77,900."
+}

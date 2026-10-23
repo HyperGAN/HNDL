@@ -21,7 +21,7 @@ Relation: `out drops axis dim, or holds 1 there with keepdim; every other axis i
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `dim` (positional) | int | required | >= 1; <= 3 | Axis to sum over. The batch axis 0 cannot be reduced, so dim starts at 1. |
+| `dim` (positional) | int | required | >= 1; <= 4 | Axis to sum over. The batch axis 0 cannot be reduced, so dim starts at 1. |
 | `keepdim` | bool | `False` | — | Keep the reduced axis with extent 1 instead of dropping it. |
 
 ## Description

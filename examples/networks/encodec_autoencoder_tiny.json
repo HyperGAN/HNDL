@@ -1,0 +1,8 @@
+{
+  "title": "Tiny EnCodec Neural Audio Autoencoder",
+  "description": "An audio compression autoencoder featuring strictly causal 1D strided convolutions, learned periodic Snake activations, and causal transposed 1D convolutions for exact-length waveform reconstruction.",
+  "input_shape": ["B", 1, 1024],
+  "output_shape": ["B", 1, 1024],
+  "parameters": 83009,
+  "reference": "Architecture follows Défossez et al. 2022, \"High Fidelity Neural Audio Compression\" (EnCodec, arXiv:2210.13438) and Ziying et al. 2020, \"Neural Additive Models / Snake\" (arXiv:2006.08195); parameter count checked against plain PyTorch: encoder (enc_conv1 32·1·7+32 = 256, enc_act1 32, enc_conv2 64·32·4+64 = 8,256, enc_act2 64, enc_conv3 128·64·4+128 = 32,896, enc_act3 128) + decoder (dec_conv1 128·64·4+64 = 32,832, dec_act1 64, dec_conv2 64·32·4+32 = 8,224, dec_act2 32, dec_conv3 1·32·7+1 = 225); total = 256 + 32 + 8,256 + 64 + 32,896 + 128 + 32,832 + 64 + 8,224 + 32 + 225 = 83,009."
+}

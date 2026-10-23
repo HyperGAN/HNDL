@@ -45,7 +45,14 @@ def _reference(module):
     else:
         ffn_ref = _feed_forward_reference(module.ffn)
 
+    post_norm = getattr(module, "post_norm", False)
+
     def run(x):
+        if post_norm:
+            branch = attn_ref(x)
+            x = norm1_ref(x + (branch if module.gamma1 is None else branch * module.gamma1))
+            branch = ffn_ref(x)
+            return norm2_ref(x + (branch if module.gamma2 is None else branch * module.gamma2))
         branch = attn_ref(norm1_ref(x))
         x = x + (branch if module.gamma1 is None else branch * module.gamma1)
         branch = ffn_ref(norm2_ref(x))
@@ -93,6 +100,20 @@ def _reference(module):
                        help="Query/key normalization in self-attention."),
         "bias": Arg(bool, True, positional=False, since="0.9.0",
                     help="Add learned biases to projections and normalizations."),
+        "head_dim": Arg(int, 0, min=0, positional=False, since="0.10.0",
+                        help="Attention per-head dimension; 0 defaults to D // heads."),
+        "window_size": Arg(int, 0, min=0, positional=False, since="0.10.0",
+                           help="Sliding-window attention window size; 0 means full context."),
+        "logit_softcap": Arg(float, 0.0, min=0.0, positional=False, since="0.10.0",
+                             help="Attention logit soft-capping value C; 0.0 means disabled."),
+        "qkv_bias": Arg(bool, True, positional=False, since="0.10.0",
+                        help="Learn separate biases on attention Q/K/V projections."),
+        "out_bias": Arg(bool, True, positional=False, since="0.10.0",
+                        help="Learn bias on attention output projection."),
+        "zero_centered": Arg(bool, False, positional=False, since="0.10.0",
+                             help="Initialize RMSNorm weight to 0.0 and evaluate as (1 + weight) * rms_norm(x)."),
+        "post_norm": Arg(bool, False, positional=False, since="0.10.0",
+                         help="Post-LN transformer architecture instead of pre-LN."),
     },
     examples=[
         Example("transformer_block(4)", ("B", 8, 32), ("B", 8, 32),
@@ -184,14 +205,18 @@ class TransformerBlock(nn.Module):
     def __init__(self, heads, mlp_ratio, activation, norm, causal, dropout,
                  layer_scale, layer_scale_init, eps, *, D,
                  ffn_kind="mlp", hidden=0, rope=False, rope_theta=10000.0,
-                 kv_heads=0, qk_norm="none", bias=True):
+                 kv_heads=0, qk_norm="none", bias=True,
+                 head_dim=0, window_size=0, logit_softcap=0.0,
+                 qkv_bias=True, out_bias=True, zero_centered=False, post_norm=False):
         super().__init__()
         self.norm_kind = norm
         self.ffn_kind = ffn_kind
         self.bias = bool(bias)
+        self.zero_centered = bool(zero_centered)
+        self.post_norm = bool(post_norm)
         if norm == "rms_norm":
-            self.norm1 = RMSNorm(eps=eps, affine=True, D=D)
-            self.norm2 = RMSNorm(eps=eps, affine=True, D=D)
+            self.norm1 = RMSNorm(eps=eps, affine=True, D=D, zero_centered=zero_centered)
+            self.norm2 = RMSNorm(eps=eps, affine=True, D=D, zero_centered=zero_centered)
         else:
             self.norm1 = LayerNorm(eps=eps, affine=True, bias=self.bias, D=D)
             self.norm2 = LayerNorm(eps=eps, affine=True, bias=self.bias, D=D)
@@ -199,6 +224,8 @@ class TransformerBlock(nn.Module):
         self.attn = Attention(
             heads=heads, causal=causal, dropout=dropout, bias=self.bias, rope=rope, D=D,
             rope_theta=rope_theta, kv_heads=kv_heads, qk_norm=qk_norm, eps=eps,
+            head_dim=head_dim, window_size=window_size, logit_softcap=logit_softcap,
+            qkv_bias=qkv_bias, out_bias=out_bias,
         )
 
         actual_hidden = hidden if hidden > 0 else (mlp_ratio * int(D))
@@ -217,6 +244,11 @@ class TransformerBlock(nn.Module):
             self.register_parameter("gamma2", None)
 
     def forward(self, x):
+        if self.post_norm:
+            branch = self.attn(x)
+            x = self.norm1(x + branch if self.gamma1 is None else torch.addcmul(x, branch, self.gamma1))
+            branch = self.ffn(x)
+            return self.norm2(x + branch if self.gamma2 is None else torch.addcmul(x, branch, self.gamma2))
         branch = self.attn(self.norm1(x))
         x = x + branch if self.gamma1 is None else torch.addcmul(x, branch, self.gamma1)
         branch = self.ffn(self.norm2(x))
@@ -226,4 +258,8 @@ class TransformerBlock(nn.Module):
         opts = f", ffn_kind={self.ffn_kind!r}" if self.ffn_kind != "mlp" else ""
         if not self.bias:
             opts += ", bias=False"
+        if getattr(self, "zero_centered", False):
+            opts += ", zero_centered=True"
+        if getattr(self, "post_norm", False):
+            opts += ", post_norm=True"
         return f"norm={self.norm_kind!r}, layer_scale={self.gamma1 is not None}{opts}"

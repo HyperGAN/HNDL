@@ -7,6 +7,7 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
+| [`dy_tanh`](dy_tanh.md) | Dynamic Tanh activation with learned scalar alpha and affine scaling. |
 | [`elu`](elu.md) | Exponential linear unit: identity above zero, saturating below. |
 | [`gelu`](gelu.md) | Gaussian error linear unit, x * Phi(x). |
 | [`hardswish`](hardswish.md) | Piecewise-linear approximation of swish, x * relu6(x + 3) / 6. |
@@ -17,6 +18,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`relu`](relu.md) | Rectified linear unit, max(x, 0). |
 | [`sigmoid`](sigmoid.md) | Logistic sigmoid, squashing values into (0, 1). |
 | [`silu`](silu.md) | Sigmoid linear unit (swish), x * sigmoid(x). |
+| [`snake`](snake.md) | Periodic activation: x + (1 / (alpha + eps)) * sin^2(alpha * x). |
 | [`softmax`](softmax.md) | Normalize one non-batch axis into a probability distribution. |
 | [`softplus`](softplus.md) | Smooth positive activation, log(1 + exp(beta*x)) / beta. |
 | [`tanh`](tanh.md) | Hyperbolic tangent, squashing values into (-1, 1). |
@@ -51,6 +53,7 @@ are generated from those declarations by `python -m hndl.docs`.
 | --- | --- |
 | [`cast`](cast.md) | Explicit dtype conversion across graph edges. |
 | [`linear`](linear.md) | Fully connected layer: a learned affine map on the last axis. |
+| [`where`](where.md) | Ternary conditional selection: out = where(cond, a, b). |
 
 ## memory
 
@@ -82,6 +85,7 @@ are generated from those declarations by `python -m hndl.docs`.
 
 | Operator | Summary |
 | --- | --- |
+| [`drop_path`](drop_path.md) | Stochastic depth (DropPath) residual regularization. |
 | [`dropout`](dropout.md) | Randomly zero elements during training and rescale the rest. |
 
 ## sequence
@@ -96,11 +100,13 @@ are generated from those declarations by `python -m hndl.docs`.
 | [`fourier_features`](fourier_features.md) | Encode coordinates with a fixed random Fourier frequency table. |
 | [`gated_delta_attention`](gated_delta_attention.md) | Kimi Delta Attention (KDA) and Gated DeltaNet with chunkwise parallel WY evaluation. |
 | [`gather_token`](gather_token.md) | Select the token of a sequence at the position holding the largest id. |
+| [`joint_attention`](joint_attention.md) | Dual-stream MMDiT joint self-attention across image and context streams. |
 | [`latent_attention`](latent_attention.md) | Multi-Head Latent Attention (MLA) with compressed KV cache and decoupled RoPE. |
+| [`mamba2`](mamba2.md) | State Space Duality (SSD) block from Mamba-2. |
 | [`moe`](moe.md) | Sparse mixture of experts: route every token to its top-k feed-forward experts. |
 | [`pool_tokens`](pool_tokens.md) | Reduce a [B, T, D] sequence to one [B, D] vector per example. |
 | [`pos_embed`](pos_embed.md) | Add a learned position vector to every position of a sequence. |
-| [`rope`](rope.md) | Standalone rotary position embedding over a [B, T, D] sequence. |
+| [`rope`](rope.md) | Standalone rotary position embedding over a [B, T, D] or [B, H, T, D_h] sequence. |
 | [`sinusoidal_embed`](sinusoidal_embed.md) | Deterministic log-spaced sinusoidal timestep embeddings. |
 | [`swiglu`](swiglu.md) | SwiGLU feed-forward block: a SiLU-gated projection folded back to the input width. |
 | [`transformer_block`](transformer_block.md) | Pre-norm transformer block: residual self-attention followed by a residual feed-forward. |

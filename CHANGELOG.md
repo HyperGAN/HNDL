@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **6 New Built-In Operators (expanding catalog from 78 to 84)**:
+  - `mamba2` (`ssd@1`, `sequence` category): State Space Duality block featuring causal 1D convolution, semi-separable chunked recurrence, gated RMSNorm, discretized continuous-time state-space parameterization, full autograd gradient propagation, and PyTorch reference oracle.
+  - `joint_attention` (`mmdit_attention@1`, `sequence` category): Dual-stream multimodal attention with modality-specific QKV projections, joint SDPA over concatenated sequence contexts, token unpooling/split, and per-modality output projections supporting RMSNorm and L2 QK-normalization.
+  - `dy_tanh` (`dynamic_tanh@1`, `activation` category): Dynamic Tanh activation and normalization with learned scalar frequency `alpha` and per-channel affine `gamma` / `beta` scaling.
+  - `drop_path` (`stochastic_depth@1`, `regularization` category): Residual stochastic depth dropping sample paths across batches with inverse survival probability keep-scaling in training mode and exact identity in evaluation mode.
+  - `where` (`where@1`, `core` category): Ternary element-wise selection `out = torch.where(cond, a, b)` with boolean condition enforcement (`E_DTYPE`) and bidirectional multi-port shape inference.
+  - `snake` (`snake@1`, `activation` category): Learned periodic activation $x + \frac{1}{\alpha + \epsilon} \sin^2(\alpha x)$ with channel-wise frequency parameter learning across channels-first and channels-last layouts.
+- **SOTA Operator Extensions (`Arg(..., since="0.10.0")`)**:
+  - `rope`: Extended with frequency scaling options (`rope_scaling` in "none", "linear", "ntk", "yarn", "llama3"), scale factor `rope_scale`, 2D axial RoPE via `spatial_shape=(H, W)`, and rank-4 `[B, H, T, D_h]` tensor support.
+  - `attention` & `latent_attention`: Forwarded `rope_scaling`, `rope_scale`, and `spatial_shape` to internal RoPE and decoupled RoPE layers.
+  - `resblock`: Added `kind="bottleneck"` (3-convolution residual bottleneck with expansion ratio) and configurable `activation` ("relu", "silu", "gelu").
+  - `transformer_block`: Added decoupled `head_dim`, `window_size` sliding-window local context masking, `logit_softcap`, `qkv_bias`, `out_bias`, `zero_centered` RMSNorm, and `post_norm` Post-LN architecture layout.
+  - `deconv1d`: Added `causal=True` zero-lookahead left-padded transposed 1D convolutions and `channels_last=True` `[B, T, C]` layout support.
+  - `adaln_zero`: Added `gate=False` support emitting a single `out` port with 2D (shift, scale) modulation without redundant residual gating parameters.
+  - `moe`: Added `routed_scaling_factor` parameter scaling routed expert outputs for DeepSeek-V2/V3 alignment.
+  - `conv` & `conv1d`: Added `policy="same3"` and `groups="depthwise"` automatically tying input/output channels to group count.
+- **Constraint Solver Rank-5 & `reshape(-1, ...)` Negative Dimension Support**:
+  - Extended solver `SUPPORTED_RANKS = (2, 3, 4, 5)` across `operator.py`, `resolver.py`, `reshape.py`, and `permute.py`, enabling native 5D video tensor `[B, C, T, H, W]` contract resolution and permutation.
+  - Added single negative dimension `-1` support in `reshape(shape)` at any non-batch position, inferring unknown dimension via `s.product("x", "out")`.
+- **4 New Authored Network Recipes (expanding recipe catalog from 21 to 25)**:
+  - Added `convnext_v2_tiny` (`.hndl` and `.json`, 77,900 parameters) exercising Global Response Normalization (GRN), DropPath stochastic depth, depthwise convolution, and learned residual scaling.
+  - Added `encodec_autoencoder_tiny` (`.hndl` and `.json`, 83,009 parameters) exercising causal 1D strided convolution, periodic Snake activation, and causal 1D transposed convolution.
+  - Added `clip_dual_encoder_tiny` (`.hndl` and `.json`, 89,920 parameters) exercising QuickGELU, cls_token, gather_token, L2 normalization, matrix multiplication, and scale.
+  - Added `nerf_coord_field` (`.hndl` and `.json`, 8,075 parameters) exercising random Fourier features, log-spaced sinusoidal embeddings, rotary embeddings, tensor splitting, and dynamic tanh activation.
+- **Catalog and Documentation Synchronization**:
+  - Synchronized built-in operator count from 78 to 84 across `SPEC.md`, `IMPLEMENTATION.md`, `README.md`, and `tests/test_package.py`.
+  - Scaled network example test suite `tests/test_network_examples.py` across all 25 recipes.
+
 - **`gated_delta_attention` non-reciprocal intra-chunk decay formulation**: Replaced reciprocal intra-chunk decay factorization ($\exp(\text{cum}_i) \cdot \exp(-\text{cum}_j)$ with clamping) with non-reciprocal forward causal relative decay $\Delta_{i,j} = (\text{cum}_i - \text{cum}_j).\text{clamp}(\text{max}=0.0)$, ensuring exact mathematical reference parity ($< 1\times 10^{-4}$) for large chunk sizes ($C \ge 128$) and strong decay rates ($A_{\text{log}} \ge 2.0$), maintaining strictly bounded peak activation memory ($46.26 \text{ MB}$ for channel decay), eliminating reciprocal overflow to $+\infty$, and guaranteeing 100% finite backward gradients across extreme decay regimes.
 - **`moe` 16-byte stride alignment & float16 compilation stability**: Enforced 16-byte row stride alignment checks across both CPU and CUDA in `MixtureOfExperts`, routing unaligned byte layouts cleanly to batched `bmm` fallback; under `torch.compile`, restricted `torch._grouped_mm` dispatch to `bfloat16` and routed `float16` to `bmm` to prevent Dynamo `FakeTensor` meta registration errors on CUDA < 13.3 or pre-Hopper/SM < 90 devices while maintaining 0 graph breaks.
 - **`gated_delta_attention` empty batch ($b=0$) & backward numerical stability**: Replaced ambiguous `-1` dimension with deterministic `log_alpha.shape[-1]` in chunk reshaping to support empty-batch inputs ($b=0$) with full autograd graph preservation; lowered single-precision `max_neg_exp` clamping threshold from $85.0$ to $45.0$ across full and tail chunk paths, completely eliminating float32 dot-product overflow into `+inf` during backward backpropagation and preventing `NaN` parameter gradients under strong decay rates.

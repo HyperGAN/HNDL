@@ -1,0 +1,16 @@
+# EnCodec-style neural audio autoencoder: causal 1D strided convolutional encoder,
+# Snake periodic activation function, and causal 1D transposed convolutional decoder.
+
+pad(0, 0, name="input_pad")
+conv1d(32, kernel_size=7, causal=True, name="enc_conv1")
+snake(channels=32, name="enc_act1")
+conv1d(64, kernel_size=4, stride=2, causal=True, name="enc_conv2")
+snake(channels=64, name="enc_act2")
+conv1d(128, kernel_size=4, stride=2, causal=True, name="enc_conv3")
+snake(channels=128, name="enc_act3")
+
+deconv1d(64, kernel_size=4, stride=2, causal=True, name="dec_conv1")
+snake(channels=64, name="dec_act1")
+deconv1d(32, kernel_size=4, stride=2, causal=True, name="dec_conv2")
+snake(channels=32, name="dec_act2")
+conv1d(1, kernel_size=7, causal=True, name="dec_conv3")

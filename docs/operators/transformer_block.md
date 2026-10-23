@@ -35,6 +35,13 @@ x[B, T, D] -> out[B, T, D]
 | `kv_heads` | int | `0` | >= 0 | Number of key/value heads for GQA in self-attention; 0 means heads. |
 | `qk_norm` | str | `"none"` | one of `none`, `rms_norm`, `l2_norm` | Query/key normalization in self-attention. |
 | `bias` | bool | `True` | — | Add learned biases to projections and normalizations. |
+| `head_dim` | int | `0` | >= 0 | Attention per-head dimension; 0 defaults to D // heads. |
+| `window_size` | int | `0` | >= 0 | Sliding-window attention window size; 0 means full context. |
+| `logit_softcap` | float | `0.0` | >= 0.0 | Attention logit soft-capping value C; 0.0 means disabled. |
+| `qkv_bias` | bool | `True` | — | Learn separate biases on attention Q/K/V projections. |
+| `out_bias` | bool | `True` | — | Learn bias on attention output projection. |
+| `zero_centered` | bool | `False` | — | Initialize RMSNorm weight to 0.0 and evaluate as (1 + weight) * rms_norm(x). |
+| `post_norm` | bool | `False` | — | Post-LN transformer architecture instead of pre-LN. |
 
 ## Description
 
@@ -100,9 +107,9 @@ the identity, which is what makes very deep stacks trainable.
 | LLaMA-style decoder | `transformer_block(heads, norm="rms_norm", causal=True)` |
 | CaiT / DINOv2 | `transformer_block(heads, layer_scale=True)` |
 
-(LLaMA additionally uses a gated `swiglu` feed-forward and rotary
-embeddings, which this block does not; compose `attention(rope=True)` and
-`swiglu` by hand for that.)
+(LLaMA-style architectures can use `ffn_kind="swiglu"` and `rope=True`
+directly within `transformer_block`, or compose `attention(rope=True)` and
+`swiglu` by hand.)
 
 **Train and eval.** ``dropout`` is passed to both branches — the attention
 weights and the feed-forward hidden activations — and is active in

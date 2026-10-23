@@ -17,13 +17,15 @@ Relation: `x[B, C_in, L_in] -> out[B, C_out, L_out] (or x[B, L_in, C_in] -> out[
 | `x` | input | `x` | compute |
 | `out` | output | `out` | compute |
 
+**Policies:** `policy="same3"` (spatial1d.same3@1: kernel_size=3, stride=1, padding=1, dilation=1)
+
 ## Arguments
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
 | `out_channels` (positional) | int | inferred | >= 1; <= 2147483647 | Output channels. Omit to infer from the consumer. |
 | `in_channels` | int | inferred | >= 1; <= 2147483647 | Input channels. Normally inferred from the incoming tensor. |
-| `kernel_size` | int | required | >= 1 | Kernel width in positions along the length axis. |
+| `kernel_size` (positional) | int | required | >= 1 | Kernel width in positions along the length axis. |
 | `stride` | int | `1` | >= 1 | Step between kernel applications along the length axis. |
 | `padding` | int | `0` | >= 0 | Zero padding added to each end of the length axis. |
 | `dilation` | int | `1` | >= 1 | Spacing between kernel taps along the length axis. |

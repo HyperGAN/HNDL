@@ -13,24 +13,39 @@ from ._equalized import eval_weight
 def _validate(args):
     if args["output_padding"] >= args["stride"] and args["output_padding"] >= args["dilation"]:
         raise HNDLError("E_ARGUMENT", "output_padding must be smaller than stride or dilation")
+    if args.get("causal") and args.get("padding", 0) != 0:
+        raise HNDLError("E_ARGUMENT", "causal=True requires padding=0")
 
 
 def _relation(s):
     args = s.args
+    channel_axis = 2 if args.get("channels_last") else 1
+    length_axis = 1 if args.get("channels_last") else 2
     s.rank("x", 3)
     s.rank("out", 3)
-    s.axis("x", 1, args.get("in_channels"))
-    s.axis("out", 1, args.get("out_channels"))
+    s.axis("x", channel_axis, args.get("in_channels"))
+    s.axis("out", channel_axis, args.get("out_channels"))
     a, b = s.shape("x"), s.shape("out")
-    s.arg("in_channels", a[1])
-    s.arg("out_channels", b[1])
-    for channels in (a[1], b[1]):
+    s.arg("in_channels", a[channel_axis])
+    s.arg("out_channels", b[channel_axis])
+    for channels in (a[channel_axis], b[channel_axis]):
         if channels is not None and channels % args["groups"]:
             s.error("E_CONSTRAINT", f"groups={args['groups']} must divide input and output channels")
-    if all(args.get(key) is not None for key in ("kernel_size", "stride", "padding", "dilation", "output_padding")):
+    if args.get("causal"):
+        stride = args["stride"]
+        in_len = a[length_axis]
+        out_len = b[length_axis]
+        if in_len is not None:
+            s.axis("out", length_axis, in_len * stride)
+        if out_len is not None:
+            if out_len % stride != 0:
+                s.error("E_CONSTRAINT", f"Causal deconv1d output length {out_len} must be divisible by stride {stride}")
+            else:
+                s.axis("x", length_axis, out_len // stride)
+    elif all(args.get(key) is not None for key in ("kernel_size", "stride", "padding", "dilation", "output_padding")):
         conv_transpose_axis(
             s,
-            2,
+            length_axis,
             kernel=args["kernel_size"],
             stride=args["stride"],
             padding=args["padding"],
@@ -43,8 +58,12 @@ def _reference(module):
     """The functional form of the 1D transposed convolution."""
 
     def apply(x):
+        channels_last = getattr(module, "channels_last", False)
+        causal = getattr(module, "causal", False)
+        if channels_last:
+            x = x.transpose(1, 2)
         weight = eval_weight(module)
-        return F.conv_transpose1d(
+        out = F.conv_transpose1d(
             x,
             weight,
             module.bias,
@@ -54,6 +73,12 @@ def _reference(module):
             groups=module.groups,
             dilation=module.dilation,
         )
+        if causal:
+            target_len = x.shape[-1] * module.stride[0]
+            out = out[..., :target_len]
+        if channels_last:
+            out = out.transpose(1, 2).contiguous()
+        return out
 
     return apply
 
@@ -83,7 +108,7 @@ def _reference(module):
             help="Input channels. Normally inferred from the incoming tensor.",
         ),
         "kernel_size": Arg(
-            int, min=1, positional=False, help="Kernel length in positions along the length axis."
+            int, min=1, help="Kernel length in positions along the length axis."
         ),
         "stride": Arg(int, 1, min=1, positional=False, help="Upsampling step along the length axis."),
         "padding": Arg(
@@ -114,6 +139,20 @@ def _reference(module):
             False,
             positional=False,
             help="Divide the weight by its largest singular value, estimated by power iteration.",
+        ),
+        "causal": Arg(
+            bool,
+            False,
+            positional=False,
+            since="0.10.0",
+            help="Left-only causal padding ensuring output length is L_in * stride.",
+        ),
+        "channels_last": Arg(
+            bool,
+            False,
+            positional=False,
+            since="0.10.0",
+            help="Layout [B, T, C] matching conv1d.",
         ),
     },
     policies={
@@ -173,6 +212,8 @@ class ConvTranspose1d(nn.ConvTranspose1d):
         groups,
         bias,
         spectral_norm,
+        causal=False,
+        channels_last=False,
     ):
         super().__init__(
             in_channels,
@@ -185,5 +226,26 @@ class ConvTranspose1d(nn.ConvTranspose1d):
             bias=bias,
             dilation=dilation,
         )
+        self.causal = bool(causal)
+        self.channels_last = bool(channels_last)
         if spectral_norm:
             parametrizations.spectral_norm(self)
+
+    def forward(self, x):
+        if self.channels_last:
+            x = x.transpose(1, 2)
+        out = super().forward(x)
+        if self.causal:
+            target_len = x.shape[-1] * self.stride[0]
+            out = out[..., :target_len]
+        if self.channels_last:
+            out = out.transpose(1, 2).contiguous()
+        return out
+
+    def extra_repr(self):
+        s = super().extra_repr()
+        if self.causal:
+            s += ", causal=True"
+        if self.channels_last:
+            s += ", channels_last=True"
+        return s

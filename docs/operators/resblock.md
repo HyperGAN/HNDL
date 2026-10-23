@@ -26,6 +26,9 @@ Relation: `H_out = floor((H_in + 2 - 3) / stride) + 1 = ceil(H_in / stride), sam
 | `stride` | int | `1` | >= 1 | Stride of the first convolution and of the shortcut; 2 halves height and width. |
 | `norm` | str | `"batch_norm"` | one of `batch_norm`, `group_norm`, `none` | Normalization after each convolution: "batch_norm", "group_norm", or "none". |
 | `groups` | int | `8` | >= 1 | Channel groups when norm="group_norm"; must divide the channel count. Ignored otherwise. |
+| `kind` | str | `"basic"` | one of `basic`, `bottleneck` | ResBlock kind: "basic" (two 3x3 convs) or "bottleneck" (1x1 -> 3x3 -> 1x1). |
+| `bottleneck_ratio` | int | `4` | >= 1 | Expansion reduction ratio for bottleneck: mid_channels = out_channels // bottleneck_ratio. |
+| `activation` | str | `"relu"` | one of `relu`, `silu`, `gelu` | Activation function: "relu", "silu", or "gelu". |
 
 ## Description
 

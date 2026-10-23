@@ -3,7 +3,7 @@ from torch.nn import functional as F
 from torch.nn.utils import parametrizations
 
 from ..errors import HNDLError
-from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
+from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, Policy, operator
 from ..relations import conv_axis
 from ._equalized import eval_weight
 
@@ -19,6 +19,17 @@ def _relation(s):
     length_axis = 1 if args.get("channels_last") else 2
     s.rank("x", 3)
     s.rank("out", 3)
+    if args.get("groups") == "depthwise":
+        a, b = s.shape("x"), s.shape("out")
+        in_ch = a[channel_axis] if a else None
+        out_ch = b[channel_axis] if b else None
+        ch = in_ch or out_ch or args.get("in_channels") or args.get("out_channels")
+        if ch is not None:
+            s.axis("x", channel_axis, ch)
+            s.axis("out", channel_axis, ch)
+            s.arg("in_channels", ch)
+            s.arg("out_channels", ch)
+            args["groups"] = ch
     s.axis("x", channel_axis, args.get("in_channels"))
     s.axis("out", channel_axis, args.get("out_channels"))
     a, b = s.shape("x"), s.shape("out")
@@ -47,6 +58,15 @@ def _relation(s):
                     s.interval("x", length_axis, (out_len - 1) * stride + 1, out_len * stride)
     else:
         conv_axis(s, length_axis, *(args[key] for key in ("kernel_size", "stride", "padding", "dilation")))
+
+
+def _finalize(args, input_shapes, output_shapes):
+    if args.get("groups") == "depthwise":
+        channel_axis = 2 if args.get("channels_last") else 1
+        sh = output_shapes.get("out") or input_shapes.get("x")
+        ch = sh[channel_axis] if sh else args.get("out_channels")
+        return {**args, "groups": int(ch)}
+    return args
 
 
 def _reference(module):
@@ -88,7 +108,7 @@ def _reference(module):
                             help="Output channels. Omit to infer from the consumer."),
         "in_channels": Arg(int, inferable=True, min=1, max=MAX_DIMENSION_LITERAL, positional=False,
                            help="Input channels. Normally inferred from the incoming tensor."),
-        "kernel_size": Arg(int, min=1, positional=False, help="Kernel width in positions along the length axis."),
+        "kernel_size": Arg(int, min=1, help="Kernel width in positions along the length axis."),
         "stride": Arg(int, 1, min=1, positional=False, help="Step between kernel applications along the length axis."),
         "padding": Arg(int, 0, min=0, positional=False, help="Zero padding added to each end of the length axis."),
         "dilation": Arg(int, 1, min=1, positional=False, help="Spacing between kernel taps along the length axis."),
@@ -101,6 +121,10 @@ def _reference(module):
         "channels_last": Arg(bool, False, positional=False, since="0.9.0",
                              help="Sequence layout [B, T, C] instead of [B, C, L]."),
     },
+    policies={
+        "same3": Policy("spatial1d.same3@1", {"kernel_size": 3, "stride": 1, "padding": 1, "dilation": 1}),
+    },
+    finalize=_finalize,
     examples=[
         Example("conv1d(16, kernel_size=3, padding=1)\nrelu()\nconv1d(4, kernel_size=3, padding=1)",
                 ("B", 4, 32), ("B", 4, 32), "Padding 1 with kernel 3 preserves the length axis."),

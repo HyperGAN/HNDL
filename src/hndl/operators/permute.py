@@ -8,8 +8,8 @@ def _validate(args):
     dims = args["dims"]
     if not dims:
         raise HNDLError("E_ARGUMENT", "permute needs the new order of the non-batch axes, for example permute(2, 1)")
-    if len(dims) > 3:
-        raise HNDLError("E_ARGUMENT", "permute lists at most three axes; the deepest supported rank is 4")
+    if len(dims) > 4:
+        raise HNDLError("E_ARGUMENT", "permute lists at most four axes; the deepest supported rank is 5")
     if sorted(dims) != list(range(1, len(dims) + 1)):
         raise HNDLError("E_ARGUMENT", f"permute dims {tuple(dims)} must be a permutation of "
                                       f"{tuple(range(1, len(dims) + 1))}; the batch axis 0 stays first")
@@ -42,7 +42,7 @@ def _reference(module):
     reference=_reference,
     shape_text="out[i] == x[dims[i - 1]] for every non-batch axis i; rank == len(dims) + 1",
     args={
-        "dims": Arg(INTS, (), min=1, max=3,
+        "dims": Arg(INTS, (), min=1, max=4,
                     help="The non-batch axes 1..rank-1 of the input in their new order, given positionally: "
                          "permute(3, 1, 2) sends axis 3 to position 1. The batch axis 0 is implicit and "
                          "cannot be listed. The length fixes the rank."),

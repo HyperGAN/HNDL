@@ -7,17 +7,23 @@ from ..relations import spatial
 from ._equalized import eval_weight
 
 DOWN2 = "spatial.down2@1"
+SAME3 = "spatial.same3@1"
 _spatial = spatial("conv2d")
 
 
 def _relation(s):
-    """Convolution arithmetic, plus the exact halving the "down2" policy promises.
-
-    A kernel 4 / stride 2 / padding 1 convolution maps both ``2*O`` and
-    ``2*O + 1`` to ``O``, so the generic inverse leaves a two-value interval.
-    Under ``policy="down2"`` an odd input extent is rejected and each spatial
-    axis is pinned to ``H_in = 2*H_out``, which makes backward inference unique.
-    """
+    """Convolution arithmetic, plus the exact halving the "down2" policy promises."""
+    if s.args.get("groups") == "depthwise":
+        a, b = s.shape("x"), s.shape("out")
+        in_ch = a[1] if a else None
+        out_ch = b[1] if b else None
+        ch = in_ch or out_ch or s.args.get("in_channels") or s.args.get("out_channels")
+        if ch is not None:
+            s.axis("x", 1, ch)
+            s.axis("out", 1, ch)
+            s.arg("in_channels", ch)
+            s.arg("out_channels", ch)
+            s.args["groups"] = ch
     _spatial(s)
     if s.policy != DOWN2:
         return
@@ -33,6 +39,14 @@ def _relation(s):
             s.axis("out", axis, extent // 2)
         if target is not None:
             s.axis("x", axis, 2 * target)
+
+
+def _finalize(args, input_shapes, output_shapes):
+    if args.get("groups") == "depthwise":
+        sh = output_shapes.get("out") or input_shapes.get("x")
+        ch = sh[1] if sh else args.get("out_channels")
+        return {**args, "groups": int(ch)}
+    return args
 
 
 def _reference(module):
@@ -67,7 +81,11 @@ def _reference(module):
         "spectral_norm": Arg(bool, False, positional=False,
                              help="Divide the weight by its largest singular value, estimated by power iteration."),
     },
-    policies={"down2": Policy(DOWN2, {"kernel_size": 4, "stride": 2, "padding": 1, "dilation": 1, "groups": 1})},
+    policies={
+        "down2": Policy(DOWN2, {"kernel_size": 4, "stride": 2, "padding": 1, "dilation": 1, "groups": 1}),
+        "same3": Policy(SAME3, {"kernel_size": 3, "stride": 1, "padding": 1, "dilation": 1}),
+    },
+    finalize=_finalize,
     examples=[
         Example("conv(16, kernel_size=3, padding=1)\nrelu()\nconv(3, kernel_size=3, padding=1)",
                 ("B", 3, 32, 32), ("B", 3, 32, 32), "Padding 1 with kernel 3 preserves height and width."),

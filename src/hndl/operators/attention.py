@@ -8,6 +8,7 @@ from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
 from ._equalized import EqualLinear
 from .rms_norm import RMSNorm
+from .rope import compute_rope_tables
 
 ROPE_BASE = 10000.0
 
@@ -19,11 +20,19 @@ def _validate(args):
             raise HNDLError("E_ARGUMENT",
                             "relative_position_bias=True needs spatial_shape=(H, W) with positive H and W")
     elif height or width:
-        raise HNDLError("E_ARGUMENT",
-                        "spatial_shape describes the token grid of relative_position_bias=True; "
-                        "set relative_position_bias=True or drop spatial_shape")
-    if not args.get("rope") and args.get("rope_theta") != 10000.0:
-        raise HNDLError("E_ARGUMENT", "rope_theta is only valid when rope=True")
+        if not args.get("rope"):
+            raise HNDLError("E_ARGUMENT",
+                            "spatial_shape describes the token grid of relative_position_bias=True or rope=True; "
+                            "set relative_position_bias=True, rope=True or drop spatial_shape")
+        if height < 1 or width < 1:
+            raise HNDLError("E_ARGUMENT", "spatial_shape must have positive height and width")
+    if not args.get("rope"):
+        if args.get("rope_theta") != 10000.0:
+            raise HNDLError("E_ARGUMENT", "rope_theta is only valid when rope=True")
+        if args.get("rope_scaling", "none") != "none":
+            raise HNDLError("E_ARGUMENT", "rope_scaling is only valid when rope=True")
+        if args.get("rope_scale", 1.0) != 1.0:
+            raise HNDLError("E_ARGUMENT", "rope_scale is only valid when rope=True")
 
 
 def _relation(s):
@@ -78,16 +87,12 @@ def _rotate_half(tensor):
     return torch.cat((-right, left), dim=-1)
 
 
-def _rope_tables(positions, head_dim, device, dtype, theta=ROPE_BASE):
+def _rope_tables(positions, head_dim, device, dtype, theta=ROPE_BASE, rope_scaling="none", rope_scale=1.0, spatial_shape=(0, 0)):
     """``cos``/``sin`` of shape ``[1, 1, T, head_dim]`` for the rotate-half convention."""
-    # The angles are built in float32 for reduced-precision plans (1 / base**(i/d)
-    # underflows in half precision) and float64 when double precision is requested.
-    calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
-    exponent = torch.arange(0, head_dim, 2, device=device, dtype=calc_dtype) / head_dim
-    inverse_frequency = float(theta) ** (-exponent)
-    angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
-    duplicated = torch.cat((angles, angles), dim=-1)
-    return duplicated.cos().to(dtype)[None, None], duplicated.sin().to(dtype)[None, None]
+    return compute_rope_tables(
+        positions, head_dim, device, dtype,
+        theta=theta, rope_scaling=rope_scaling, rope_scale=rope_scale, spatial_shape=spatial_shape,
+    )
 
 
 def _apply_rope(tensor, cos, sin):
@@ -125,7 +130,13 @@ def _reference(module):
             k = F.normalize(k, p=2, dim=-1, eps=eps)
         if module.rope:
             theta = getattr(module, "rope_theta", ROPE_BASE)
-            cos, sin = _rope_tables(positions, head_dim, x.device, x.dtype, theta=theta)
+            rope_scaling = getattr(module, "rope_scaling", "none")
+            rope_scale = getattr(module, "rope_scale", 1.0)
+            spatial_shape = (0, 0) if getattr(module, "relative_position_bias", False) else getattr(module, "spatial_shape", (0, 0))
+            cos, sin = _rope_tables(
+                positions, head_dim, x.device, x.dtype,
+                theta=theta, rope_scaling=rope_scaling, rope_scale=rope_scale, spatial_shape=spatial_shape,
+            )
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
         if kv_heads != heads:
             repeats = heads // kv_heads
@@ -191,6 +202,23 @@ def _reference(module):
                        help="Per-head query/key normalization before RoPE."),
         "rope_theta": Arg(float, 10000.0, min=1.0, exclusive_min=True, positional=False, since="0.9.0",
                           help="Base frequency for rotary position embeddings."),
+        "rope_scaling": Arg(
+            str,
+            "none",
+            choices=("none", "linear", "ntk", "yarn", "llama3"),
+            positional=False,
+            since="0.10.0",
+            help="Frequency scaling algorithm for RoPE context extension.",
+        ),
+        "rope_scale": Arg(
+            float,
+            1.0,
+            min=0.0,
+            exclusive_min=True,
+            positional=False,
+            since="0.10.0",
+            help="Frequency scale factor for context extension.",
+        ),
         "window_size": Arg(int, 0, min=0, positional=False, since="0.9.0",
                            help="Sliding-window attention window size; 0 means full context."),
         "logit_softcap": Arg(float, 0.0, min=0.0, positional=False, since="0.9.0",
@@ -320,7 +348,8 @@ class Attention(nn.Module):
     def __init__(self, heads, causal, dropout, bias, rope, *, D,
                  qkv_bias=True, out_bias=True, relative_position_bias=False, spatial_shape=(0, 0),
                  equalized=False, kv_heads=0, head_dim=0, qk_norm="none",
-                 rope_theta=10000.0, window_size=0, logit_softcap=0.0, eps=1e-6):
+                 rope_theta=10000.0, rope_scaling="none", rope_scale=1.0,
+                 window_size=0, logit_softcap=0.0, eps=1e-6):
         super().__init__()
         self.heads = heads
         self.kv_heads = kv_heads if kv_heads > 0 else heads
@@ -338,8 +367,14 @@ class Attention(nn.Module):
         self.dropout = float(dropout)
         self.rope = bool(rope)
         self.rope_theta = float(rope_theta)
+        self.rope_scaling = str(rope_scaling)
+        self.rope_scale = float(rope_scale)
         if not self.rope and self.rope_theta != 10000.0:
             raise HNDLError("E_ARGUMENT", "rope_theta is only valid when rope=True")
+        if not self.rope and self.rope_scaling != "none":
+            raise HNDLError("E_ARGUMENT", "rope_scaling is only valid when rope=True")
+        if not self.rope and self.rope_scale != 1.0:
+            raise HNDLError("E_ARGUMENT", "rope_scale is only valid when rope=True")
         self.relative_position_bias = bool(relative_position_bias)
         self.equalized = bool(equalized)
         self.qk_norm = qk_norm
@@ -401,13 +436,22 @@ class Attention(nn.Module):
         return cached
 
     def _get_rope_tables(self, positions, device, dtype):
+        sp = (0, 0) if self.relative_position_bias else (self.spatial_shape if self.rope else (0, 0))
         if torch.compiler.is_compiling():
-            return _rope_tables(positions, self.head_dim, device, dtype, theta=self.rope_theta)
-        key = (str(device), dtype, self.rope_theta)
+            return _rope_tables(
+                positions, self.head_dim, device, dtype,
+                theta=self.rope_theta, rope_scaling=self.rope_scaling,
+                rope_scale=self.rope_scale, spatial_shape=sp,
+            )
+        key = (str(device), dtype, self.rope_theta, self.rope_scaling, self.rope_scale, sp)
         cached = self._rope_cache.get(key)
         if cached is not None and cached[0].shape[2] >= positions:
             return cached[0][:, :, :positions, :], cached[1][:, :, :positions, :]
-        cached = _rope_tables(positions, self.head_dim, device, dtype, theta=self.rope_theta)
+        cached = _rope_tables(
+            positions, self.head_dim, device, dtype,
+            theta=self.rope_theta, rope_scaling=self.rope_scaling,
+            rope_scale=self.rope_scale, spatial_shape=sp,
+        )
         self._rope_cache[key] = cached
         return cached
 
@@ -503,6 +547,10 @@ class Attention(nn.Module):
             opts += f", qk_norm={self.qk_norm!r}"
         if self.rope_theta != 10000.0:
             opts += f", rope_theta={self.rope_theta}"
+        if self.rope_scaling != "none":
+            opts += f", rope_scaling='{self.rope_scaling}'"
+        if self.rope_scale != 1.0:
+            opts += f", rope_scale={self.rope_scale}"
         if self.window_size > 0:
             opts += f", window_size={self.window_size}"
         if self.logit_softcap > 0.0:

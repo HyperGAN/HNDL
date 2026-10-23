@@ -1,0 +1,21 @@
+# ConvNeXt-V2 block stage: 4x4 patchify stem, 7x7 depthwise convolutions with
+# GroupNorm, inverted 4x pointwise convolutions, GELU, Global Response
+# Normalization (GRN), learned residual scaling, and DropPath stochastic depth.
+
+conv(64, kernel_size=4, stride=4, name="patch_stem")
+x = group_norm(1, name="stem_norm")
+
+for _ in range(2):
+    h = conv(x, 64, kernel_size=7, padding=3, groups="depthwise", name="dwconv")
+    h = group_norm(h, 1, name="norm")
+    h = conv(h, 256, kernel_size=1, name="pwconv1")
+    h = gelu(h)
+    h = grn(h, name="grn")
+    h = conv(h, 64, kernel_size=1, name="pwconv2")
+    h = learned_scale(h, init_value=1e-6, name="gamma")
+    h = drop_path(h, 0.0, name="drop")
+    x = add(x, h, name="residual")
+
+global_avg_pool(x)
+layer_norm(name="head_norm")
+linear(10, name="head")

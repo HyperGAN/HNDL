@@ -233,6 +233,10 @@ def normalize_arguments(op, positional, kwargs, policy=None):
         args.setdefault(rest, ())
     else:
         names = op.positional_names
+        if op.alias == "moe" and len(positional) == 2:
+            names = ("experts", "hidden")
+        elif op.alias == "moe" and len(positional) == 3:
+            names = ("experts", "top_k", "hidden")
         if len(positional) > len(names):
             raise HNDLError("E_ARGUMENT", f"{op.alias} accepts at most {len(names)} author positional arguments")
         for name, value in zip(names, positional):

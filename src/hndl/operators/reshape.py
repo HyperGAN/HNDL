@@ -6,7 +6,17 @@ from ..operator import Arg, Example, INTS, MAX_DIMENSION_LITERAL, operator
 
 def _relation(s):
     prefix = s.args["shape"]
-    if len(prefix) >= 3:
+    if -1 in prefix:
+        s.rank("out", len(prefix) + 1)
+        for axis, value in enumerate(prefix, 1):
+            if value != -1:
+                s.axis("out", axis, value, "E_RESHAPE")
+        s.product("x", "out")
+        return
+
+    if len(prefix) >= 4:
+        s.rank("out", 5)
+    elif len(prefix) >= 3:
         s.rank("out", 4)
     shape = s.shape("out")
     if shape is not None:
@@ -18,8 +28,13 @@ def _relation(s):
 
 
 def _validate(args):
-    if len(args["shape"]) > 3:
-        raise HNDLError("E_ARGUMENT", "reshape shape must be a prefix of at most three dimensions")
+    if len(args["shape"]) > 4:
+        raise HNDLError("E_ARGUMENT", "reshape shape must be a prefix of at most four dimensions")
+    for v in args["shape"]:
+        if v <= 0 and v != -1:
+            raise HNDLError("E_ARGUMENT", "Dimensions must be positive or -1")
+    if args["shape"].count(-1) > 1:
+        raise HNDLError("E_ARGUMENT", "At most one -1 dimension permitted in reshape")
 
 
 def _finalize(args, input_shapes, output_shapes):
@@ -42,7 +57,7 @@ def _reference(module):
     relation=_relation,
     reference=_reference,
     shape_text="prod(x[1:]) == prod(out[1:]); out[1:len(shape)+1] == shape",
-    args={"shape": Arg(INTS, (), min=1, max=MAX_DIMENSION_LITERAL,
+    args={"shape": Arg(INTS, (), min=-1, max=MAX_DIMENSION_LITERAL,
                        help="Leading non-batch dimensions. Remaining dimensions are inferred.")},
     positional_rest="shape",
     validate=_validate,

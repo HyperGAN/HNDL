@@ -36,7 +36,11 @@ def _reference(module):
             weights = torch.softmax(values, dim=-1)
         gates = torch.zeros_like(logits).scatter(1, indices, weights)
         expert_outputs = torch.stack([expert_forward(e, flat) for e in module.experts], dim=-1)
-        return (expert_outputs * gates.unsqueeze(1)).sum(dim=-1).reshape(x.shape)
+        scaled = (expert_outputs * gates.unsqueeze(1)).sum(dim=-1)
+        factor = getattr(module, "routed_scaling_factor", 1.0)
+        if factor != 1.0:
+            scaled = scaled * factor
+        return scaled.reshape(x.shape)
 
     return run
 
@@ -75,7 +79,7 @@ class SwiGLUExpert(nn.Module):
     args={
         "experts": Arg(int, min=1, max=MAX_DIMENSION_LITERAL, help="Number of feed-forward experts."),
         "hidden": Arg(int, min=1, max=MAX_DIMENSION_LITERAL, help="Inner width of every expert's feed-forward."),
-        "top_k": Arg(int, 2, min=1, positional=False,
+        "top_k": Arg(int, 2, min=1, positional=True,
                      help="Experts each token is routed to; must not exceed experts."),
         "activation": Arg(str, "gelu", positional=False, choices=tuple(ACTIVATIONS),
                           help='Nonlinearity inside each expert: "gelu", "gelu_tanh", "relu" or "silu".'),
@@ -85,6 +89,15 @@ class SwiGLUExpert(nn.Module):
                     help="Enable learned biases in expert projections."),
         "scoring": Arg(str, "softmax", choices=("softmax", "sigmoid"), positional=False, since="0.9.0",
                        help='Routing gate affinity normalization: "softmax" or "sigmoid".'),
+        "routed_scaling_factor": Arg(
+            float,
+            1.0,
+            min=0.0,
+            exclusive_min=True,
+            positional=False,
+            since="0.10.0",
+            help="Multiplier applied to routed expert outputs.",
+        ),
     },
     validate=_validate,
     reference=_reference,
@@ -121,7 +134,7 @@ class MixtureOfExperts(nn.Module):
     """
 
     def __init__(self, experts, hidden, top_k, activation, *, D,
-                 expert_kind="mlp", bias=True, scoring="softmax"):
+                 expert_kind="mlp", bias=True, scoring="softmax", routed_scaling_factor=1.0):
         super().__init__()
         self.d_model = D
         self.hidden = hidden
@@ -130,6 +143,7 @@ class MixtureOfExperts(nn.Module):
         self.expert_kind = expert_kind
         self.bias = bool(bias)
         self.scoring = scoring
+        self.routed_scaling_factor = float(routed_scaling_factor)
         self.router = nn.Linear(D, experts, bias=False)
         if expert_kind == "swiglu":
             self.experts = nn.ModuleList(SwiGLUExpert(D, hidden, bias=bias) for _ in range(experts))
@@ -253,6 +267,8 @@ class MixtureOfExperts(nn.Module):
         expert_out = expert_out * sorted_weights
         out = torch.zeros_like(flat)
         out.index_add_(0, sorted_token_ids, expert_out)
+        if self.routed_scaling_factor != 1.0:
+            out = out * self.routed_scaling_factor
         return out.reshape(x.shape)
 
     def extra_repr(self):
@@ -261,5 +277,7 @@ class MixtureOfExperts(nn.Module):
             opts += ", bias=False"
         if self.scoring != "softmax":
             opts += f", scoring={self.scoring!r}"
+        if getattr(self, "routed_scaling_factor", 1.0) != 1.0:
+            opts += f", routed_scaling_factor={self.routed_scaling_factor}"
         return (f"experts={len(self.experts)}, hidden={self.hidden}, top_k={self.top_k}, "
                 f"activation={self.activation!r}{opts}")

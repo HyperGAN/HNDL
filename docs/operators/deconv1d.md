@@ -25,7 +25,7 @@ Relation: `L_out = (L_in - 1)*stride - 2*padding + dilation*(kernel_size - 1) + 
 | --- | --- | --- | --- | --- |
 | `out_channels` (positional) | int | inferred | >= 1; <= 2147483647 | Output channels. Omit to infer from the consumer. |
 | `in_channels` | int | inferred | >= 1; <= 2147483647 | Input channels. Normally inferred from the incoming tensor. |
-| `kernel_size` | int | required | >= 1 | Kernel length in positions along the length axis. |
+| `kernel_size` (positional) | int | required | >= 1 | Kernel length in positions along the length axis. |
 | `stride` | int | `1` | >= 1 | Upsampling step along the length axis. |
 | `padding` | int | `0` | >= 0 | Implicit zero padding removed from each side of the output. |
 | `dilation` | int | `1` | >= 1 | Spacing between kernel taps. |
@@ -33,6 +33,8 @@ Relation: `L_out = (L_in - 1)*stride - 2*padding + dilation*(kernel_size - 1) + 
 | `groups` | int | `1` | >= 1 | Channel groups; must divide input and output channels. |
 | `bias` | bool | `True` | — | Add a learned per-channel bias. |
 | `spectral_norm` | bool | `False` | — | Divide the weight by its largest singular value, estimated by power iteration. |
+| `causal` | bool | `False` | — | Left-only causal padding ensuring output length is L_in * stride. |
+| `channels_last` | bool | `False` | — | Layout [B, T, C] matching conv1d. |
 
 ## Description
 

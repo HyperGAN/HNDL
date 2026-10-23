@@ -37,13 +37,9 @@ side fixes the other and a mismatch is reported as ``E_CONSTRAINT`` while
 the plan resolves. The batch is shared: there is no broadcasting of the
 batch axis or of a missing axis.
 
-Only rank 3 is supported. That is the layout attention works in —
-``[B, T, D]`` sequences, or an image feature map flattened to
-``[B, C, H*W]`` — and it keeps the operation unambiguous. Reshape first if
-a tensor arrives at another rank: ``reshape(C)`` turns ``[B, C, H, W]``
-into ``[B, C, H*W]``, and ``reshape(C, H, W)`` turns it back. A rank-2 or
-rank-4 tensor on any port fails with ``E_CONSTRAINT`` rather than being
-silently folded or broadcast.
+Batched matrix multiplication supports rank 2, rank 3, and rank 4 tensors with
+matching leading batch dimensions [B, ..., N, K] @ [B, ..., K, M] -> [B, ..., N, M].
+Both operands must share the same rank and leading dimensions.
 
 There are no parameters and no buffers, train and eval behave identically,
 and the product runs in the plan compute dtype. Reduced-precision matrix

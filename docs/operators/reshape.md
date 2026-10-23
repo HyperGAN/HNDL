@@ -21,7 +21,7 @@ Relation: `prod(x[1:]) == prod(out[1:]); out[1:len(shape)+1] == shape`
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
-| `shape` (positional) | ints | `()` | >= 1; <= 2147483647 | Leading non-batch dimensions. Remaining dimensions are inferred. |
+| `shape` (positional) | ints | `()` | >= -1; <= 2147483647 | Leading non-batch dimensions. Remaining dimensions are inferred. |
 
 Positional values fill `shape`.
 

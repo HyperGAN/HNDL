@@ -1,6 +1,6 @@
 # `rope`
 
-Standalone rotary position embedding over a [B, T, D] sequence.
+Standalone rotary position embedding over a [B, T, D] or [B, H, T, D_h] sequence.
 
 **Category:** sequence · **Identity:** `rope@1`
 
@@ -23,10 +23,13 @@ Relation: `D % heads == 0 and (D // heads) % 2 == 0; out matches x`
 | --- | --- | --- | --- | --- |
 | `heads` (positional) | int | `1` | >= 1 | Number of heads to split D into before rotating. |
 | `theta` | float | `10000.0` | > 1.0 | Base frequency for rotary embeddings. |
+| `rope_scaling` | str | `"none"` | one of `none`, `linear`, `ntk`, `yarn`, `llama3` | Frequency scaling algorithm for RoPE context extension. |
+| `rope_scale` | float | `1.0` | > 0.0 | Frequency scale factor for context extension. |
+| `spatial_shape` | pair | `(0, 0)` | >= 0 | Token grid (H, W) for 2D axial RoPE, row-major with H*W == T. |
 
 ## Description
 
-Standalone rotary position embedding (RoPE) for [B, T, D] sequences.
+Standalone rotary position embedding (RoPE) for [B, T, D] or [B, H, T, D_h] sequences.
 
 Applies rotary position embeddings independently to each head of dimension
 ``head_dim = D // heads`` along the sequence length axis:

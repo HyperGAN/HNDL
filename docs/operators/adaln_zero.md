@@ -7,7 +7,7 @@ Rank-3 adaptive LayerNorm-Zero conditioning modulation for Diffusion Transformer
 ## Shape
 
 ```text
-x[B, T, D], cond[B, D_cond] -> out[B, T, D], gate[B, T, D]
+x[B, T, D], cond[B, D_cond] -> out[B, T, D]
 ```
 
 | Port | Direction | Pattern | dtype |
@@ -15,22 +15,24 @@ x[B, T, D], cond[B, D_cond] -> out[B, T, D], gate[B, T, D]
 | `x` | input | `x[B, T, D]` | compute |
 | `cond` | input | `cond[B, D_cond]` | compute |
 | `out` | output | `out[B, T, D]` | compute |
-| `gate` | output | `gate[B, T, D]` | compute |
+| `gate` | output | `gate` | compute |
 
 ## Arguments
 
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
 | `eps` | float | `1e-06` | > 0 | Epsilon added to the variance in LayerNorm. |
+| `gate` | bool | `True` | — | Whether to output gate tensor. |
 
 ## Description
 
 Rank-3 adaptive LayerNorm-Zero conditioning modulation for Diffusion Transformers.
 
 Maps a conditioning vector ``cond[B, D_cond]`` through a zero-initialized
-linear layer to produce per-token shift, scale, and dimension-wise gate
+linear layer to produce per-token shift, scale, and optional dimension-wise gate
 parameters:
-``shift, scale, gate = Linear(SiLU(cond)).chunk(3, dim=-1)``
+``shift, scale, gate = Linear(SiLU(cond)).chunk(3, dim=-1)`` (when ``gate=True``)
+``shift, scale = Linear(SiLU(cond)).chunk(2, dim=-1)`` (when ``gate=False``)
 ``normed = LayerNorm(x, affine=False)``
 ``out = (1 + scale) * normed + shift``
 ``gate_out = gate.expand_as(x)``.

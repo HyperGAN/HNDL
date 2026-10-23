@@ -44,7 +44,7 @@ def test_spec_and_implementation_status_names_current_version():
 
 def test_operator_count_and_catalog_synchronization():
     registry = Registry.builtins()
-    assert len(registry.operators) == 78
+    assert len(registry.operators) == 84
     categories = {op.category for op in registry.operators}
     assert len(categories) == 12
     assert categories == {
@@ -63,15 +63,15 @@ def test_operator_count_and_catalog_synchronization():
     }
 
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "catalog of 78 documented operators" in readme
+    assert "catalog of 84 documented operators" in readme
 
     impl = (REPO_ROOT / "IMPLEMENTATION.md").read_text(encoding="utf-8")
-    assert "Seventy-eight (78) operators across activation, arithmetic, convolution, core, memory, normalization, pretrained, regularization, sequence, shape, spatial, and vision" in " ".join(impl.split())
+    assert "Eighty-four (84) operators across activation, arithmetic, convolution, core, memory, normalization, pretrained, regularization, sequence, shape, spatial, and vision" in " ".join(impl.split())
     assert "Fifty-nine operators" not in impl
-    assert "78" in impl
+    assert "84" in impl
 
     spec = (REPO_ROOT / "SPEC.md").read_text(encoding="utf-8")
-    assert "78 operators across 12 categories" in spec
+    assert "84 operators across 12 categories" in spec
 
 
 def test_spec_documents_arg_since():

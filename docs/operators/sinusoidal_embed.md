@@ -22,6 +22,7 @@ Relation: `D_out = features (must be even and a multiple of 2 * D_in)`
 | Name | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
 | `features` (positional) | int | inferred | >= 1; binds `D_out` | Output embedding dimension. |
+| `dim` | int | `0` | >= 0 | Alias for features. |
 | `max_period` | float | `10000.0` | > 1.0 | Maximum frequency period for log-spaced frequencies. |
 
 ## Description

@@ -1,0 +1,28 @@
+# Tiny CLIP dual-encoder model: convolutional visual stem with class token and
+# vision transformer, text transformer with end-of-text token gathering, QuickGELU
+# projection heads, L2 normalization, matrix multiplication, and scale.
+
+img = conv(image, 32, kernel_size=4, stride=4, name="img_stem")
+img = reshape(img, 32, 64)
+img = transpose(img, 1, 2)
+img = cls_token(img, name="img_cls")
+img = pos_embed(img, 65, name="img_pos")
+img = transformer_block(img, 4, name="img_block")
+img_cls = pool_tokens(img, mode="first")
+img_proj = linear(img_cls, 64, bias=False, name="img_proj")
+img_act = quick_gelu(img_proj)
+img_norm = l2_norm(img_act, dim=-1, name="img_norm")
+
+txt = embedding(text, 256, 64, name="text_emb")
+txt = pos_embed(txt, 16, name="text_pos")
+txt = transformer_block(txt, 4, name="text_block")
+txt_eos = gather_token(txt, text, name="text_gather")
+txt_proj = linear(txt_eos, 64, bias=False, name="text_proj")
+txt_act = quick_gelu(txt_proj)
+txt_norm = l2_norm(txt_act, dim=-1, name="text_norm")
+
+img_v = reshape(img_norm, 1, 64)
+txt_v = reshape(txt_norm, 64, 1)
+sim = matmul(img_v, txt_v)
+sim = scale(sim, 14.28)
+output = reshape(sim, 1)

@@ -33,6 +33,8 @@ x[B, T, D] -> out[B, T, D]
 | `head_dim` | int | `0` | >= 0 | Per-head dimension override; 0 means D // heads. |
 | `qk_norm` | str | `"none"` | one of `none`, `rms_norm`, `l2_norm` | Per-head query/key normalization before RoPE. |
 | `rope_theta` | float | `10000.0` | > 1.0 | Base frequency for rotary position embeddings. |
+| `rope_scaling` | str | `"none"` | one of `none`, `linear`, `ntk`, `yarn`, `llama3` | Frequency scaling algorithm for RoPE context extension. |
+| `rope_scale` | float | `1.0` | > 0.0 | Frequency scale factor for context extension. |
 | `window_size` | int | `0` | >= 0 | Sliding-window attention window size; 0 means full context. |
 | `logit_softcap` | float | `0.0` | >= 0.0 | Logit soft-capping value C; 0.0 means disabled. |
 | `eps` | float | `1e-06` | > 0 | Epsilon for QK normalization. |

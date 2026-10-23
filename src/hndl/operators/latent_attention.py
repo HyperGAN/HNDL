@@ -7,7 +7,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..errors import HNDLError
-from ..operator import Arg, Example, operator
+from ..operator import PAIR, Arg, Example, operator
+from .rope import compute_rope_tables
 
 
 def _rotate_half(tensor):
@@ -56,7 +57,6 @@ def _reference(module):
 
     def run(x):
         b, t, _ = x.shape
-        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
 
         c_kv = F.linear(x, module.kv_down.weight, module.kv_down.bias)
         c_kv = F.rms_norm(c_kv, (module.kv_lora_rank,), module.kv_norm.weight, module.kv_norm.eps)
@@ -65,12 +65,15 @@ def _reference(module):
 
         if d_rope > 0:
             kr_raw = F.linear(x, module.k_rope_proj.weight, module.k_rope_proj.bias)
-            exponent = torch.arange(0, d_rope, 2, device=x.device, dtype=calc_dtype) / d_rope
-            inv_freq = module.rope_theta ** (-exponent)
-            angles = torch.arange(t, device=x.device, dtype=calc_dtype)[:, None] * inv_freq[None, :]
-            dup = torch.cat((angles, angles), dim=-1)
-            cos = dup.cos().to(x.dtype)
-            sin = dup.sin().to(x.dtype)
+            rope_scaling = getattr(module, "rope_scaling", "none")
+            rope_scale = getattr(module, "rope_scale", 1.0)
+            spatial_shape = getattr(module, "spatial_shape", (0, 0))
+            cos_4d, sin_4d = compute_rope_tables(
+                t, d_rope, x.device, x.dtype,
+                theta=module.rope_theta, rope_scaling=rope_scaling, rope_scale=rope_scale, spatial_shape=spatial_shape,
+            )
+            cos = cos_4d[0, 0]
+            sin = sin_4d[0, 0]
             kr = kr_raw * cos.unsqueeze(0) + _rotate_half(kr_raw) * sin.unsqueeze(0)
             kr = kr.unsqueeze(1).expand(b, heads, t, d_rope)
             k = torch.cat([kc, kr], dim=-1)
@@ -156,6 +159,31 @@ def _reference(module):
             positional=False,
             help="RoPE base frequency theta.",
         ),
+        "rope_scaling": Arg(
+            str,
+            "none",
+            choices=("none", "linear", "ntk", "yarn", "llama3"),
+            positional=False,
+            since="0.10.0",
+            help="Frequency scaling algorithm for RoPE context extension.",
+        ),
+        "rope_scale": Arg(
+            float,
+            1.0,
+            min=0.0,
+            exclusive_min=True,
+            positional=False,
+            since="0.10.0",
+            help="Frequency scale factor for context extension.",
+        ),
+        "spatial_shape": Arg(
+            PAIR,
+            (0, 0),
+            min=0,
+            positional=False,
+            since="0.10.0",
+            help="Token grid (H, W) for 2D axial RoPE, row-major with H*W == T.",
+        ),
         "bias": Arg(bool, False, positional=False, help="Add learned bias to all projections."),
         "softmax_scale": Arg(
             float,
@@ -209,6 +237,9 @@ class LatentAttention(nn.Module):
         v_head_dim=0,
         causal=True,
         rope_theta=10000.0,
+        rope_scaling="none",
+        rope_scale=1.0,
+        spatial_shape=(0, 0),
         bias=False,
         softmax_scale=0.0,
         *,
@@ -224,6 +255,10 @@ class LatentAttention(nn.Module):
         self.v_head_dim = int(v_head_dim) if v_head_dim > 0 else self.qk_nope_head_dim
         self.causal = bool(causal)
         self.rope_theta = float(rope_theta)
+        self.rope_scaling = str(rope_scaling)
+        self.rope_scale = float(rope_scale)
+        sh = spatial_shape if not isinstance(spatial_shape, int) else (spatial_shape, spatial_shape)
+        self.spatial_shape = (int(sh[0]), int(sh[1]))
         self.bias = bool(bias)
         self.softmax_scale = float(softmax_scale)
 
@@ -267,25 +302,23 @@ class LatentAttention(nn.Module):
 
     def _tables(self, positions, dim, device, dtype):
         if torch.compiler.is_compiling():
-            calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
-            exponent = torch.arange(0, dim, 2, device=device, dtype=calc_dtype) / dim
-            inverse_frequency = self.rope_theta ** (-exponent)
-            angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
-            duplicated = torch.cat((angles, angles), dim=-1)
-            cos = duplicated.cos().to(dtype)
-            sin = duplicated.sin().to(dtype)
-            return cos, sin
-        key = (dim, str(device), dtype)
+            cos_4d, sin_4d = compute_rope_tables(
+                positions, dim, device, dtype,
+                theta=self.rope_theta, rope_scaling=self.rope_scaling,
+                rope_scale=self.rope_scale, spatial_shape=self.spatial_shape,
+            )
+            return cos_4d[0, 0], sin_4d[0, 0]
+        key = (dim, str(device), dtype, self.rope_theta, self.rope_scaling, self.rope_scale, self.spatial_shape)
         hit = self._cache.get(key)
         if hit is not None and hit[0].shape[0] >= positions:
             return hit[0][:positions], hit[1][:positions]
-        calc_dtype = torch.float64 if dtype == torch.float64 else torch.float32
-        exponent = torch.arange(0, dim, 2, device=device, dtype=calc_dtype) / dim
-        inverse_frequency = self.rope_theta ** (-exponent)
-        angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * inverse_frequency[None, :]
-        duplicated = torch.cat((angles, angles), dim=-1)
-        cos = duplicated.cos().to(dtype)
-        sin = duplicated.sin().to(dtype)
+        cos_4d, sin_4d = compute_rope_tables(
+            positions, dim, device, dtype,
+            theta=self.rope_theta, rope_scaling=self.rope_scaling,
+            rope_scale=self.rope_scale, spatial_shape=self.spatial_shape,
+        )
+        cos = cos_4d[0, 0]
+        sin = sin_4d[0, 0]
         self._cache[key] = (cos, sin)
         return cos, sin
 
@@ -391,6 +424,18 @@ class LatentAttention(nn.Module):
         return out
 
     def extra_repr(self):
-        return (f"heads={self.heads}, kv_lora_rank={self.kv_lora_rank}, "
-                f"qk_nope_head_dim={self.qk_nope_head_dim}, qk_rope_head_dim={self.qk_rope_head_dim}, "
-                f"v_head_dim={self.v_head_dim}, causal={self.causal}")
+        extras = [
+            f"heads={self.heads}",
+            f"kv_lora_rank={self.kv_lora_rank}",
+            f"qk_nope_head_dim={self.qk_nope_head_dim}",
+            f"qk_rope_head_dim={self.qk_rope_head_dim}",
+            f"v_head_dim={self.v_head_dim}",
+            f"causal={self.causal}",
+        ]
+        if self.rope_scaling != "none":
+            extras.append(f"rope_scaling='{self.rope_scaling}'")
+        if self.rope_scale != 1.0:
+            extras.append(f"rope_scale={self.rope_scale}")
+        if self.spatial_shape != (0, 0):
+            extras.append(f"spatial_shape={self.spatial_shape}")
+        return ", ".join(extras)

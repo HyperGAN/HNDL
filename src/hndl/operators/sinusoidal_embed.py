@@ -12,6 +12,10 @@ def _relation(s):
     s.rank("x", 2)
     s.rank("out", 2)
     features = s.args.get("features")
+    dim = s.args.get("dim", 0)
+    if features is None and dim > 0:
+        features = dim
+        s.arg("features", features)
     x_shape = s.shape("x")
     out_shape = s.shape("out")
     if features is not None:
@@ -59,6 +63,7 @@ def _reference(module):
     shape_text="D_out = features (must be even and a multiple of 2 * D_in)",
     args={
         "features": Arg(int, inferable=True, min=1, dim="D_out", help="Output embedding dimension."),
+        "dim": Arg(int, 0, min=0, positional=False, since="0.10.0", help="Alias for features."),
         "max_period": Arg(
             float,
             10000.0,
@@ -88,9 +93,10 @@ class SinusoidalEmbed(nn.Module):
     ``out = [sin(angles), cos(angles)]``.
     """
 
-    def __init__(self, features, max_period=10000.0, *, D_in):
+    def __init__(self, features=None, max_period=10000.0, dim=0, *, D_in=1, D_out=None):
         super().__init__()
-        self.features = int(features)
+        f = features if features is not None else (dim if dim > 0 else D_out)
+        self.features = int(f)
         self.max_period = float(max_period)
         self.D_in = int(D_in)
         d_per = self.features // (2 * self.D_in)
