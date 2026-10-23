@@ -12,17 +12,15 @@ Empirical verification suite by challenger_v10_m3_1 targeting:
 import math
 import pytest
 import torch
-from torch.nn import functional as F
 
-from hndl import HNDLError, Registry, resolve
-from hndl.operators.drop_path import DropPath, _reference as drop_path_ref
+from hndl import HNDLError, resolve
+from hndl.operators.drop_path import DropPath
 from hndl.operators.dy_tanh import DyTanh, _reference as dy_tanh_ref
 from hndl.operators.joint_attention import JointAttention, _reference as joint_attn_ref
 from hndl.operators.mamba2 import Mamba2, _reference as mamba2_ref
 from hndl.operators.snake import Snake, _reference as snake_ref
-from hndl.operators.where import Where, _reference as where_ref
 from hndl.testing import available_devices
-from hndl.torch import DTYPES, build
+from hndl.torch import build
 
 DEVICES = available_devices()
 
