@@ -7,15 +7,15 @@ Standalone rotary position embedding over a [B, T, D] or [B, H, T, D_h] sequence
 ## Shape
 
 ```text
-x[B, T, D] -> out[B, T, D]
+x[B, ...] -> out[B, ...]
 ```
 
 Relation: `D % heads == 0 and (D // heads) % 2 == 0; out matches x`
 
 | Port | Direction | Pattern | dtype |
 | --- | --- | --- | --- |
-| `x` | input | `x[B, T, D]` | compute |
-| `out` | output | `out[B, T, D]` | compute |
+| `x` | input | `x[B, ...]` | compute |
+| `out` | output | `out[B, ...]` | compute |
 
 ## Arguments
 

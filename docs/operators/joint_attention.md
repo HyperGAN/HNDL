@@ -2,7 +2,7 @@
 
 Dual-stream MMDiT joint self-attention across image and context streams.
 
-**Category:** sequence · **Identity:** `joint_attention@1`
+**Category:** sequence · **Identity:** `mmdit_attention@1`
 
 ## Shape
 
@@ -23,7 +23,7 @@ x[B, T_x, D_x], context[B, T_c, D_c] -> out[B, T_x, D_x], ctx_out[B, T_c, D_c]
 | --- | --- | --- | --- | --- |
 | `heads` (positional) | int | required | >= 1 | Number of joint attention heads. |
 | `head_dim` | int | `0` | >= 0 | Per-head dimension; 0 defaults to D // heads. |
-| `qk_norm` | str | `"none"` | one of `none`, `rms_norm` | QK normalization. |
+| `qk_norm` | str | `"none"` | one of `none`, `rms_norm`, `l2_norm` | QK normalization. |
 | `bias` | bool | `True` | — | Whether linear projections have bias. |
 | `dropout` | float | `0.0` | >= 0.0; < 1.0 | Dropout probability. |
 | `eps` | float | `1e-06` | > 0.0 | Epsilon for RMSNorm. |

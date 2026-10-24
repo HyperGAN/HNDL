@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from hndl import Registry, resolve
+from hndl import HNDLError, Registry, resolve
 from hndl.testing import check_operator
 from hndl.torch import DTYPES, build
 
@@ -111,3 +111,12 @@ def test_reduced_precision_on_cuda(dtype):
     out = model(x=x)["output"]
     assert out.dtype == torch_dtype
     assert out.isfinite().all()
+
+
+def test_snake_mismatched_channels_raises_e_constraint():
+    with pytest.raises(HNDLError, match="E_CONSTRAINT"):
+        resolve(
+            "snake(channels=16)",
+            input_shape=("B", 32, 64),
+            output_shape=("B", 32, 64),
+        )

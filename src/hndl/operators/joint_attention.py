@@ -77,6 +77,11 @@ def _reference(module):
             kx = module.x_k_norm(kx)
             qc = module.c_q_norm(qc)
             kc = module.c_k_norm(kc)
+        elif qk_norm == "l2_norm":
+            qx = F.normalize(qx, p=2.0, dim=-1, eps=module.eps)
+            kx = F.normalize(kx, p=2.0, dim=-1, eps=module.eps)
+            qc = F.normalize(qc, p=2.0, dim=-1, eps=module.eps)
+            kc = F.normalize(kc, p=2.0, dim=-1, eps=module.eps)
 
         q = torch.cat([qx, qc], dim=2)
         k = torch.cat([kx, kc], dim=2)
@@ -100,13 +105,14 @@ def _reference(module):
 
 @operator(
     "joint_attention",
+    identity="mmdit_attention",
     summary="Dual-stream MMDiT joint self-attention across image and context streams.",
     shape="x[B, T_x, D_x], context[B, T_c, D_c] -> out[B, T_x, D_x], ctx_out[B, T_c, D_c]",
     relation=_relation,
     args={
         "heads": Arg(int, min=1, help="Number of joint attention heads."),
         "head_dim": Arg(int, 0, min=0, positional=False, help="Per-head dimension; 0 defaults to D // heads."),
-        "qk_norm": Arg(str, "none", choices=("none", "rms_norm"), positional=False, help="QK normalization."),
+        "qk_norm": Arg(str, "none", choices=("none", "rms_norm", "l2_norm"), positional=False, help="QK normalization."),
         "bias": Arg(bool, True, positional=False, help="Whether linear projections have bias."),
         "dropout": Arg(float, 0.0, min=0.0, max=1.0, exclusive_max=True, positional=False, help="Dropout probability."),
         "eps": Arg(float, 1e-6, min=0.0, exclusive_min=True, positional=False, help="Epsilon for RMSNorm."),
@@ -185,6 +191,11 @@ class JointAttention(nn.Module):
             kx = self.x_k_norm(kx)
             qc = self.c_q_norm(qc)
             kc = self.c_k_norm(kc)
+        elif self.qk_norm == "l2_norm":
+            qx = F.normalize(qx, p=2.0, dim=-1, eps=self.eps)
+            kx = F.normalize(kx, p=2.0, dim=-1, eps=self.eps)
+            qc = F.normalize(qc, p=2.0, dim=-1, eps=self.eps)
+            kc = F.normalize(kc, p=2.0, dim=-1, eps=self.eps)
 
         q = torch.cat([qx, qc], dim=2)
         k = torch.cat([kx, kc], dim=2)

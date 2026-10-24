@@ -41,6 +41,7 @@ def _reference(module):
 
 @operator(
     "drop_path",
+    identity="stochastic_depth",
     summary="Stochastic depth (DropPath) residual regularization.",
     shape="x[B, ...] -> out[B, ...]",
     relation=_relation,

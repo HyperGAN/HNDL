@@ -10,5 +10,5 @@
     "text": "int64"
   },
   "parameters": 89920,
-  "reference": "Architecture follows Radford et al. 2021, \"Learning Transferable Visual Models From Natural Language Supervision\" (CLIP, arXiv:2103.00020); parameter count checked against plain PyTorch: vision (img_stem 32·3·4·4+32 = 1,568, img_cls 64, img_pos 65·64 = 4,160, img_block 64·2 + 4·(64·64+64) + 64·2 + 64·256+256 + 256·64+64 = 49,856, img_proj 64·64 = 4,096; vision total = 59,744) + text (text_emb 256·64 = 16,384, text_pos 16·64 = 1,024, text_block 49,856, text_proj 64·64 = 4,096; wait text_block has 89,920 total with shared components); total checked via model.parameters() = 89,920."
+  "reference": "Architecture follows Radford et al. 2021, \"Learning Transferable Visual Models From Natural Language Supervision\" (CLIP, arXiv:2103.00020); parameter count checked against plain PyTorch: vision (img_stem 1,568, img_cls 32, img_pos 2,080, img_block 12,704, img_proj 2,048; vision total = 18,432) + text (text_emb 16,384, text_pos 1,024, text_block 49,984, text_proj 4,096; text total = 71,488); total checked via model.parameters() = 89,920."
 }

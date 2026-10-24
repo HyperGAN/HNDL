@@ -2,7 +2,7 @@
 
 Stochastic depth (DropPath) residual regularization.
 
-**Category:** regularization · **Identity:** `drop_path@1`
+**Category:** regularization · **Identity:** `stochastic_depth@1`
 
 ## Shape
 

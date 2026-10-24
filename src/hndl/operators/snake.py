@@ -21,6 +21,34 @@ def _relation(s):
     c = channels if channels > 0 else dim
     if c > 0:
         s.args["channels"] = c
+        if shape is not None:
+            if rank == 2:
+                s.axis("x", 1, c)
+                s.axis("out", 1, c)
+            else:
+                dim1 = shape[1]
+                dim_last = shape[-1]
+                if dim1 == c:
+                    s.axis("x", 1, c)
+                    s.axis("out", 1, c)
+                elif dim_last == c:
+                    s.axis("x", -1, c)
+                    s.axis("out", -1, c)
+                elif dim1 is not None and dim_last is not None:
+                    s.error(
+                        "E_CONSTRAINT",
+                        f"snake channels={c} does not match input channel dimension "
+                        f"(dim 1 is {dim1}, dim -1 is {dim_last})",
+                    )
+                elif dim1 is not None:
+                    s.axis("x", -1, c)
+                    s.axis("out", -1, c)
+                elif dim_last is not None:
+                    s.axis("x", 1, c)
+                    s.axis("out", 1, c)
+                else:
+                    s.axis("x", 1, c)
+                    s.axis("out", 1, c)
 
 
 def _reference(module):
@@ -50,6 +78,7 @@ def _reference(module):
 
 @operator(
     "snake",
+    identity="snake",
     summary="Periodic activation: x + (1 / (alpha + eps)) * sin^2(alpha * x).",
     shape="x[B, ...] -> out[B, ...]",
     relation=_relation,

@@ -2,7 +2,7 @@
 
 State Space Duality (SSD) block from Mamba-2.
 
-**Category:** sequence · **Identity:** `mamba2@1`
+**Category:** sequence · **Identity:** `ssd@1`
 
 ## Shape
 
@@ -25,9 +25,9 @@ x[B, T, D] -> out[B, T, D]
 | `expand` | int | `2` | >= 1 | Inner dimension expansion factor. |
 | `heads` | int | `8` | >= 1 | Number of heads. |
 | `head_dim` | int | `64` | >= 1 | Head dimension. |
+| `chunk_size` | int | `64` | >= 1 | Chunk size for semi-separable recurrence. |
 | `bias` | bool | `False` | — | Whether linear projections have bias. |
 | `conv_bias` | bool | `True` | — | Whether depthwise conv1d has bias. |
-| `d_has_bias` | bool | `False` | — | Whether skip connection D has bias. |
 
 ## Description
 
@@ -51,4 +51,4 @@ index  name  operation  input shape  output shape
 0      n0    mamba2     [B, 8, 32]   [B, 8, 32]
 ```
 
-Parameters: 10,764
+Parameters: 11,404

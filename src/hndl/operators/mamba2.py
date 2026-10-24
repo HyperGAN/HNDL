@@ -50,49 +50,64 @@ def _reference(module):
     def run(x):
         b, t, d = x.shape
         inner_dim = module.heads * module.head_dim
+        bc_dim = module.heads * module.d_state
+
+        if t == 0 or b == 0:
+            return torch.empty(b, t, module.d_model, device=x.device, dtype=x.dtype)
 
         # Input projection
         zxbcdt = module.in_proj(x)
         z = zxbcdt[..., :inner_dim]
-        x_conv = zxbcdt[..., inner_dim : 2 * inner_dim]
-        b_proj = zxbcdt[..., 2 * inner_dim : 2 * inner_dim + module.heads * module.d_state]
+        x_ssm = zxbcdt[..., inner_dim : 2 * inner_dim]
+        b_proj = zxbcdt[..., 2 * inner_dim : 2 * inner_dim + bc_dim]
         c_proj = zxbcdt[
             ...,
-            2 * inner_dim + module.heads * module.d_state : 2 * inner_dim + 2 * module.heads * module.d_state,
+            2 * inner_dim + bc_dim : 2 * inner_dim + 2 * bc_dim,
         ]
         dt_raw = zxbcdt[..., -module.heads :]
 
-        # 1D causal depthwise conv on x_conv
-        x_conv_t = x_conv.transpose(1, 2)
-        conv_out = module.conv1d(x_conv_t)[..., :t]
-        x_conv = F.silu(conv_out).transpose(1, 2)
+        # 1D causal depthwise conv jointly on [x_ssm, B, C]
+        if module.d_conv > 0 and module.conv1d is not None:
+            conv_in = torch.cat([x_ssm, b_proj, c_proj], dim=-1).transpose(1, 2)
+            conv_out = F.silu(module.conv1d(conv_in)[..., :t]).transpose(1, 2)
+            x_conv = conv_out[..., :inner_dim]
+            b_conv = conv_out[..., inner_dim : inner_dim + bc_dim]
+            c_conv = conv_out[..., inner_dim + bc_dim : inner_dim + 2 * bc_dim]
+        else:
+            x_conv, b_conv, c_conv = x_ssm, b_proj, c_proj
 
         # Reshape to heads
         x_h = x_conv.view(b, t, module.heads, module.head_dim)
-        b_h = b_proj.view(b, t, module.heads, module.d_state)
-        c_h = c_proj.view(b, t, module.heads, module.d_state)
+        b_h = b_conv.view(b, t, module.heads, module.d_state)
+        c_h = c_conv.view(b, t, module.heads, module.d_state)
         dt = F.softplus(dt_raw + module.dt_bias)
 
         # Discretize A
         a_scaled = -torch.exp(module.A_log)
         a_bar = torch.exp(dt * a_scaled)  # [B, T, H]
 
-        # SSD Recurrence
-        # state: [B, H, P, N]
+        # SSD Recurrence Oracle (Independent step-by-step sequential reference)
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        x_h_calc = x_h.to(calc_dtype)
+        b_h_calc = b_h.to(calc_dtype)
+        c_h_calc = c_h.to(calc_dtype)
+        a_bar_calc = a_bar.to(calc_dtype)
+        D_calc = module.D.to(calc_dtype) if module.D is not None else None
+
         state = torch.zeros(
-            b, module.heads, module.head_dim, module.d_state, device=x.device, dtype=x.dtype
+            b, module.heads, module.head_dim, module.d_state, device=x.device, dtype=calc_dtype
         )
         y_list = []
         for i in range(t):
-            xt = x_h[:, i]  # [B, H, P]
-            bt = b_h[:, i]  # [B, H, N]
-            ct = c_h[:, i]  # [B, H, N]
-            decay = a_bar[:, i, :, None, None]  # [B, H, 1, 1]
+            xt = x_h_calc[:, i]  # [B, H, P]
+            bt = b_h_calc[:, i]  # [B, H, N]
+            ct = c_h_calc[:, i]  # [B, H, N]
+            decay = a_bar_calc[:, i, :, None, None]  # [B, H, 1, 1]
             state = state * decay + xt[..., :, None] * bt[..., None, :]
             yt = (state * ct[..., None, :]).sum(dim=-1)  # [B, H, P]
-            if module.D is not None:
-                yt = yt + xt * module.D[None, :, None]
-            y_list.append(yt)
+            if D_calc is not None:
+                yt = yt + xt * D_calc[None, :, None]
+            y_list.append(yt.to(x.dtype))
 
         y = torch.stack(y_list, dim=1).view(b, t, inner_dim)
         y = module.norm(y) * F.silu(z)
@@ -104,6 +119,7 @@ def _reference(module):
 
 @operator(
     "mamba2",
+    identity="ssd",
     summary="State Space Duality (SSD) block from Mamba-2.",
     shape="x[B, T, D] -> out[B, T, D]",
     relation=_relation,
@@ -114,9 +130,9 @@ def _reference(module):
         "expand": Arg(int, 2, min=1, positional=False, help="Inner dimension expansion factor."),
         "heads": Arg(int, 8, min=1, positional=False, help="Number of heads."),
         "head_dim": Arg(int, 64, min=1, positional=False, help="Head dimension."),
+        "chunk_size": Arg(int, 64, min=1, positional=False, help="Chunk size for semi-separable recurrence."),
         "bias": Arg(bool, False, positional=False, help="Whether linear projections have bias."),
         "conv_bias": Arg(bool, True, positional=False, help="Whether depthwise conv1d has bias."),
-        "d_has_bias": Arg(bool, False, positional=False, help="Whether skip connection D has bias."),
     },
     examples=[
         Example(
@@ -140,9 +156,9 @@ class Mamba2(nn.Module):
         expand=2,
         heads=8,
         head_dim=64,
+        chunk_size=64,
         bias=False,
         conv_bias=True,
-        d_has_bias=False,
         *,
         D=0,
     ):
@@ -154,19 +170,26 @@ class Mamba2(nn.Module):
         self.expand = int(expand)
         self.heads = int(heads)
         self.head_dim = int(head_dim)
+        self.chunk_size = int(chunk_size)
         self.inner_dim = self.heads * self.head_dim
         self.bias = bool(bias)
 
-        in_proj_dim = 2 * self.inner_dim + 2 * self.heads * self.d_state + self.heads
+        bc_dim = self.heads * self.d_state
+        in_proj_dim = 2 * self.inner_dim + 2 * bc_dim + self.heads
         self.in_proj = nn.Linear(self.d_model, in_proj_dim, bias=self.bias)
-        self.conv1d = nn.Conv1d(
-            self.inner_dim,
-            self.inner_dim,
-            kernel_size=self.d_conv,
-            groups=self.inner_dim,
-            padding=self.d_conv - 1,
-            bias=bool(conv_bias),
-        )
+
+        conv_dim = self.inner_dim + 2 * bc_dim
+        if self.d_conv > 0:
+            self.conv1d = nn.Conv1d(
+                conv_dim,
+                conv_dim,
+                kernel_size=self.d_conv,
+                groups=conv_dim,
+                padding=self.d_conv - 1,
+                bias=bool(conv_bias),
+            )
+        else:
+            self.conv1d = None
 
         self.A_log = nn.Parameter(torch.empty(self.heads))
         nn.init.uniform_(self.A_log, 0.0, 3.0)
@@ -180,49 +203,87 @@ class Mamba2(nn.Module):
 
     def forward(self, x):
         b, t, d = x.shape
+        inner_dim = self.inner_dim
+        bc_dim = self.heads * self.d_state
+
+        if t == 0 or b == 0:
+            return torch.empty(b, t, self.d_model, device=x.device, dtype=x.dtype)
+
         zxbcdt = self.in_proj(x)
-        z = zxbcdt[..., : self.inner_dim]
-        x_conv = zxbcdt[..., self.inner_dim : 2 * self.inner_dim]
+        z = zxbcdt[..., : inner_dim]
+        x_ssm = zxbcdt[..., inner_dim : 2 * inner_dim]
         b_proj = zxbcdt[
             ...,
-            2 * self.inner_dim : 2 * self.inner_dim + self.heads * self.d_state,
+            2 * inner_dim : 2 * inner_dim + bc_dim,
         ]
         c_proj = zxbcdt[
             ...,
-            2 * self.inner_dim
-            + self.heads * self.d_state : 2 * self.inner_dim
-            + 2 * self.heads * self.d_state,
+            2 * inner_dim + bc_dim : 2 * inner_dim + 2 * bc_dim,
         ]
         dt_raw = zxbcdt[..., -self.heads :]
 
-        x_conv_t = x_conv.transpose(1, 2)
-        conv_out = self.conv1d(x_conv_t)[..., :t]
-        x_conv = F.silu(conv_out).transpose(1, 2)
+        if self.d_conv > 0 and self.conv1d is not None:
+            conv_in = torch.cat([x_ssm, b_proj, c_proj], dim=-1).transpose(1, 2)
+            conv_out = F.silu(self.conv1d(conv_in)[..., :t]).transpose(1, 2)
+            x_conv = conv_out[..., : inner_dim]
+            b_conv = conv_out[..., inner_dim : inner_dim + bc_dim]
+            c_conv = conv_out[..., inner_dim + bc_dim : inner_dim + 2 * bc_dim]
+        else:
+            x_conv, b_conv, c_conv = x_ssm, b_proj, c_proj
 
         x_h = x_conv.view(b, t, self.heads, self.head_dim)
-        b_h = b_proj.view(b, t, self.heads, self.d_state)
-        c_h = c_proj.view(b, t, self.heads, self.d_state)
+        b_h = b_conv.view(b, t, self.heads, self.d_state)
+        c_h = c_conv.view(b, t, self.heads, self.d_state)
         dt = F.softplus(dt_raw + self.dt_bias)
 
         a_scaled = -torch.exp(self.A_log)
-        a_bar = torch.exp(dt * a_scaled)
+        log_a = dt * a_scaled
 
-        state = torch.zeros(
-            b, self.heads, self.head_dim, self.d_state, device=x.device, dtype=x.dtype
+        # Semi-separable chunked recurrence
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        chunk_size = self.chunk_size
+        H_prev = torch.zeros(
+            b, self.heads, self.head_dim, self.d_state, device=x.device, dtype=calc_dtype
         )
-        y_list = []
-        for i in range(t):
-            xt = x_h[:, i]
-            bt = b_h[:, i]
-            ct = c_h[:, i]
-            decay = a_bar[:, i, :, None, None]
-            state = state * decay + xt[..., :, None] * bt[..., None, :]
-            yt = (state * ct[..., None, :]).sum(dim=-1)
-            if self.D is not None:
-                yt = yt + xt * self.D[None, :, None]
-            y_list.append(yt)
+        D_calc = self.D.to(calc_dtype) if self.D is not None else None
+        y_chunks = []
+        for start in range(0, t, chunk_size):
+            end = min(start + chunk_size, t)
+            L = end - start
 
-        y = torch.stack(y_list, dim=1).view(b, t, self.inner_dim)
+            X = x_h[:, start:end].permute(0, 2, 1, 3).to(calc_dtype)
+            B_mat = b_h[:, start:end].permute(0, 2, 1, 3).to(calc_dtype)
+            C_mat = c_h[:, start:end].permute(0, 2, 1, 3).to(calc_dtype)
+            log_a_chunk = log_a[:, start:end].permute(0, 2, 1).to(calc_dtype)
+
+            cumsum_log_a = torch.cumsum(log_a_chunk, dim=-1)
+            decay = torch.exp(cumsum_log_a)
+
+            log_decay_diff = cumsum_log_a[:, :, :, None] - cumsum_log_a[:, :, None, :]
+            mask = torch.tril(torch.ones(L, L, device=x.device, dtype=torch.bool))
+            log_decay_diff = torch.where(mask[None, None, :, :], log_decay_diff, torch.full_like(log_decay_diff, -1e4))
+            decay_matrix = torch.where(mask[None, None, :, :], torch.exp(log_decay_diff), torch.zeros_like(log_decay_diff))
+
+            S = torch.matmul(C_mat, B_mat.transpose(-1, -2))
+            M = S * decay_matrix
+            y_intra = torch.matmul(M, X)
+
+            C_tilde = C_mat * decay[:, :, :, None]
+            y_inter = torch.matmul(C_tilde, H_prev.transpose(-1, -2))
+
+            y_chunk = y_intra + y_inter
+            if D_calc is not None:
+                y_chunk = y_chunk + X * D_calc[None, :, None, None]
+            y_chunks.append(y_chunk.permute(0, 2, 1, 3).to(x.dtype))
+
+            last_log_a = cumsum_log_a[:, :, -1, None]
+            lambda_j = torch.exp(last_log_a - cumsum_log_a)
+            B_tilde = B_mat * lambda_j[:, :, :, None]
+
+            S_chunk = torch.matmul(X.transpose(-1, -2), B_tilde)
+            H_prev = H_prev * torch.exp(last_log_a[:, :, :, None]) + S_chunk
+
+        y = torch.cat(y_chunks, dim=1).view(b, t, inner_dim)
         y = self.norm(y) * F.silu(z)
         out = self.out_proj(y)
         return out
@@ -230,5 +291,5 @@ class Mamba2(nn.Module):
     def extra_repr(self):
         return (
             f"d_model={self.d_model}, d_state={self.d_state}, heads={self.heads}, "
-            f"head_dim={self.head_dim}, expand={self.expand}"
+            f"head_dim={self.head_dim}, chunk_size={self.chunk_size}, expand={self.expand}"
         )

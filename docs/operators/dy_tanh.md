@@ -2,7 +2,7 @@
 
 Dynamic Tanh activation with learned scalar alpha and affine scaling.
 
-**Category:** activation · **Identity:** `dy_tanh@1`
+**Category:** activation · **Identity:** `dynamic_tanh@1`
 
 ## Shape
 

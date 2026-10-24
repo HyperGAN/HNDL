@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from hndl import HNDLError, Registry, resolve
+from hndl.operators.rope import _reference as rope_ref
 from hndl.testing import check_operator
 from hndl.torch import DTYPES, build
 
@@ -67,11 +68,29 @@ def test_heads_not_dividing_d_reports_e_constraint():
         resolve("rope(heads=5)", input_shape=("B", 8, 16), output_shape=("B", 8, 16))
 
 
-def test_rejects_rank_2_and_rank_4():
+def test_rejects_invalid_ranks():
     with pytest.raises(HNDLError, match="E_CONSTRAINT"):
         resolve("rope()", input_shape=("B", 16), output_shape=("B", 16))
     with pytest.raises(HNDLError, match="E_CONSTRAINT"):
-        resolve("rope()", input_shape=("B", 4, 8, 8), output_shape=("B", 4, 8, 8))
+        resolve("rope()", input_shape=("B", 2, 4, 8, 8), output_shape=("B", 2, 4, 8, 8))
+
+
+def test_rank_4_tensor_support(device):
+    plan = resolve("rope(heads=4)", input_shape=("B", 4, 8, 8), output_shape=("B", 4, 8, 8))
+    model = build(plan, device=device)
+    module = model[plan.nodes[0].id]
+    x = torch.randn(2, 4, 8, 8, device=device, requires_grad=True)
+    res = model(x=x)
+    out = res["output"]
+    assert out.shape == (2, 4, 8, 8)
+    assert out.isfinite().all()
+
+    ref = rope_ref(module)
+    out_ref = ref(x)
+    torch.testing.assert_close(out, out_ref)
+
+    out.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
 
 
 def test_gradcheck_double(device):

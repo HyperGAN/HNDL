@@ -90,33 +90,25 @@ def test_mamba2_empty_batch_b0(device):
     assert out.numel() == 0
 
 
-def test_mamba2_chunk_size_omission_finding():
-    """Defect probe: verify whether mamba2 supports chunk_size argument as requested.
+def test_mamba2_chunk_size_support():
+    """Verify that mamba2 supports chunk_size argument and semi-separable recurrence."""
+    plan = resolve(
+        "mamba2(d_model=32, heads=4, head_dim=16, chunk_size=32)",
+        input_shape=("B", 64, 32),
+        output_shape=("B", 64, 32),
+    )
+    assert plan is not None
+    assert plan.nodes[0].args["chunk_size"] == 32
 
-    PROJECT.md Feature 17 and Survey §1.1 specified chunk_size for semi-separable
-    chunked matrix multiplication. The worker implementation omitted chunk_size
-    and chunked recurrence, instead relying on an unchunked sequential Python for-loop.
-    """
+
+def test_mamba2_d_has_bias_cleaned_up():
+    """Verify dead d_has_bias argument is cleanly removed from mamba2 schema."""
     with pytest.raises(HNDLError, match="E_ARGUMENT"):
         resolve(
-            "mamba2(d_model=32, heads=4, head_dim=16, chunk_size=32)",
+            "mamba2(d_model=32, heads=4, head_dim=16, d_has_bias=True)",
             input_shape=("B", 64, 32),
             output_shape=("B", 64, 32),
         )
-
-
-def test_mamba2_d_has_bias_unused_argument():
-    """Defect probe: verify d_has_bias parameter in Mamba2.
-
-    Arg d_has_bias is exposed in args schema, but Mamba2.__init__ always registers
-    self.D = nn.Parameter(torch.ones(self.heads)) regardless of d_has_bias value.
-    """
-    m_false = Mamba2(d_model=32, heads=4, head_dim=16, d_has_bias=False)
-    m_true = Mamba2(d_model=32, heads=4, head_dim=16, d_has_bias=True)
-    assert hasattr(m_false, "D") and m_false.D is not None
-    assert hasattr(m_true, "D") and m_true.D is not None
-    assert isinstance(m_false.D, torch.nn.Parameter)
-    assert isinstance(m_true.D, torch.nn.Parameter)
 
 
 # ==============================================================================
@@ -159,23 +151,17 @@ def test_joint_attention_asymmetric_sequence_lengths(device, T_x, S_ctx):
         assert p.grad is not None and torch.isfinite(p.grad).all(), f"Gradient non-finite in {name} on {device}"
 
 
-def test_joint_attention_qk_norm_l2_norm_missing_defect():
-    """Defect probe: verify whether qk_norm='l2_norm' is supported.
+def test_joint_attention_qk_norm_l2_norm_remediation():
+    """Verify that qk_norm='l2_norm' is supported and applies L2 normalization."""
+    # 1. Verification that DSL resolves l2_norm successfully
+    plan = resolve(
+        'out, ctx_out = joint_attention(x, context, heads=4, head_dim=16, qk_norm="l2_norm")',
+        input_shape={"x": ("B", 8, 32), "context": ("B", 16, 32)},
+        output_shape={"out": ("B", 8, 32), "ctx_out": ("B", 16, 32)},
+    )
+    assert plan is not None
 
-    Worker handoff §1 claim: 'and qk_norm ("none", "rms_norm", "l2_norm")'.
-    Survey §1.2 blueprint: 'Arg(str, "none", choices=("none", "rms_norm", "l2_norm"))'.
-    Actual implementation: choices restricted to ('none', 'rms_norm'); 'l2_norm' rejected.
-    Furthermore, JointAttention.forward does not implement l2_norm even if instantiated directly.
-    """
-    # 1. Verification that DSL rejects l2_norm with E_ARGUMENT
-    with pytest.raises(HNDLError, match="E_ARGUMENT"):
-        resolve(
-            'out, ctx_out = joint_attention(x, context, heads=4, head_dim=16, qk_norm="l2_norm")',
-            input_shape={"x": ("B", 8, 32), "context": ("B", 16, 32)},
-            output_shape={"out": ("B", 8, 32), "ctx_out": ("B", 16, 32)},
-        )
-
-    # 2. Verification that JointAttention module does not normalize when qk_norm='l2_norm'
+    # 2. Verification that JointAttention module normalizes when qk_norm='l2_norm'
     mod_none = JointAttention(heads=4, head_dim=16, D_x=32, D_c=32, qk_norm="none")
     mod_l2 = JointAttention(heads=4, head_dim=16, D_x=32, D_c=32, qk_norm="l2_norm")
     mod_l2.load_state_dict(mod_none.state_dict())
@@ -185,9 +171,13 @@ def test_joint_attention_qk_norm_l2_norm_missing_defect():
     out_none, _ = mod_none(x, ctx)
     out_l2, _ = mod_l2(x, ctx)
 
-    # If l2_norm were implemented, out_l2 would differ from out_none.
-    # Instead, it is identical because qk_norm == "l2_norm" is a silent no-op.
-    assert torch.equal(out_none, out_l2), "qk_norm='l2_norm' silently fell through to no normalization"
+    # When l2_norm is implemented, out_l2 differs from unnormalized out_none
+    assert not torch.equal(out_none, out_l2), "qk_norm='l2_norm' should differ from unnormalized output"
+
+    # Parity vs reference
+    ref_l2 = joint_attn_ref(mod_l2)
+    out_ref, _ = ref_l2(x, ctx)
+    torch.testing.assert_close(out_l2, out_ref)
 
 
 # ==============================================================================

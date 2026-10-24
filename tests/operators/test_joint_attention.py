@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from hndl import HNDLError, Registry, resolve
+from hndl.operators.joint_attention import _reference as joint_attn_ref
 from hndl.testing import check_operator
 from hndl.torch import DTYPES, build
 
@@ -68,3 +69,29 @@ def test_reduced_precision_on_cuda(dtype):
     res = model(x=x, context=ctx)
     assert res["out"].dtype == torch_dtype
     assert res["ctx_out"].dtype == torch_dtype
+
+
+def test_joint_attention_qk_norm_l2_norm(device):
+    plan = resolve(
+        "out, ctx_out = joint_attention(x, context, heads=4, head_dim=16, qk_norm='l2_norm')",
+        input_shape={"x": ("B", 8, 32), "context": ("B", 16, 32)},
+        output_shape={"out": ("B", 8, 32), "ctx_out": ("B", 16, 32)},
+    )
+    model = build(plan, device=device)
+    module = model[plan.nodes[0].id]
+    x = torch.randn(2, 8, 32, device=device, requires_grad=True)
+    ctx = torch.randn(2, 16, 32, device=device, requires_grad=True)
+    res = model(x=x, context=ctx)
+    out, ctx_out = res["out"], res["ctx_out"]
+    assert out.shape == (2, 8, 32)
+    assert ctx_out.shape == (2, 16, 32)
+    assert out.isfinite().all() and ctx_out.isfinite().all()
+
+    ref = joint_attn_ref(module)
+    out_ref, ctx_ref = ref(x, ctx)
+    torch.testing.assert_close(out, out_ref)
+    torch.testing.assert_close(ctx_out, ctx_ref)
+
+    (out.sum() + ctx_out.sum()).backward()
+    assert x.grad is not None and ctx.grad is not None
+    assert x.grad.isfinite().all() and ctx.grad.isfinite().all()

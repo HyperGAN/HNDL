@@ -26,6 +26,7 @@ def _reference(module):
 
 @operator(
     "where",
+    identity="where",
     summary="Ternary conditional selection: out = where(cond, a, b).",
     shape="cond[B, ...]:bool, a[B, ...], b[B, ...] -> out[B, ...]",
     relation=_relation,

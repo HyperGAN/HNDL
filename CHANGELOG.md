@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Milestone 3 Gate Iteration 1 Remediation**:
+  - `joint_attention`: Added `qk_norm="l2_norm"` per-head L2 normalization in both module forward execution and independent reference oracle.
+  - `mamba2`: Added `chunk_size` argument, implemented semi-separable chunked recurrence in `forward()` with safe intra-chunk masked decay and inter-chunk state propagation, added joint depthwise convolution over $[x_{ssm}, B, C]$, cleaned up dead `d_has_bias` argument, and retained independent sequential recurrence in `_reference(module)` ($< 1\times 10^{-4}$ numerical parity).
+  - Operator Identities: Registered canonical identities (`ssd@1`, `mmdit_attention@1`, `dynamic_tanh@1`, `stochastic_depth@1`, `where@1`, `snake@1`) across all new v0.10 built-in operators.
+  - `snake`: Added shape constraint validation in `_relation` ensuring mismatched channel dimensions raise `E_CONSTRAINT` during graph resolution.
+  - `rope`: Updated shape contract to `x[B, ...] -> out[B, ...]` supporting rank-4 `[B, H, T, D_h]` tensor resolution and execution with autograd gradients and reference parity.
+  - Recipes & Docs: Cleaned up drafting notes in `clip_dual_encoder_tiny.json` and synchronized operator documentation.
+
 - **6 New Built-In Operators (expanding catalog from 78 to 84)**:
   - `mamba2` (`ssd@1`, `sequence` category): State Space Duality block featuring causal 1D convolution, semi-separable chunked recurrence, gated RMSNorm, discretized continuous-time state-space parameterization, full autograd gradient propagation, and PyTorch reference oracle.
   - `joint_attention` (`mmdit_attention@1`, `sequence` category): Dual-stream multimodal attention with modality-specific QKV projections, joint SDPA over concatenated sequence contexts, token unpooling/split, and per-modality output projections supporting RMSNorm and L2 QK-normalization.

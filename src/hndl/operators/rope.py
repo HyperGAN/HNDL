@@ -95,6 +95,11 @@ def _relation(s):
     if isinstance(sp, int):
         sp = (sp, sp)
     sh, sw = sp
+    if shape is not None and len(shape) not in (3, 4):
+        s.error(
+            "E_CONSTRAINT",
+            f"rope requires rank-3 [B, T, D] or rank-4 [B, H, T, D_h] tensor, got rank {len(shape)}",
+        )
 
     if shape is not None and len(shape) == 4:
         s.rank("x", 4)
@@ -191,7 +196,7 @@ def _reference(module):
 @operator(
     "rope",
     summary="Standalone rotary position embedding over a [B, T, D] or [B, H, T, D_h] sequence.",
-    shape="x[B, T, D] -> out[B, T, D]",
+    shape="x[B, ...] -> out[B, ...]",
     relation=_relation,
     shape_text="D % heads == 0 and (D // heads) % 2 == 0; out matches x",
     args={

@@ -42,6 +42,7 @@ def _reference(module):
 
 @operator(
     "dy_tanh",
+    identity="dynamic_tanh",
     summary="Dynamic Tanh activation with learned scalar alpha and affine scaling.",
     shape="x[B, ..., D] -> out[B, ..., D]",
     relation=_relation,
