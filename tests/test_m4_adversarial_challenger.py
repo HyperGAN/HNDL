@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import ast
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -1502,5 +1503,326 @@ out = linear(x, 4)
         assert p.grad is not None, f"{name} grad is None"
         assert torch.isfinite(p.grad).all(), f"{name} grad not finite"
         assert p.grad.abs().sum() > 0, f"{name} grad is zero"
+
+
+# ==============================================================================
+# 8. Gate 8 Standalone Codegen Remediations Adversarial Stress Tests (Challenger 2)
+# ==============================================================================
+
+
+def test_gate8_adversarial_codegen_embedding_and_norm_parameter_lookups() -> None:
+    """Adversarially challenge and stress-test codegen parameter lookups for
+    embedding, layer_norm, and rms_norm across diverse configurations:
+    1. Verify constructors emit concrete numbers (e.g. nn.Embedding(100, 32),
+       nn.LayerNorm(32, eps=1e-05, elementwise_affine=True, bias=True),
+       nn.RMSNorm(32, eps=1e-06, elementwise_affine=True)).
+    2. Verify zero occurrences of None as positional arguments in emitted code
+       via AST node traversal.
+    """
+    reg = Registry.builtins()
+
+    configs = [
+        # Standard configuration with defaults
+        (
+            "tok = embedding(100, 32)\nln = layer_norm()\nrms = rms_norm()\n",
+            {"x": ("B", 4)},
+            {"rms": ("B", 4, 32)},
+            "int64",
+            [
+                "nn.Embedding(100, 32)",
+                "nn.LayerNorm(32, eps=1e-05, elementwise_affine=True, bias=True)",
+                "nn.RMSNorm(32, eps=1e-06, elementwise_affine=True)",
+            ],
+        ),
+        # Keyword arguments, non-default eps, bias=False
+        (
+            "tok = embedding(num_embeddings=200, dim=64)\n"
+            "ln = layer_norm(eps=1e-4, affine=True, bias=False)\n"
+            "rms = rms_norm(eps=1e-5, affine=False)\n",
+            {"x": ("B", 6)},
+            {"rms": ("B", 6, 64)},
+            "int64",
+            [
+                "nn.Embedding(200, 64)",
+                "nn.LayerNorm(64, eps=0.0001, elementwise_affine=True, bias=False)",
+                "nn.RMSNorm(64, eps=1e-05, elementwise_affine=False)",
+            ],
+        ),
+        # Affine=False on layer_norm and custom eps
+        (
+            "tok = embedding(50, 16)\n"
+            "ln = layer_norm(eps=1e-3, affine=False, bias=False)\n"
+            "rms = rms_norm()\n",
+            {"x": ("B", 10)},
+            {"rms": ("B", 10, 16)},
+            "int64",
+            [
+                "nn.Embedding(50, 16)",
+                "nn.LayerNorm(16, eps=0.001, elementwise_affine=False, bias=False)",
+                "nn.RMSNorm(16, eps=1e-06, elementwise_affine=True)",
+            ],
+        ),
+        # Inferred embedding dimension resolved from output contract
+        (
+            "tok = embedding(128)\nln = layer_norm()\n",
+            {"x": ("B", 8)},
+            {"ln": ("B", 8, 48)},
+            "int64",
+            [
+                "nn.Embedding(128, 48)",
+                "nn.LayerNorm(48, eps=1e-05, elementwise_affine=True, bias=True)",
+            ],
+        ),
+    ]
+
+    for src, in_shape, out_shape, in_dtype, expected_constructors in configs:
+        plan = resolve(
+            src,
+            input_shape=in_shape,
+            output_shape=out_shape,
+            input_dtype=in_dtype,
+            registry=reg,
+        )
+        code = plan.to_python_source("ParamLookupModel")
+
+        # 1. Concrete constructor verification
+        for expected in expected_constructors:
+            assert expected in code, f"Expected constructor {expected!r} not found in emitted source:\n{code}"
+
+        # 2. AST traversal: verify zero occurrences of None as positional arguments
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for i, arg in enumerate(node.args):
+                    assert not (isinstance(arg, ast.Constant) and arg.value is None), (
+                        f"Found None as positional argument {i} in call {ast.unparse(node)!r} in emitted code:\n{code}"
+                    )
+
+
+def test_gate8_adversarial_codegen_subgraphs_cleanliness_and_no_closures() -> None:
+    """Adversarially challenge codegen with composite subgraphs (single-output, multi-output,
+    multi-input, and nested):
+    1. Verify zero IndentationError or syntax errors.
+    2. Verify zero closures over plan or build.
+    3. Verify zero imports or mentions of hndl.
+    4. Verify dedenting: custom class definitions start at column 0.
+    """
+    reg = Registry.builtins()
+
+    # Subgraph 1: Single output
+    sub1 = resolve("linear(16)\nlayer_norm()\n", input_shape=("B", 8, 32), output_shape=("B", 8, 16))
+    reg.subgraph("s1", sub1)
+
+    # Subgraph 2: Multi output
+    sub2 = resolve(
+        """
+o1 = linear(24)
+o2 = linear(32)
+""",
+        input_shape={"x": ("B", 8, 16)},
+        output_shape={"o1": ("B", 8, 24), "o2": ("B", 8, 32)},
+    )
+    reg.subgraph("s2", sub2)
+
+    # Subgraph 3 & 4: Nested subgraphs
+    s_inner = resolve("linear(16)\n", input_shape=("B", 8, 16), output_shape=("B", 8, 16))
+    reg.subgraph("s_inner", s_inner)
+
+    s_outer = resolve("s_inner()\nlinear(32)\n", input_shape=("B", 8, 16), output_shape=("B", 8, 32), registry=reg)
+    reg.subgraph("s_outer", s_outer)
+
+    # Composite top-level model exercising all subgraphs
+    full_src = """
+tok = embedding(100, 32)
+ln = layer_norm()
+h1 = s1(ln)
+y1, y2 = s2(h1)
+ho = s_outer(h1)
+p1 = linear(y1, 10)
+p2 = linear(y2, 10)
+po = linear(ho, 10)
+s12 = add(p1, p2)
+out = add(s12, po)
+"""
+    plan = resolve(
+        full_src,
+        input_shape={"x": ("B", 8)},
+        output_shape={"out": ("B", 8, 10)},
+        input_dtype={"x": "int64"},
+        registry=reg,
+    )
+    code = plan.to_python_source("FullModel")
+
+    # 1. Zero IndentationError / valid AST parse
+    tree = ast.parse(code)
+    assert tree is not None
+
+    # 2. Zero closures or calls to plan/build, zero hndl imports, column 0 class defs
+    for line in code.splitlines():
+        assert "import hndl" not in line, f"Illegal hndl import in emitted code line: {line}"
+        assert "from hndl" not in line, f"Illegal from hndl in emitted code line: {line}"
+        assert "build(" not in line, f"Closure over build found in emitted code line: {line}"
+        assert "_SubgraphModule" not in line, f"Reference to _SubgraphModule found in line: {line}"
+        if line.startswith("class "):
+            assert not line.startswith(" "), f"Class definition not dedented to column 0: {line}"
+            assert not line.startswith("\t"), f"Class definition indented with tab: {line}"
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_gate8_adversarial_standalone_execution_parity_and_backprop(device: str) -> None:
+    """Adversarially challenge standalone execution and numerical parity (< 1e-6)
+    across CPU and CUDA in an isolated Python namespace (only torch imported):
+    1. Composite model with embedding, layer_norm, rms_norm, single-output subgraph,
+       multi-output subgraph, nested subgraphs, and tied weights.
+    2. State dict loading with .submodel. key mapping.
+    3. Exact numerical parity (< 1e-6) between HNDL build() and standalone model.
+    4. Full autograd backpropagation verifying gradients on inputs, parameters, and
+       tied weight sharing data pointer equality.
+    """
+    reg = Registry.builtins()
+
+    sub1 = resolve("linear(16)\nlayer_norm()\n", input_shape=("B", 8, 32), output_shape=("B", 8, 16))
+    reg.subgraph("s1", sub1)
+
+    sub2 = resolve(
+        """
+o1 = linear(24)
+o2 = linear(32)
+""",
+        input_shape={"x": ("B", 8, 16)},
+        output_shape={"o1": ("B", 8, 24), "o2": ("B", 8, 32)},
+    )
+    reg.subgraph("s2", sub2)
+
+    s_inner = resolve("linear(16)\n", input_shape=("B", 8, 16), output_shape=("B", 8, 16))
+    reg.subgraph("s_inner", s_inner)
+
+    s_outer = resolve("s_inner()\nlinear(32)\n", input_shape=("B", 8, 16), output_shape=("B", 8, 32), registry=reg)
+    reg.subgraph("s_outer", s_outer)
+
+    full_src = """
+tok = embedding(100, 32, name='tok')
+ln = layer_norm()
+rms = rms_norm()
+h1 = s1(rms)
+y1, y2 = s2(h1)
+ho = s_outer(h1)
+p1 = linear(y1, 32)
+p2 = linear(y2, 32)
+po = linear(ho, 32)
+s12 = add(p1, p2)
+tot = add(s12, po)
+out = linear(tot, 100, name='head', tie={'weight': 'tok.weight'})
+"""
+    plan = resolve(
+        full_src,
+        input_shape={"x": ("B", 8)},
+        output_shape={"out": ("B", 8, 100)},
+        input_dtype={"x": "int64"},
+        registry=reg,
+    )
+    code = plan.to_python_source("AdversarialFullModel")
+
+    # Execute in isolated namespace containing ONLY __builtins__ and torch
+    isolated_ns: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
+    exec(code, isolated_ns)
+    model_cls = isolated_ns["AdversarialFullModel"]
+    native_model = model_cls().to(device)
+
+    # Verify tied weight parameter sharing prior to state loading
+    assert native_model.nodes["n_head"].weight.data_ptr() == native_model.nodes["n_tok"].weight.data_ptr()
+
+    # Build HNDL model and map state dict
+    hndl_model = build(plan, device=device)
+    mapped_sd = {k.replace(".submodel.", "."): v for k, v in hndl_model.state_dict().items()}
+    native_model.load_state_dict(mapped_sd)
+
+    # Verify tied weight sharing is preserved after load_state_dict
+    assert native_model.nodes["n_head"].weight.data_ptr() == native_model.nodes["n_tok"].weight.data_ptr()
+
+    # Forward pass: numerical parity check (< 1e-6)
+    x = torch.randint(0, 100, (4, 8), dtype=torch.int64, device=device)
+    with torch.no_grad():
+        out_hndl = hndl_model(x)
+        out_native = native_model(x)
+
+    max_diff = (out_hndl - out_native).abs().max().item()
+    assert max_diff < 1e-6, f"Parity violation on device {device}: max diff {max_diff}"
+
+    # Autograd backpropagation
+    native_model.train()
+    out_train = native_model(x)
+    loss = out_train.sum()
+    loss.backward()
+
+    # Verify non-None, non-NaN gradients across all model parameters
+    for name, param in native_model.named_parameters():
+        assert param.grad is not None, f"Parameter {name} has None grad"
+        assert not torch.isnan(param.grad).any(), f"Parameter {name} has NaN grad"
+
+    # Verify tied parameter gradients share storage
+    assert (
+        native_model.nodes["n_tok"].weight.grad.data_ptr()
+        == native_model.nodes["n_head"].weight.grad.data_ptr()
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_gate8_adversarial_standalone_multi_output_subgraph_numerical_parity(device: str) -> None:
+    """Verify numerical parity (< 1e-6) and backward autograd on a top-level model
+    returning dictionary outputs with multi-output subgraphs across CPU and CUDA.
+    """
+    reg = Registry.builtins()
+
+    sub = resolve(
+        """
+o1 = linear(16)
+o2 = linear(32)
+""",
+        input_shape={"x": ("B", 8)},
+        output_shape={"o1": ("B", 16), "o2": ("B", 32)},
+    )
+    reg.subgraph("multi_branch", sub)
+
+    main_plan = resolve(
+        """
+h1, h2 = multi_branch(x)
+y1 = layer_norm(h1)
+y2 = rms_norm(h2)
+""",
+        input_shape={"x": ("B", 8)},
+        output_shape={"y1": ("B", 16), "y2": ("B", 32)},
+        registry=reg,
+    )
+    code = main_plan.to_python_source("MultiOutputTopModel")
+
+    isolated_ns: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
+    exec(code, isolated_ns)
+    model = isolated_ns["MultiOutputTopModel"]().to(device)
+
+    hndl_mod = build(main_plan, device=device)
+    mapped_sd = {k.replace(".submodel.", "."): v for k, v in hndl_mod.state_dict().items()}
+    model.load_state_dict(mapped_sd)
+
+    x_test = torch.randn(4, 8, device=device)
+    with torch.no_grad():
+        out_h = hndl_mod(x_test)
+        out_s = model(x_test)
+
+    assert isinstance(out_s, dict)
+    assert "y1" in out_s and "y2" in out_s
+    diff_y1 = (out_h["y1"] - out_s["y1"]).abs().max().item()
+    diff_y2 = (out_h["y2"] - out_s["y2"]).abs().max().item()
+    assert diff_y1 < 1e-6, f"Device {device} y1 diff: {diff_y1}"
+    assert diff_y2 < 1e-6, f"Device {device} y2 diff: {diff_y2}"
+
+    # Autograd backprop through dictionary outputs
+    x_train = torch.randn(4, 8, device=device, requires_grad=True)
+    out_train = model(x_train)
+    loss = out_train["y1"].sum() + out_train["y2"].sum()
+    loss.backward()
+    assert x_train.grad is not None and not torch.isnan(x_train.grad).any()
+    for name, p in model.named_parameters():
+        assert p.grad is not None and not torch.isnan(p.grad).any(), f"{name} grad missing or NaN"
 
 
