@@ -487,9 +487,11 @@ class _Solver:
                 pattern = pattern[:index] + tuple(Sym(f"...{i}") for i in range(ellipsis_length)) + pattern[index + 1:]
             expanded.append((name, pattern))
         values = {}
+        origins = {}
         for symbol, arg_name in bound.items():
             if arg_name in args:
                 values[symbol] = args[arg_name]
+                origins[symbol] = f"node '{self.node.id}' argument '{arg_name}'" if self.node else f"argument '{arg_name}'"
         for name, pattern in expanded:
             shape = view.rank(name, len(pattern))
             for axis, dimension in enumerate(pattern):
@@ -504,9 +506,29 @@ class _Solver:
                 if extent % dimension.scale:
                     self.error("E_CONSTRAINT", f"Extent {extent} at {name}[{axis}] is not divisible by scale {dimension.scale} of {dimension.name}")
                 value = extent // dimension.scale
+                ref = view._ref(name)
+                origin = self.origins.get((ref, axis))
+                if origin is None:
+                    if ref.startswith("node:"):
+                        node_id = ref.split("/")[0].split(":")[1]
+                        origin = f"node '{node_id}' ({self.specs[node_id].alias})" if node_id in self.specs else f"node '{node_id}'"
+                    elif ref.startswith("input:"):
+                        origin = f"external input contract '{ref.split(':', 1)[1]}'"
+                    elif ref.startswith("output:"):
+                        origin = f"external output contract '{ref.split(':', 1)[1]}'"
+                    else:
+                        origin = f"port '{name}' of node '{self.node.id}'" if self.node else f"port '{name}'"
                 if dimension.name in values and values[dimension.name] != value:
-                    self.error("E_CONSTRAINT", f"Shared dimension {dimension.name} requires incompatible values {values[dimension.name]} and {value}")
-                values[dimension.name] = value
+                    old_orig = origins.get(dimension.name, "existing contract")
+                    new_orig = origin
+                    self.error(
+                        "E_CONSTRAINT",
+                        f"Shared dimension {dimension.name} requires incompatible values "
+                        f"{values[dimension.name]} (established by {old_orig}) and {value} (required by {new_orig})"
+                    )
+                if dimension.name not in values:
+                    values[dimension.name] = value
+                    origins[dimension.name] = origin
         for name, pattern in expanded:
             for axis, dimension in enumerate(pattern):
                 if axis and isinstance(dimension, Sym) and dimension.name in values:

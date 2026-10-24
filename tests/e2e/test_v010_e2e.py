@@ -708,6 +708,16 @@ class TestTier1FeatureCoverage:
 
     def test_tier1_pep562_lazy_torch_import(self) -> None:
         """[PEP 562] hndl.torch is accessible lazily via __getattr__ without explicit import."""
+        import subprocess
+        import sys
+
+        res = subprocess.run(
+            [sys.executable, "-c", "import sys; import hndl; assert 'torch' not in sys.modules, 'torch was eagerly imported!'"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0, f"torch eagerly loaded: {res.stderr}"
+
         assert hasattr(hndl, "torch")
         import types
         assert isinstance(hndl.torch, types.ModuleType)

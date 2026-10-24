@@ -9,8 +9,6 @@ import importlib.metadata
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from torch import nn
-
 from .errors import HNDLError
 from .operator import Operator, make_operator
 from .settings import SCHEME_NAMES
@@ -111,6 +109,8 @@ class Registry:
         inputs_str = ", ".join(f"{name}[{', '.join(str(d) for d in entry['shape'])}]" for name, entry in plan.inputs.items())
         outputs_str = ", ".join(f"{name}[{', '.join(str(d) for d in entry['shape'])}]" for name, entry in plan.outputs.items())
         shape_str = f"{inputs_str} -> {outputs_str}"
+
+        from torch import nn
 
         class _SubgraphModule(nn.Module):
             _subgraph_plan = plan

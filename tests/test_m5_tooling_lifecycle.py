@@ -63,6 +63,20 @@ class TestFeature38IDETyping:
         assert hasattr(hndl, "PlanDiff")
 
     def test_lazy_pep562_torch_import(self):
+        import subprocess
+        import sys
+
+        cmd = (
+            "import sys\n"
+            "assert 'torch' not in sys.modules\n"
+            "import hndl\n"
+            "assert 'torch' not in sys.modules, 'torch was eagerly imported!'\n"
+            "_ = hndl.torch\n"
+            "assert 'torch' in sys.modules, 'torch was not lazily loaded on attribute access!'\n"
+        )
+        res = subprocess.run([sys.executable, "-c", cmd], capture_output=True, text=True)
+        assert res.returncode == 0, f"PEP 562 lazy torch import failed:\n{res.stderr}"
+
         torch_mod = getattr(hndl, "torch")
         assert hasattr(torch_mod, "build")
         assert hasattr(torch_mod, "network")
@@ -122,6 +136,15 @@ class TestFeature39DiagnosticsAndProvenance:
         err_msg = str(exc_info.value)
         assert "established by" in err_msg
         assert "required by" in err_msg
+
+    def test_solver_pattern_shared_dim_origin_tracking(self):
+        source = "a = linear(x, 64)\nb = linear(x, 128)\nout = add(a, b)\n"
+        with pytest.raises(HNDLError) as exc_info:
+            resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 64)})
+        err_msg = str(exc_info.value)
+        assert "Shared dimension" in err_msg
+        assert "established by node 'n0' (linear)" in err_msg
+        assert "required by node 'n1' (linear)" in err_msg
 
     def test_loop_digit_ending_name_separation(self):
         source = "for c in (16, 32):\n  x = linear(x, c, name='pwconv1')\n"

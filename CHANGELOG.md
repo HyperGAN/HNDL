@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Milestone 5 Gate Iteration 1 Remediation**:
+  - `registry.py`: Removed top-level PyTorch import (`from torch import nn`), deferring `nn` import to `Registry.subgraph`, ensuring that importing `hndl` does not eagerly load PyTorch into `sys.modules` in clean Python processes.
+  - PEP 562 Lazy Loading Tests: Added isolated subprocess verification tests to `tests/test_m5_tooling_lifecycle.py` and `tests/e2e/test_v010_e2e.py` certifying that `import hndl` does not introduce `torch` into `sys.modules`.
+  - `resolver.py` Pattern Provenance Tracking: Enhanced `_Solver.patterns()` to record provenance origin labels across pattern variables and surface detailed `"established by ... and required by ..."` origin labels upon shared dimension contradictions.
+
 - **Milestone 5: DX, IDE Autocomplete & Type Stubs**:
   - `OperatorNamespace.__dir__`: Added dynamic alias listing enabling tab completion across all 84 registered operators.
   - Operator Factory Docstrings & Signatures: Attached docstrings and inspect.Signature to dynamic operator factories synthesized in `hndl.ops`.
