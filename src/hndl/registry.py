@@ -5,11 +5,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+import importlib.metadata
 from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+from torch import nn
 
 from .errors import HNDLError
 from .operator import Operator, make_operator
 from .settings import SCHEME_NAMES
+
+if TYPE_CHECKING:
+    from .types import ResolvedPlan
 
 _ACTIVE = ContextVar("hndl_active_registry", default=None)
 _BUILTINS_TEMPLATE: Registry | None = None
@@ -95,6 +102,46 @@ class Registry:
             return self._identities[identity]
         except (KeyError, TypeError):
             raise HNDLError("E_STATE_VERSION", f"Operator {identity!r} is unavailable; supply its exact compatible registration") from None
+
+    def subgraph(self, alias: str, plan: ResolvedPlan) -> Operator:
+        """Register a resolved plan as a composite subgraph operator."""
+        inputs_str = ", ".join(f"{name}[{', '.join(str(d) for d in entry['shape'])}]" for name, entry in plan.inputs.items())
+        outputs_str = ", ".join(f"{name}[{', '.join(str(d) for d in entry['shape'])}]" for name, entry in plan.outputs.items())
+        shape_str = f"{inputs_str} -> {outputs_str}"
+
+        class _SubgraphModule(nn.Module):
+            def __init__(self):
+                super().__init__()
+                from .torch import build
+                self.submodel = build(plan, device="cpu")
+
+            def forward(self, *args, **kwargs):
+                if args and not kwargs and len(plan.inputs) == 1:
+                    input_name = next(iter(plan.inputs))
+                    kwargs = {input_name: args[0]}
+                    args = ()
+                out = self.submodel(*args, **kwargs)
+                if len(plan.outputs) == 1 and isinstance(out, Mapping):
+                    return next(iter(out.values()))
+                return out
+
+        spec = make_operator(
+            _SubgraphModule,
+            alias,
+            shape=shape_str,
+            summary=f"Composite subgraph operator for {alias}",
+            category="composite",
+        )
+        return self._add(spec)
+
+    def discover_plugins(self, group: str = "hndl.operators") -> None:
+        """Load third-party operators registered via pyproject.toml entry-points."""
+        for ep in importlib.metadata.entry_points(group=group):
+            obj = ep.load()
+            if isinstance(obj, type) and hasattr(obj, "__hndl_operator__"):
+                self.add(obj)
+            elif isinstance(obj, Operator):
+                self._add(obj)
 
     # -- pretrained architecture providers -------------------------------------------------
     #

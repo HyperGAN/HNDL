@@ -10,6 +10,7 @@ import heapq
 import itertools
 import operator
 import os
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 import weakref
@@ -207,6 +208,8 @@ def _shape_text(shape: Sequence[Any]) -> str:
     return "[" + ", ".join(map(str, shape)) + "]"
 
 
+
+
 class GraphModule(nn.Module):
     """Execute a frozen graph once per node and return named output tensors.
 
@@ -318,6 +321,26 @@ class GraphModule(nn.Module):
         self._stores = self._record_stores()
         self._single_output = len(plan.outputs) == 1
         self.build_receipt = MappingProxyType(receipt)
+
+    @contextmanager
+    def allow_state_mutation(self):
+        """Bless external parameter / submodule mutation during PEFT, quantization or adaptation."""
+        self._mutation_allowed = True
+        try:
+            yield self
+        finally:
+            self.rebind_state()
+            self._mutation_allowed = False
+
+    def rebind_state(self):
+        """Re-synchronize state snapshot and C-speed stores record after external modifications."""
+        self._state_program = self._state_snapshot()
+        _watch(self._state_program)
+        global _watch_generation
+        self._state_seen = _watch_generation
+        self._stores = self._record_stores()
+        self._fast = self._build_fast_program()
+        self._validated.clear()
 
     def __setattr__(self, name, value):
         if name in ("nodes", "plan") and hasattr(self, name):
@@ -1017,14 +1040,18 @@ class GraphModule(nn.Module):
             raise HNDLError("E_BINDING", expected)
         return tuple(bound[n] for n in names)
 
-    def forward(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
-        return self._execute(self._bind((), inputs))
+    def forward(self, *inputs: torch.Tensor, **named: torch.Tensor) -> torch.Tensor | dict[str, torch.Tensor]:
+        single = bool(inputs and not named and self._single_output)
+        return self._execute(self._bind(inputs, named), single=single)
 
     def __getitem__(self, key: str | int | slice) -> nn.Module:
         if isinstance(key, str):
             try:
                 return self.nodes[f"n_{key}"]
             except KeyError:
+                for n in self.plan.nodes:
+                    if n.source and n.source.get("binding") == key:
+                        return self.nodes[f"n_{n.id}"]
                 raise KeyError(key) from None
         if not self._chain:
             raise TypeError("Branched graphs support node-name lookup only")
@@ -1309,6 +1336,21 @@ def _prepare_parameter_settings(layer, node, dtype):
     return result
 
 
+def _get_parameter_or_buffer(module: nn.Module, name: str) -> torch.Tensor:
+    curr = module
+    for part in name.split("."):
+        curr = getattr(curr, part)
+    return curr
+
+
+def _set_parameter_or_buffer(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
+    parts = name.split(".")
+    curr = module
+    for part in parts[:-1]:
+        curr = getattr(curr, part)
+    setattr(curr, parts[-1], tensor)
+
+
 def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None):
     if plan.dtype not in ("float32", "float16", "bfloat16"):
         raise HNDLError("E_SCHEMA", f"Unsupported plan dtype {plan.dtype!r}")
@@ -1355,9 +1397,11 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     modules = OrderedDict()
     module_owners, tensor_owners, storage_owners = {}, {}, {}
 
-    def check_ownership(layer, node_id):
+    def check_ownership(layer, node_id, tied_tensors=()):
         owned = [(module_owners, id(child)) for child in layer.modules()]
         for tensor in (*layer.parameters(), *layer.buffers()):
+            if tensor in tied_tensors:
+                continue
             owned.append((tensor_owners, id(tensor)))
             storage = tensor.untyped_storage()
             if storage.nbytes():
@@ -1371,7 +1415,32 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     with registry.activated(), _initialization_rng(device, initialization_seed):
         for node in plan.nodes:
             layer = construct(specs[node.id], node, device, dtype, initialization_seed=initialization_seed)
-            check_ownership(layer, node.id)
+            tie = node.source.get("tie") if node.source else None
+            tied_tensors = set()
+            if tie:
+                for target_p, source_ref in tie.items():
+                    if "." not in source_ref:
+                        raise HNDLError("E_SCHEMA", f"Tied parameter source reference must be 'node_id.param', got {source_ref!r}", node=node.id)
+                    source_node_id, source_p = source_ref.split(".", 1)
+                    source_key = f"n_{source_node_id}"
+                    if source_key not in modules:
+                        raise HNDLError("E_SCHEMA", f"Tied parameter source node {source_node_id!r} not found or not preceding {node.id}", node=node.id)
+                    source_layer = modules[source_key]
+                    try:
+                        source_tensor = _get_parameter_or_buffer(source_layer, source_p)
+                    except AttributeError:
+                        raise HNDLError("E_SCHEMA", f"Tied parameter source {source_ref} does not exist", node=node.id)
+                    try:
+                        target_tensor = _get_parameter_or_buffer(layer, target_p)
+                    except AttributeError:
+                        raise HNDLError("E_SCHEMA", f"Tied parameter target {target_p} does not exist on {node.id}", node=node.id)
+                    if source_tensor.shape != target_tensor.shape:
+                        raise HNDLError("E_SCHEMA", f"Tied parameter shape mismatch: {source_ref} shape {list(source_tensor.shape)} != {target_p} shape {list(target_tensor.shape)}", node=node.id)
+                    if source_tensor.dtype != target_tensor.dtype:
+                        raise HNDLError("E_SCHEMA", f"Tied parameter dtype mismatch: {source_ref} dtype {source_tensor.dtype} != {target_p} dtype {target_tensor.dtype}", node=node.id)
+                    _set_parameter_or_buffer(layer, target_p, source_tensor)
+                    tied_tensors.add(source_tensor)
+            check_ownership(layer, node.id, tied_tensors=tied_tensors)
             if node.id in unbounded:
                 total += _state_bytes(layer)
                 if total > bounds["max_state_bytes"]:
@@ -1480,3 +1549,55 @@ def network_from_callable(
     return _network("resolve_callable", fn, input_shape=input_shape, output_shape=output_shape,
                     device=device, dtype=dtype, registry=registry,
                     initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
+
+
+def load_weights(
+    model: GraphModule | Network,
+    source: str | Path | dict[str, torch.Tensor] | Mapping[str, torch.Tensor],
+    *,
+    key_map: Mapping[str, str] | Callable[[str], str] | None = None,
+    strict: bool = True,
+) -> None:
+    """Load external checkpoint state dict into an HNDL model with key remapping."""
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        if path.suffix == ".safetensors":
+            try:
+                from safetensors.torch import load_file  # type: ignore
+                state_dict = load_file(str(path))
+            except ImportError:
+                raise HNDLError("E_RUNTIME", "safetensors package required to load .safetensors files")
+        else:
+            state_dict = torch.load(path, map_location="cpu", weights_only=True)
+    elif isinstance(source, Mapping):
+        state_dict = dict(source)
+    else:
+        raise TypeError(f"source must be a path or state dict Mapping, got {type(source).__name__}")
+
+    target_keys = set(model.state_dict().keys())
+    remapped = {}
+    for k, v in state_dict.items():
+        if key_map is not None:
+            if callable(key_map):
+                new_k = key_map(k)
+            else:
+                new_k = k
+                for prefix, repl in key_map.items():
+                    if k.startswith(prefix):
+                        new_k = repl + k[len(prefix):]
+                        break
+        else:
+            new_k = k
+
+        if new_k in target_keys:
+            remapped[new_k] = v
+        elif f"nodes.n_{new_k}" in target_keys:
+            remapped[f"nodes.n_{new_k}"] = v
+        elif f"nodes.{new_k}" in target_keys:
+            remapped[f"nodes.{new_k}"] = v
+        else:
+            remapped[new_k] = v
+
+    with model.allow_state_mutation():
+        model.load_state_dict(remapped, strict=strict)
+

@@ -118,6 +118,22 @@ def _normalize_graph_nodes(graph, registry, limits):
         ports = spec.input_ports_for(args)
         if set(node.inputs) != set(ports):
             raise HNDLError("E_BINDING", f"Required input ports are {ports}, got {tuple(node.inputs)}", node=node.id)
+        if "tie" in source:
+            tie = source["tie"]
+            if not isinstance(tie, Mapping):
+                raise HNDLError("E_SCHEMA", "tie must be a mapping", node=node.id)
+            normalized_tie = {}
+            for target_p, source_ref in tie.items():
+                if not isinstance(target_p, str) or not isinstance(source_ref, str) or "." not in source_ref:
+                    raise HNDLError("E_SCHEMA", f"Invalid tie reference {source_ref!r}", node=node.id)
+                source_node_id, param = source_ref.split(".", 1)
+                matching = next((n for n in graph.nodes if n.id == source_node_id), None)
+                if matching is None:
+                    matching = next((n for n in graph.nodes if n.source and n.source.get("binding") == source_node_id), None)
+                if matching is None:
+                    raise HNDLError("E_BINDING", f"Tied source node {source_node_id!r} not found", node=node.id)
+                normalized_tie[target_p] = f"{matching.id}.{param}"
+            source["tie"] = normalized_tie
         lookup[node.id] = replace(node, args=args, source=source)
         specs[node.id] = spec
         declarations[node.id] = index
@@ -140,6 +156,11 @@ def _topological_sort(graph, lookup, declarations):
                 raise HNDLError("E_BINDING", f"Unknown input reference {ref!r}", node=node.id)
             if ref not in external:
                 deps.add(ref[5:].split("/", 1)[0])
+        if node.source and "tie" in node.source:
+            for _, source_ref in node.source["tie"].items():
+                source_node_id = source_ref.split(".", 1)[0]
+                if source_node_id in lookup:
+                    deps.add(source_node_id)
         dependencies[node.id] = deps
         for dep in deps:
             consumers[dep].append(node.id)

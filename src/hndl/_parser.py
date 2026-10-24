@@ -51,7 +51,7 @@ _OPENERS, _CLOSERS = "([{", ")]}"
 _SEPARATORS = frozenset({",", ";", "=", ":"})
 # Keywords the grammar accepts. ``for`` and ``in`` open a loop, which nests by
 # indentation rather than by AST expression depth; ``_screen`` bounds it.
-_ACCEPTED_KEYWORDS = frozenset({"True", "False", "None", "for", "in"})
+_ACCEPTED_KEYWORDS = frozenset({"True", "False", "None", "for", "in", "def", "return"})
 # The loop placeholder and iterator: never values, never operator aliases.
 LOOP_TARGET, LOOP_ITERATOR = "_", "range"
 _LOOP_FORM = "`for _ in range(N):`"
@@ -156,6 +156,9 @@ class Validator:
         self.offsets = offsets
         self.lines = lines
         self.loops = 0
+        self.constants = {}
+        self.macros = {}
+        self.in_macro = False
 
     def location(self, node):
         # col_offset counts UTF-8 bytes of the dedented line; report characters
@@ -180,6 +183,24 @@ class Validator:
     def reject(self, message, node, code="E_SYNTAX"):
         location = self.location(node)
         raise HNDLError(code, message, line=location["line"], column=location["column"])
+
+    def _try_literal(self, node, depth=1):
+        self._check_depth(node, depth)
+        if isinstance(node, ast.Name) and node.id in self.constants:
+            return {"kind": "literal", "value": self.constants[node.id]}
+        if isinstance(node, ast.Constant):
+            value = node.value
+            if type(value) in (int, float, bool, str, type(None)):
+                if type(value) is float and not math.isfinite(value):
+                    return None
+                return {"kind": "literal", "value": value}
+            return None
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            if isinstance(node.operand, ast.Constant) and type(node.operand.value) in (int, float):
+                value = node.operand.value
+                return {"kind": "literal", "value": -value if isinstance(node.op, ast.USub) else value}
+            return None
+        return None
 
     # Statements -----------------------------------------------------------
 
@@ -214,24 +235,123 @@ class Validator:
             self.reject("Registered operator aliases cannot be rebound", node, code="E_NAME")
         if LOOP_ITERATOR in names:
             self.reject(f"range cannot be rebound; it is only permitted as the loop iterator in {_LOOP_FORM}", node)
+        if any(name in self.constants for name in non_discard):
+            self.reject(f"Constant '{non_discard[0]}' cannot be rebound", node, code="E_BINDING")
+        if not unpack and len(names) == 1:
+            name = names[0]
+            if name.isupper():
+                lit = self._try_literal(node.value, depth=depth + 1)
+                if lit is not None:
+                    self.constants[name] = lit["value"]
+                    return {"kind": "constant_def", "name": name, "value": lit, "source": self.location(node)}
         return {"kind": "assign", "targets": names, "unpack": unpack,
                 "value": self.expression(node.value, assignment=True, depth=depth + 1), "source": self.location(node)}
 
+    def def_statement(self, node, depth=1):
+        if self.in_macro:
+            self.reject("Nested macro definitions are not permitted", node)
+        name = node.name
+        if not _valid_name(name):
+            self.reject("Macro name must be a valid identifier", node)
+        if name in self.aliases:
+            self.reject("Registered operator aliases cannot be rebound", node, code="E_NAME")
+        if name == LOOP_ITERATOR:
+            self.reject(f"range cannot be rebound; it is only permitted as the loop iterator in {_LOOP_FORM}", node)
+        if name == LOOP_TARGET:
+            self.reject("_ cannot be used as a macro name", node)
+        if name in self.constants:
+            self.reject(f"Macro name {name!r} collides with defined constant", node, code="E_BINDING")
+        if name in self.macros:
+            self.reject(f"Duplicate macro name {name!r}", node, code="E_NAME")
+        if node.args.vararg or node.args.kwarg or node.args.kwonlyargs or getattr(node.args, "posonlyargs", None):
+            self.reject("Macro definitions take simple positional parameters only", node)
+        params = [arg.arg for arg in node.args.args]
+        for p in params:
+            if not _valid_name(p):
+                self.reject("Macro parameter must be a valid identifier", node)
+            if p in self.aliases:
+                self.reject("Registered operator aliases cannot be used as parameters", node, code="E_NAME")
+            if p == LOOP_ITERATOR or p == LOOP_TARGET:
+                self.reject(f"{p} cannot be used as a macro parameter", node)
+        if len(set(params)) != len(params):
+            self.reject("Macro parameters must be distinct", node)
+
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name:
+                self.reject(f"Recursion is forbidden; macro {name!r} cannot call itself", node)
+
+        self.in_macro = True
+        try:
+            body = self.statements(node.body, depth=depth + 1)
+        finally:
+            self.in_macro = False
+
+        macro_nodes = sum(_node_count(s) for s in body)
+        if not macro_nodes:
+            self.reject("A macro body must call at least one operator", node)
+
+        rec = {"kind": "macro_def", "name": name, "params": params, "body": body,
+               "nodes": macro_nodes, "source": self.location(node)}
+        self.macros[name] = rec
+        return rec
+
+    def return_statement(self, node, depth=1):
+        if not self.in_macro:
+            self.reject("return is only permitted inside a def macro", node)
+        if node.value is None:
+            return {"kind": "return", "value": None, "source": self.location(node)}
+        return {"kind": "return", "value": self.expression(node.value, assignment=True, depth=depth + 1),
+                "source": self.location(node)}
+
     def for_statement(self, node, depth=1):
-        """``for _ in range(N):`` with a positive int literal; the body is unrolled N times."""
-        if not isinstance(node.target, ast.Name) or node.target.id != LOOP_TARGET:
-            self.reject(f"The loop target must be _, as in {_LOOP_FORM}; loops have no usable loop variable, "
-                        f"so {_ESCAPE_HATCH}", node.target)
+        """``for _ in range(N):`` or literal tuple loop ``for c in (...):``."""
         iterator = node.iter
-        if not (isinstance(iterator, ast.Call) and isinstance(iterator.func, ast.Name)
-                and iterator.func.id == LOOP_ITERATOR):
-            self.reject(f"Loops must iterate over range(N), as in {_LOOP_FORM}", iterator)
-        if iterator.keywords or len(iterator.args) != 1:
-            self.reject("range() in a loop takes exactly one argument, a positive integer literal", iterator)
-        count = iterator.args[0]
-        if not (isinstance(count, ast.Constant) and type(count.value) is int and count.value > 0):
-            self.reject("range() count must be a positive integer literal such as range(8); "
-                        "expressions, names, bools and zero or negative counts are not permitted", count)
+        is_tuple = isinstance(iterator, ast.Tuple)
+
+        if not is_tuple:
+            if not isinstance(node.target, ast.Name) or node.target.id != LOOP_TARGET:
+                self.reject(f"The loop target must be _, as in {_LOOP_FORM}; loops have no usable loop variable, "
+                            f"so {_ESCAPE_HATCH}", node.target)
+            if not (isinstance(iterator, ast.Call) and isinstance(iterator.func, ast.Name)
+                    and iterator.func.id == LOOP_ITERATOR):
+                self.reject(f"Loops must iterate over range(N), as in {_LOOP_FORM}", iterator)
+            if iterator.keywords or len(iterator.args) != 1:
+                self.reject("range() in a loop takes exactly one argument, a positive integer literal", iterator)
+            count_arg = iterator.args[0]
+            count_val = None
+            if isinstance(count_arg, ast.Name) and count_arg.id in self.constants:
+                val = self.constants[count_arg.id]
+                if type(val) is int and val > 0:
+                    count_val = val
+            elif isinstance(count_arg, ast.Constant) and type(count_arg.value) is int and count_arg.value > 0:
+                count_val = count_arg.value
+            if count_val is None:
+                self.reject("range() count must be a positive integer literal such as range(8); "
+                            "expressions, names, bools and zero or negative counts are not permitted", count_arg)
+            count = count_val
+            loop_type = "range"
+            target_name = LOOP_TARGET
+            items = None
+        else:
+            target = node.target
+            if not isinstance(target, ast.Name) or not _valid_name(target.id):
+                self.reject("The loop target must be an identifier", target)
+            target_name = target.id
+            if target_name in self.aliases:
+                self.reject("Registered operator aliases cannot be rebound", target, code="E_NAME")
+            if target_name == LOOP_ITERATOR:
+                self.reject(f"range cannot be rebound; it is only permitted as the loop iterator in {_LOOP_FORM}", target)
+            if target_name in self.constants:
+                self.reject(f"Constant '{target_name}' cannot be rebound", target, code="E_BINDING")
+            items = []
+            for elt in iterator.elts:
+                lit = self._try_literal(elt, depth + 1)
+                if lit is None:
+                    self.reject("Loop tuple elements must be literals or defined constants", elt)
+                items.append(lit["value"])
+            count = len(items)
+            loop_type = "tuple"
+
         if node.orelse:
             self.reject("for ... else is not permitted", node.orelse[0])
         if self.loops >= MAX_LOOP_DEPTH:
@@ -241,19 +361,20 @@ class Validator:
             body = self.statements(node.body, depth=depth + 1)
         finally:
             self.loops -= 1
-        # The unrolled node count, checked against max_nodes before the
-        # interpreter emits the first iteration. Every call record is one node,
-        # and every iteration must emit one, so max_nodes also bounds the work
-        # of unrolling: range(10**9) over a bare rebinding would never finish.
         nodes = sum(_node_count(statement) for statement in body)
         if not nodes:
             self.reject("A loop body must call at least one operator; assignments alone would repeat "
                         "without building anything", node)
-        return {"kind": "for", "count": count.value, "body": body, "nodes": count.value * nodes,
-                "source": self.location(node)}
+        return {"kind": "for", "type": loop_type, "target": target_name, "count": count, "items": items,
+                "body": body, "nodes": count * nodes, "source": self.location(node)}
 
-    STATEMENTS = {ast.Expr: expr_statement, ast.Assign: assign_statement, ast.For: for_statement}
-    # Constructs with a specific message; anything else outside STATEMENTS gets the generic one.
+    STATEMENTS = {
+        ast.Expr: expr_statement,
+        ast.Assign: assign_statement,
+        ast.For: for_statement,
+        ast.FunctionDef: def_statement,
+        ast.Return: return_statement,
+    }
     REJECTED = {
         ast.While: f"while loops are not permitted; use a bounded {_LOOP_FORM}",
         ast.AsyncFor: f"async for is not permitted; use {_LOOP_FORM}",
@@ -294,14 +415,28 @@ class Validator:
         if isinstance(node, ast.Name):
             if not _valid_name(node.id):
                 self.reject("Invalid local name", node)
+            if node.id in self.constants:
+                return {"kind": "constant", "id": node.id, "value": self.constants[node.id], "source": self.location(node)}
             return {"kind": "name", "id": node.id, "source": self.location(node)}
         if isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name) or node.func.id not in self.aliases:
+            if not isinstance(node.func, ast.Name):
+                self.reject("Calls must name a registered operator directly", node)
+            alias = node.func.id
+            if alias in self.macros:
+                if any(isinstance(arg, ast.Starred) for arg in node.args):
+                    self.reject("Star argument expansion is not permitted", node)
+                self.keywords(node)
+                return {"kind": "macro_call", "name": alias,
+                        "args": [self.expression(arg, depth=depth + 1) for arg in node.args],
+                        "kwargs": [[keyword.arg, self.expression(keyword.value, initializers=keyword.arg == "init", depth=depth + 1)]
+                                   for keyword in node.keywords],
+                        "source": self.location(node)}
+            if alias not in self.aliases:
                 self.reject("Calls must name a registered operator directly", node)
             if any(isinstance(arg, ast.Starred) for arg in node.args):
                 self.reject("Star argument expansion is not permitted", node)
             self.keywords(node)
-            return {"kind": "call", "alias": node.func.id,
+            return {"kind": "call", "alias": alias,
                     "args": [self.expression(arg, depth=depth + 1) for arg in node.args],
                     "kwargs": [[keyword.arg, self.expression(keyword.value, initializers=keyword.arg == "init", depth=depth + 1)]
                                for keyword in node.keywords],
@@ -327,6 +462,8 @@ class Validator:
     def literal(self, node, *, initializers=False, call=False, depth=1):
         self._check_depth(node, depth)
         self.reserved(node)
+        if isinstance(node, ast.Name) and node.id in self.constants:
+            return {"kind": "literal", "value": self.constants[node.id]}
         if isinstance(node, ast.Call):
             # Only an init= mapping value may be a call, and only one of the
             # fixed initializer schemes; operator aliases stay out of literals.
@@ -368,8 +505,12 @@ def _node_count(record):
     kind = record["kind"]
     if kind == "for":
         return record["nodes"]
-    if kind in ("expr", "assign"):
-        return _node_count(record["value"])
+    if kind in ("expr", "assign", "return"):
+        return _node_count(record["value"]) if record.get("value") else 0
+    if kind == "macro_def":
+        return 0
+    if kind == "macro_call":
+        return 1 + sum(map(_node_count, record["args"])) + sum(_node_count(value) for _, value in record["kwargs"])
     if kind == "call":
         return 1 + sum(map(_node_count, record["args"])) + sum(_node_count(value) for _, value in record["kwargs"])
     if kind in ("tuple", "list", "tensor_tuple"):

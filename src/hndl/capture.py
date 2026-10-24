@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 import re
 from typing import TYPE_CHECKING, Any
@@ -20,8 +21,23 @@ if TYPE_CHECKING:
 
 
 _ACTIVE: ContextVar[Capture | None] = ContextVar("hndl_capture", default=None)
+_SCOPE_PREFIX: ContextVar[str] = ContextVar("hndl_scope_prefix", default="")
 _DEFAULT = object()
 _NODE_ID = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+@contextmanager
+def scope(prefix: str):
+    """Context manager scoping node names in symbolic graph capture."""
+    if not isinstance(prefix, str) or not _NODE_ID.fullmatch(prefix):
+        raise HNDLError("E_NAME", "Scope prefix must match [a-z][a-z0-9_]*")
+    curr = _SCOPE_PREFIX.get()
+    new_prefix = f"{curr}_{prefix}" if curr else prefix
+    token = _SCOPE_PREFIX.set(new_prefix)
+    try:
+        yield
+    finally:
+        _SCOPE_PREFIX.reset(token)
 
 
 class Symbol:
@@ -191,7 +207,19 @@ class Capture:
         args = list(positional)
         kwargs = dict(keyword)
         name = kwargs.pop("name", _DEFAULT)
-        node_context = name if (name is not _DEFAULT and isinstance(name, str) and _NODE_ID.fullmatch(name)) else None
+        tie = kwargs.pop("tie", _DEFAULT)
+        if tie is not _DEFAULT:
+            if not isinstance(tie, Mapping):
+                raise _error("E_SCHEMA", "tie must be a mapping of target parameter to source parameter path", source)
+            for tp, sp in tie.items():
+                if not isinstance(tp, str) or not isinstance(sp, str) or "." not in sp:
+                    raise _error("E_SCHEMA", f"Invalid tie reference {sp!r} for {tp!r}; expected 'source_node.param'", source)
+
+        curr_scope = _SCOPE_PREFIX.get()
+        node_context = (
+            f"{curr_scope}_{name}" if curr_scope else name
+        ) if (name is not _DEFAULT and isinstance(name, str) and _NODE_ID.fullmatch(name)) else None
+
         if self.registry._identities.get(op.key) is not op:
             raise _error("E_CAPTURE", _foreign_operator(self.registry, op), source, node=node_context)
         policy = kwargs.pop("policy", _DEFAULT)
@@ -206,7 +234,12 @@ class Capture:
         bindings = self._bind_inputs(op, args, kwargs, source, node_context)
 
         if name is _DEFAULT:
-            name = f"n{len(self.nodes)}"
+            name = f"{curr_scope}_n{len(self.nodes)}" if curr_scope else f"n{len(self.nodes)}"
+        else:
+            if type(name) is not str or _NODE_ID.fullmatch(name) is None:
+                raise _error("E_NAME", "Node names must match [a-z][a-z0-9_]*", source)
+            if curr_scope:
+                name = f"{curr_scope}_{name}"
         if type(name) is not str or _NODE_ID.fullmatch(name) is None:
             raise _error("E_NAME", "Node names must match [a-z][a-z0-9_]*", source)
         if name in self._ids:
@@ -230,6 +263,8 @@ class Capture:
         }
         if profile:
             metadata["policy"] = profile.identity
+        if tie is not _DEFAULT:
+            metadata["tie"] = dict(tie)
         # A variadic output operator fixes its port count from its own
         # arguments, so the ports come from the normalized call, not the
         # declaration alone.
@@ -299,6 +334,8 @@ class OperatorNamespace:
 
     def __init__(self, registry: Registry | None = None) -> None:
         self._registry = registry
+
+    scope = staticmethod(scope)
 
     def __repr__(self) -> str:
         return "hndl.ops" if self._registry is None else f"<operators of {self._registry!r}>"

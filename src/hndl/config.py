@@ -7,6 +7,7 @@ statement records; this module interprets those records against a capture.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 import os
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,9 @@ class _Interpreter:
     def __init__(self, capture):
         self.capture = capture
         self.locals = dict(capture.inputs)
+        self.constants = {}
+        self.macros = {}
+        self.macro_call_counts = {}
         # One [index, count] per enclosing loop, outermost first.
         self.iterations = []
         # Loop-suffixed node IDs, for a duplicate-name message that explains them.
@@ -60,29 +64,70 @@ class _Interpreter:
             for name, val in zip(names, value):
                 if name != "_":
                     self.locals[name] = val
+                    if isinstance(val, Symbol) and val.ref.startswith("node:"):
+                        nid = val.ref[5:].split("/", 1)[0]
+                        node_idx = next((i for i, n in enumerate(self.capture.nodes) if n.id == nid), None)
+                        if node_idx is not None and "binding" not in self.capture.nodes[node_idx].source:
+                            self.capture.nodes[node_idx] = replace(self.capture.nodes[node_idx],
+                                source={**self.capture.nodes[node_idx].source, "binding": name})
         else:
             if names[0] != "_":
                 self.locals[names[0]] = value
+                if isinstance(value, Symbol) and value.ref.startswith("node:"):
+                    nid = value.ref[5:].split("/", 1)[0]
+                    node_idx = next((i for i, n in enumerate(self.capture.nodes) if n.id == nid), None)
+                    if node_idx is not None and "binding" not in self.capture.nodes[node_idx].source:
+                        self.capture.nodes[node_idx] = replace(self.capture.nodes[node_idx],
+                            source={**self.capture.nodes[node_idx].source, "binding": names[0]})
+
+    def constant_def_statement(self, statement):
+        name = statement["name"]
+        if name in self.constants:
+            raise _error("E_BINDING", f"Constant '{name}' cannot be rebound", self.where(statement["source"]))
+        val = statement["value"]
+        value = val["value"] if "value" in val else self.evaluate(val)
+        self.constants[name] = value
+
+    def macro_def_statement(self, statement):
+        name = statement["name"]
+        if name in self.macros:
+            raise _error("E_NAME", f"Duplicate macro name {name!r}", self.where(statement["source"]))
+        self.macros[name] = statement
 
     def for_statement(self, statement):
         capture = self.capture
         count = statement["count"]
         # Fail before emitting anything: the parser multiplied out the body.
         if len(capture.nodes) + statement["nodes"] > capture.max_nodes:
-            body = statement["nodes"] // count
-            raise _error("E_RESOURCE", f"range({_amount(count)}) repeats a body of {_amount(body)} node"
+            body = statement["nodes"] // (count if count else 1)
+            prefix = f"range({_amount(count)})" if statement.get("type") != "tuple" else f"tuple loop of {count} items"
+            raise _error("E_RESOURCE", f"{prefix} repeats a body of {_amount(body)} node"
                          f"{'' if body == 1 else 's'}; unrolled, the graph would exceed max_nodes "
                          f"({capture.max_nodes})", self.where(statement["source"]))
         level = [0, count]
         self.iterations.append(level)
         try:
-            for index in range(count):
-                level[0] = index
-                self.run(statement["body"])
+            if statement.get("type") == "tuple":
+                target = statement["target"]
+                for index, item in enumerate(statement["items"]):
+                    level[0] = index
+                    self.locals[target] = item
+                    self.run(statement["body"])
+                self.locals.pop(statement["target"], None)
+            else:
+                for index in range(count):
+                    level[0] = index
+                    self.run(statement["body"])
         finally:
             self.iterations.pop()
 
-    STATEMENTS = {"expr": expr_statement, "assign": assign_statement, "for": for_statement}
+    STATEMENTS = {
+        "expr": expr_statement,
+        "assign": assign_statement,
+        "for": for_statement,
+        "constant_def": constant_def_statement,
+        "macro_def": macro_def_statement,
+    }
 
     def where(self, source):
         """``source`` plus the loop iterations it is running in, if any."""
@@ -122,8 +167,12 @@ class _Interpreter:
 
     def evaluate(self, expression):
         kind = expression["kind"]
+        if kind == "constant":
+            return expression.get("value", self.constants.get(expression["id"]))
         if kind == "name":
             name = expression["id"]
+            if name in self.constants:
+                return self.constants[name]
             if name not in self.locals:
                 raise _error("E_NAME", f"Undefined tensor variable {name!r}", self.where(expression["source"]))
             return self.locals[name]
@@ -144,6 +193,50 @@ class _Interpreter:
                 return initializer(expression["name"], arguments)
             except HNDLError as exc:
                 raise _error(exc.code, exc.message, self.where(expression["source"])) from None
+        if kind == "macro_call":
+            from .capture import ops
+            macro_name = expression["name"]
+            macro = self.macros[macro_name]
+            call_idx = self.macro_call_counts.get(macro_name, 0)
+            self.macro_call_counts[macro_name] = call_idx + 1
+            scope_prefix = f"{macro_name}_{call_idx}"
+
+            args = tuple(self.evaluate(item) for item in expression["args"])
+            kwargs = {name: self.evaluate(value) for name, value in expression["kwargs"]}
+            params = macro["params"]
+            if len(args) > len(params):
+                raise _error("E_ARGUMENT", f"Macro {macro_name} accepts at most {len(params)} positional arguments, got {len(args)}", self.where(expression["source"]))
+            frame = dict(zip(params, args))
+            for k, v in kwargs.items():
+                if k in frame:
+                    raise _error("E_ARGUMENT", f"Macro {macro_name} parameter {k!r} bound twice", self.where(expression["source"]))
+                if k not in params:
+                    raise _error("E_ARGUMENT", f"Macro {macro_name} has no parameter {k!r}", self.where(expression["source"]))
+                frame[k] = v
+            missing = [p for p in params if p not in frame]
+            if missing:
+                raise _error("E_ARGUMENT", f"Macro {macro_name} missing required argument(s): {', '.join(missing)}", self.where(expression["source"]))
+
+            saved_locals = dict(self.locals)
+            self.locals.update(frame)
+            ret_val = None
+            has_return = False
+            try:
+                with ops.scope(scope_prefix):
+                    for stmt in macro["body"]:
+                        if stmt["kind"] == "return":
+                            has_return = True
+                            if stmt["value"] is not None:
+                                ret_val = self.evaluate(stmt["value"])
+                            else:
+                                ret_val = self.capture.current
+                            break
+                        self.STATEMENTS[stmt["kind"]](self, stmt)
+            finally:
+                self.locals = saved_locals
+            if has_return:
+                return ret_val
+            return self.capture.current
         # All nested arguments run in Python order before current is bound.
         op = self.capture.registry.get(expression["alias"])
         args = tuple(self.evaluate(item) for item in expression["args"])
@@ -165,8 +258,11 @@ def _interpret(program, capture):
     locals_ = interpreter.locals
     if capture.named_outputs:
         # Named outputs are selected by binding each declared name as a local.
-        return capture.finish({name: locals_[name] for name in capture.output_contracts
-                               if name in locals_})
+        selected = {name: locals_[name] for name in capture.output_contracts
+                    if name in locals_}
+        if "out" in capture.output_contracts and "out" not in selected and capture.current is not None:
+            selected["out"] = capture.current
+        return capture.finish(selected)
     return capture.finish(locals_.get("out", _DEFAULT))
 
 

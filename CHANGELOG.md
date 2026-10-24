@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Milestone 4: Extensibility & Ecosystem Interoperability**:
+  - `.hndl` Constants: Added top-level immutable scalar constant declarations (`D = 64`) with re-binding guard (`E_BINDING`), AST constant folding and substitution in operator calls, kwargs, and loops.
+  - `.hndl` Def Macros: Added non-recursive AST-expanded macro definitions (`def name(params): ... return out`) with parameter substitution, statement budgets, and automatic unique scoped node prefixes.
+  - `.hndl` Tuple Loops: Added unrolled literal tuple loops (`for c in (32, 64): ...`) enabling clean channel progression and block repetition.
+  - Python Scoping (`ops.scope`): Context manager for prefixing node names during callable capture, supporting nested scopes and disambiguating multi-stage networks.
+  - Composite Subgraphs (`registry.subgraph`): Added `Registry.subgraph(alias, plan)` to package and register a resolved plan as a first-class composite operator module with clean tensor I/O and autograd backpropagation.
+  - Declarative Weight Tying: Added `tie={"weight": "source_node.weight"}` in capture and resolver, with topological dependency enforcement, cycle detection, shape/dtype validation, storage pointer sharing (`data_ptr()`), and gradient aggregation.
+  - Post-Build State Mutation: Added `model.allow_state_mutation()` context manager and `model.rebind_state()` method on `GraphModule` to bless parameter updates and submodule grafting during PEFT, LoRA adapter injection, and quantization.
+  - Zero-Dependency PyTorch Codegen: Added `plan.to_python_source(class_name="Model")` emitting self-contained, human-readable standalone PyTorch source code with line-by-line shape annotations, zero HNDL runtime imports, and numerical round-trip parity.
+  - Checkpoint Loader (`hndl.torch.load_weights`): Checkpoint state dict loader supporting `.pt`, `.safetensors`, and in-memory dicts with key remapping and automatic state rebinding.
+  - Plugin Discovery (`registry.discover_plugins`): Entry-point loader discovering third-party HNDL operators registered under the `hndl.operators` entry-point group.
+
 - **Milestone 3 Gate Iteration 1 Remediation**:
   - `joint_attention`: Added `qk_norm="l2_norm"` per-head L2 normalization in both module forward execution and independent reference oracle.
   - `mamba2`: Added `chunk_size` argument, implemented semi-separable chunked recurrence in `forward()` with safe intra-chunk masked decay and inter-chunk state propagation, added joint depthwise convolution over $[x_{ssm}, B, C]$, cleaned up dead `d_has_bias` argument, and retained independent sequential recurrence in `_reference(module)` ($< 1\times 10^{-4}$ numerical parity).
