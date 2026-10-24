@@ -110,6 +110,8 @@ class Registry:
         shape_str = f"{inputs_str} -> {outputs_str}"
 
         class _SubgraphModule(nn.Module):
+            _subgraph_plan = plan
+
             def __init__(self):
                 super().__init__()
                 from .torch import build
@@ -123,6 +125,8 @@ class Registry:
                 out = self.submodel(*args, **kwargs)
                 if len(plan.outputs) == 1 and isinstance(out, Mapping):
                     return next(iter(out.values()))
+                if isinstance(out, Mapping):
+                    return tuple(out[name] for name in plan.outputs)
                 return out
 
         spec = make_operator(

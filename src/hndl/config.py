@@ -171,11 +171,11 @@ class _Interpreter:
             return expression.get("value", self.constants.get(expression["id"]))
         if kind == "name":
             name = expression["id"]
+            if name in self.locals:
+                return self.locals[name]
             if name in self.constants:
                 return self.constants[name]
-            if name not in self.locals:
-                raise _error("E_NAME", f"Undefined tensor variable {name!r}", self.where(expression["source"]))
-            return self.locals[name]
+            raise _error("E_NAME", f"Undefined tensor variable {name!r}", self.where(expression["source"]))
         if kind == "literal":
             return expression["value"]
         if kind in ("tuple", "list", "tensor_tuple"):

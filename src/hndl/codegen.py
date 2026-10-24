@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import textwrap
 from typing import TYPE_CHECKING, Any
 
 from .operator import ELLIPSIS, Sym
@@ -84,7 +85,7 @@ def _format_module_constructor(spec, node, kwargs) -> tuple[str | None, str]:
 
     if alias == "embedding":
         num_emb = kwargs.get("num_embeddings")
-        emb_dim = kwargs.get("embedding_dim")
+        emb_dim = kwargs.get("dim") or kwargs.get("embedding_dim")
         return None, f"nn.Embedding({num_emb}, {emb_dim})"
 
     if alias == "flatten":
@@ -93,16 +94,28 @@ def _format_module_constructor(spec, node, kwargs) -> tuple[str | None, str]:
         return None, f"nn.Flatten(start_dim={start_dim}, end_dim={end_dim})"
 
     if alias == "layer_norm":
-        norm_shape = kwargs.get("normalized_shape")
+        norm_shape = kwargs.get("D") or kwargs.get("normalized_shape") or node.input_shapes.get("x", [None])[-1]
         eps = kwargs.get("eps", 1e-5)
-        elementwise_affine = kwargs.get("elementwise_affine", True)
-        return None, f"nn.LayerNorm({norm_shape}, eps={eps}, elementwise_affine={elementwise_affine})"
+        elementwise_affine = kwargs.get("affine", kwargs.get("elementwise_affine", True))
+        bias = kwargs.get("bias", True)
+        return None, f"nn.LayerNorm({norm_shape}, eps={eps}, elementwise_affine={elementwise_affine}, bias={bias})"
 
     if alias == "rms_norm":
-        norm_shape = kwargs.get("normalized_shape")
+        norm_shape = kwargs.get("D") or kwargs.get("normalized_shape") or node.input_shapes.get("x", [None])[-1]
         eps = kwargs.get("eps", 1e-6)
-        elementwise_affine = kwargs.get("elementwise_affine", True)
+        elementwise_affine = kwargs.get("affine", kwargs.get("elementwise_affine", True))
         return None, f"nn.RMSNorm({norm_shape}, eps={eps}, elementwise_affine={elementwise_affine})"
+
+    inner_plan = getattr(spec.module, "_subgraph_plan", None)
+    if inner_plan is not None:
+        sub_cls_name = f"Submodel_{spec.alias}"
+        inner_src = to_python_source(inner_plan, class_name=sub_cls_name, is_submodule=True)
+        class_lines = [
+            line for line in inner_src.splitlines()
+            if not (line.startswith("# Generated") or line.startswith("import ") or line.startswith("from "))
+        ]
+        cleaned_src = "\n".join(class_lines).strip()
+        return cleaned_src, f"{sub_cls_name}()"
 
     mod = spec.module
     if mod is not None and mod.__module__.startswith("torch.nn"):
@@ -114,7 +127,9 @@ def _format_module_constructor(spec, node, kwargs) -> tuple[str | None, str]:
     cls_name = mod.__name__ if mod is not None else spec.alias.title()
     custom_src = None
     if mod is not None:
-        lines = inspect.getsource(mod).splitlines()
+        raw_src = inspect.getsource(mod)
+        dedented = textwrap.dedent(raw_src)
+        lines = dedented.splitlines()
         start_idx = 0
         for i, line in enumerate(lines):
             if line.startswith("class "):
@@ -126,7 +141,7 @@ def _format_module_constructor(spec, node, kwargs) -> tuple[str | None, str]:
     return custom_src, f"{cls_name}({kwargs_str})"
 
 
-def to_python_source(plan: ResolvedPlan, class_name: str = "Model") -> str:
+def to_python_source(plan: ResolvedPlan, class_name: str = "Model", *, is_submodule: bool = False) -> str:
     """Emit a standalone, self-contained PyTorch module from a ResolvedPlan."""
     registry = plan.registry
     if registry is None:
@@ -143,7 +158,12 @@ def to_python_source(plan: ResolvedPlan, class_name: str = "Model") -> str:
         kwargs = _get_constructor_kwargs(spec, node)
         custom_src, call_str = _format_module_constructor(spec, node, kwargs)
         if custom_src is not None:
-            mod_name = spec.module.__name__
+            if getattr(spec.module, "_subgraph_plan", None) is not None:
+                mod_name = f"Submodel_{spec.alias}"
+            elif spec.module is not None:
+                mod_name = spec.module.__name__
+            else:
+                mod_name = spec.alias.title()
             if mod_name not in custom_classes:
                 custom_classes[mod_name] = custom_src
         node_calls[node.id] = call_str
@@ -223,6 +243,12 @@ def to_python_source(plan: ResolvedPlan, class_name: str = "Model") -> str:
         out_ref = plan.outputs[out_name]["ref"]
         n_id, p_id = out_ref.removeprefix("node:").split("/", 1)
         output_lines.append(f"        return t_{n_id}_{p_id}")
+    elif is_submodule:
+        tuple_items = []
+        for name, entry in plan.outputs.items():
+            n_id, p_id = entry["ref"].removeprefix("node:").split("/", 1)
+            tuple_items.append(f"t_{n_id}_{p_id}")
+        output_lines.append(f"        return ({', '.join(tuple_items)})")
     else:
         out_items = []
         for name, entry in plan.outputs.items():

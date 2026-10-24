@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Milestone 4 Gate Iteration 1 Remediation**:
+  - `codegen.py`: Corrected parameter dictionary lookups in `_format_module_constructor` for `embedding` (`dim`), `layer_norm` (`D`, `affine`, `bias`), and `rms_norm` (`D`, `affine`), enabling zero-dependency standalone instantiation and execution.
+  - `codegen.py` Subgraphs & Custom Modules: Applied `textwrap.dedent` to extracted custom module class sources; cleanly embedded composite subgraphs (`Registry.subgraph`) as standalone `Submodel_<alias>` PyTorch classes with zero dependencies on closures and zero indentation errors.
+  - `_parser.py`: Fixed unpacked assignment constant rebinding diagnostic to report the exact offending constant rather than `non_discard[0]`.
+  - `_parser.py` & `config.py`: Enforced `E_BINDING` rejection when macro parameters collide with defined constants, and ensured macro formal parameters take precedence over constants during parsing and evaluation.
+
 - **Milestone 4: Extensibility & Ecosystem Interoperability**:
   - `.hndl` Constants: Added top-level immutable scalar constant declarations (`D = 64`) with re-binding guard (`E_BINDING`), AST constant folding and substitution in operator calls, kwargs, and loops.
   - `.hndl` Def Macros: Added non-recursive AST-expanded macro definitions (`def name(params): ... return out`) with parameter substitution, statement budgets, and automatic unique scoped node prefixes.

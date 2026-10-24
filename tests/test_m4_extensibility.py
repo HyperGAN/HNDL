@@ -304,6 +304,47 @@ def test_plan_to_python_source_roundtrip() -> None:
     assert torch.allclose(out_h, out_n, atol=1e-6)
 
 
+def test_plan_to_python_source_embedding_norm_tied_roundtrip() -> None:
+    source = """
+tok = embedding(100, 32, name='tok')
+ln = layer_norm(name='ln')
+rms = rms_norm(name='rms')
+head = linear(100, name='head', tie={'weight': 'tok.weight'})
+"""
+    plan = resolve(
+        source,
+        input_shape={"x": ("B", 8)},
+        output_shape={"head": ("B", 8, 100)},
+        input_dtype={"x": "int64"},
+    )
+    src = plan.to_python_source(class_name="TiedNormModel")
+    assert "nn.Embedding(100, 32)" in src
+    assert "nn.LayerNorm(32, eps=1e-05, elementwise_affine=True, bias=True)" in src
+    assert "nn.RMSNorm(32, eps=1e-06, elementwise_affine=True)" in src
+    assert "self.nodes['n_head'].weight = self.nodes['n_tok'].weight" in src
+
+    ns: dict[str, Any] = {}
+    exec(src, ns)
+    cls = ns["TiedNormModel"]
+    native_model = cls()
+
+    # Verify tied weight sharing
+    assert native_model.nodes["n_head"].weight.data_ptr() == native_model.nodes["n_tok"].weight.data_ptr()
+
+    # Load weights from HNDL build
+    hndl_model = build(plan, device="cpu")
+    native_model.load_state_dict(hndl_model.state_dict())
+
+    # Verify sharing is preserved after load_state_dict
+    assert native_model.nodes["n_head"].weight.data_ptr() == native_model.nodes["n_tok"].weight.data_ptr()
+
+    x = torch.randint(0, 100, (3, 8), dtype=torch.int64)
+    with torch.no_grad():
+        out_h = hndl_model(x)
+        out_n = native_model(x)
+    assert torch.allclose(out_h, out_n, atol=1e-5)
+
+
 # ==============================================================================
 # 9. Checkpoint Loading with Key Mapping
 # ==============================================================================

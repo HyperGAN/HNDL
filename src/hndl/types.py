@@ -488,10 +488,10 @@ class ResolvedPlan(Immutable):
             lines.append(f"  initialization={plain(node.initialization)}, trainability={plain(node.trainability)}")
         return "\n".join(lines)
 
-    def to_python_source(self, class_name: str = "Model") -> str:
+    def to_python_source(self, class_name: str = "Model", *args: Any, **kwargs: Any) -> str:
         """Emit a standalone, self-contained PyTorch module from this plan."""
         from .codegen import to_python_source
-        return to_python_source(self, class_name=class_name)
+        return to_python_source(self, class_name=class_name, *args, **kwargs)
 
 
 def format_plan_table(plan: ResolvedPlan, label: str) -> str:

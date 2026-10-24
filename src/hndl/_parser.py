@@ -159,6 +159,7 @@ class Validator:
         self.constants = {}
         self.macros = {}
         self.in_macro = False
+        self.macro_params = set()
 
     def location(self, node):
         # col_offset counts UTF-8 bytes of the dedented line; report characters
@@ -235,8 +236,9 @@ class Validator:
             self.reject("Registered operator aliases cannot be rebound", node, code="E_NAME")
         if LOOP_ITERATOR in names:
             self.reject(f"range cannot be rebound; it is only permitted as the loop iterator in {_LOOP_FORM}", node)
-        if any(name in self.constants for name in non_discard):
-            self.reject(f"Constant '{non_discard[0]}' cannot be rebound", node, code="E_BINDING")
+        matching_constants = [name for name in non_discard if name in self.constants]
+        if matching_constants:
+            self.reject(f"Constant '{matching_constants[0]}' cannot be rebound", node, code="E_BINDING")
         if not unpack and len(names) == 1:
             name = names[0]
             if name.isupper():
@@ -273,6 +275,8 @@ class Validator:
                 self.reject("Registered operator aliases cannot be used as parameters", node, code="E_NAME")
             if p == LOOP_ITERATOR or p == LOOP_TARGET:
                 self.reject(f"{p} cannot be used as a macro parameter", node)
+            if p in self.constants:
+                self.reject(f"Macro parameter {p!r} collides with defined constant", node, code="E_BINDING")
         if len(set(params)) != len(params):
             self.reject("Macro parameters must be distinct", node)
 
@@ -281,10 +285,12 @@ class Validator:
                 self.reject(f"Recursion is forbidden; macro {name!r} cannot call itself", node)
 
         self.in_macro = True
+        self.macro_params = set(params)
         try:
             body = self.statements(node.body, depth=depth + 1)
         finally:
             self.in_macro = False
+            self.macro_params = set()
 
         macro_nodes = sum(_node_count(s) for s in body)
         if not macro_nodes:
@@ -415,6 +421,8 @@ class Validator:
         if isinstance(node, ast.Name):
             if not _valid_name(node.id):
                 self.reject("Invalid local name", node)
+            if self.in_macro and node.id in self.macro_params:
+                return {"kind": "name", "id": node.id, "source": self.location(node)}
             if node.id in self.constants:
                 return {"kind": "constant", "id": node.id, "value": self.constants[node.id], "source": self.location(node)}
             return {"kind": "name", "id": node.id, "source": self.location(node)}
