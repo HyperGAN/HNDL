@@ -992,7 +992,7 @@ class GraphModule(nn.Module):
                     outs, self._split_result(result, out_ports, out_set, node_id)):
                 check(value, expected, dtype, port, batch)
                 values[key] = value
-        outputs = OutputDict()
+        outputs = {} if compiling else OutputDict()
         for name, ref, expected, dtype, port in output_program:
             value = values[ref]
             check(value, expected, dtype, port, batch)
@@ -1040,18 +1040,18 @@ class GraphModule(nn.Module):
     def _execute(self, inputs, single=False, cache=None):
         if type(inputs) is not tuple:
             inputs = tuple(inputs[n] for n in self._input_names)
+        if _is_compiling():
+            # Traced once per guard set, so the full checks cost nothing per
+            # call there and dynamo turns them into guards.
+            self._verify_state("build")
+            outputs = self._run_checked(inputs, compiling=True, cache=cache)
+            self._verify_state("forward")
+            if single:
+                return next(iter(outputs.values()))
+            return outputs
         old_cache = getattr(self, "_active_cache", None)
         self._active_cache = cache
         try:
-            if _is_compiling():
-                # Traced once per guard set, so the full checks cost nothing per
-                # call there and dynamo turns them into guards.
-                self._verify_state("build")
-                outputs = self._run_checked(inputs, compiling=True, cache=cache)
-                self._verify_state("forward")
-                if single:
-                    return next(iter(outputs.values()))
-                return outputs
             generation = _watch_generation
             signature = self._signature(inputs)
             # _record_stores, compared: submodules and empty stores by identity,
