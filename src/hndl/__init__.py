@@ -7,14 +7,17 @@ from .errors import HNDLError
 from .initializers import (kaiming_normal, kaiming_uniform, normal, orthogonal,
                            truncated_normal, uniform, xavier_normal, xavier_uniform)
 from .operator import Arg, Example, NodeView, Policy, operator
+from .profile import PlanProfile
 from .registry import Registry
-from .types import ResolvedPlan
+from .types import PlanDiff, ResolvedPlan
 
 __all__ = [
     "Arg",
     "Example",
     "HNDLError",
     "NodeView",
+    "PlanDiff",
+    "PlanProfile",
     "Policy",
     "Registry",
     "ResolvedPlan",

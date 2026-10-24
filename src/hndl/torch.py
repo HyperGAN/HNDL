@@ -28,13 +28,26 @@ if TYPE_CHECKING:
     from .registry import Registry
     from .types import ResolvedPlan
 
+__all__ = [
+    "GraphModule",
+    "InferenceCache",
+    "Network",
+    "build",
+    "construct",
+    "load_weights",
+    "network",
+    "network_file",
+    "network_from_callable",
+    "parameter_counts",
+]
+
 # Build metadata a copied network shares with its original: immutable records
 # describing the resolved architecture, never the parameters that train.
 SHARED_METADATA = frozenset({"plan", "build_receipt", "_port_orders", "_port_dtypes",
                              "_input_names", "_input_set", "_input_dtypes", "_output_dtypes",
                              "_build_dtype", "_node_labels", "_single_output",
                              "_spec_inputs", "_spec_outputs", "_spec_in", "_spec_out",
-                             "_symbolic_compute_ports", "_output_is_compute"})
+                             "_symbolic_compute_ports", "_output_is_compute", "checkpoint_nodes"})
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16,
           "float64": torch.float64, "int64": torch.int64, "int32": torch.int32, "bool": torch.bool}
@@ -48,6 +61,55 @@ _UNCOMPILED = (_UNSET, None, (), (), ())
 #: How many distinct validated input signatures a graph remembers before it
 #: forgets them all and starts again; bounds the cache under varying batch sizes.
 _MAX_SIGNATURES = 64
+
+
+class InferenceCache:
+    """Stateful cache container managing key-value and recurrent decoding states."""
+
+    def __init__(self) -> None:
+        self._states: dict[str, Any] = {}
+
+    def get(self, node_id: str, default: Any = None) -> Any:
+        """Get cached state for node_id, or default if not present."""
+        return self._states.get(node_id, default)
+
+    def set(self, node_id: str, state: Any) -> None:
+        """Set cached state for node_id."""
+        self._states[node_id] = state
+
+    def reset(self, node_id: str | None = None) -> None:
+        """Reset and clear cached states (or a specific node_id)."""
+        if node_id is None:
+            self._states.clear()
+        else:
+            self._states.pop(node_id, None)
+
+    def __contains__(self, node_id: str) -> bool:
+        return node_id in self._states
+
+    def __len__(self) -> int:
+        return len(self._states)
+
+    def __getitem__(self, node_id: str) -> Any:
+        return self._states[node_id]
+
+    def __setitem__(self, node_id: str, state: Any) -> None:
+        self._states[node_id] = state
+
+    def __delitem__(self, node_id: str) -> None:
+        del self._states[node_id]
+
+    def keys(self):
+        return self._states.keys()
+
+    def values(self):
+        return self._states.values()
+
+    def items(self):
+        return self._states.items()
+
+    def __repr__(self) -> str:
+        return f"InferenceCache({list(self._states.keys())})"
 
 #: How the note HNDL adds to an exception raised inside a node begins.
 _NOTE_PREFIX = "HNDL:"
@@ -210,6 +272,17 @@ def _shape_text(shape: Sequence[Any]) -> str:
 
 
 
+class OutputDict(dict):
+    """A mapping of model outputs that forwards tensor attributes when single-output."""
+
+    def __getattr__(self, name: str):
+        if len(self) == 1:
+            val = next(iter(self.values()))
+            if hasattr(val, name):
+                return getattr(val, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+
 class GraphModule(nn.Module):
     """Execute a frozen graph once per node and return named output tensors.
 
@@ -242,11 +315,12 @@ class GraphModule(nn.Module):
     own checks find.
     """
 
-    def __init__(self, plan, modules, device, receipt, port_orders):
+    def __init__(self, plan, modules, device, receipt, port_orders, checkpoint_nodes=None):
         super().__init__()
         self.plan = plan
         self.nodes = _NodeModules(modules)
         self._runtime_device = device
+        self.checkpoint_nodes = frozenset(checkpoint_nodes or ())
         # The compute dtype the plan was built at, and the one it runs at now:
         # casting the module with .double(), .half() or .to(dtype=...) moves the
         # second without rewriting the build-time declarations below.
@@ -836,14 +910,21 @@ class GraphModule(nn.Module):
             raise self._port_error(port, value, dtype, batch,
                                    f"contract entry {expected!r} is not a batch dimension")
         if value.shape != expected or value.ndim == 0 or value.shape[0] <= 0:
-            if value.ndim == 0:
-                problem = f"expected shape {_contract_text(port[1], batch)}, got a 0-dimensional tensor"
-            elif value.shape[0] <= 0 and value.ndim == len(expected):
-                problem = f"batch size must be positive, got shape {_shape_text(tuple(value.shape))}"
+            if (getattr(self, "_active_cache", None) is not None
+                    and value.ndim == len(expected)
+                    and value.ndim >= 2
+                    and value.shape[0] > 0
+                    and value.shape[-1] == expected[-1]):
+                pass
             else:
-                problem = (f"expected shape {_contract_text(port[1], batch)}, "
-                           f"got {_shape_text(tuple(value.shape))}")
-            raise self._port_error(port, value, dtype, batch, problem)
+                if value.ndim == 0:
+                    problem = f"expected shape {_contract_text(port[1], batch)}, got a 0-dimensional tensor"
+                elif value.shape[0] <= 0 and value.ndim == len(expected):
+                    problem = f"batch size must be positive, got shape {_shape_text(tuple(value.shape))}"
+                else:
+                    problem = (f"expected shape {_contract_text(port[1], batch)}, "
+                               f"got {_shape_text(tuple(value.shape))}")
+                raise self._port_error(port, value, dtype, batch, problem)
         if dtype is not None and value.dtype != dtype:
             raise self._port_error(port, value, dtype, batch,
                                    f"expected dtype {_dtype_text(dtype)}, got {_dtype_text(value.dtype)}")
@@ -868,7 +949,7 @@ class GraphModule(nn.Module):
         raise self._error(f"{self._node_name(node_id)} returned {got}; expected output ports {out_ports}, "
                           "as a tuple or list in that order or a dict with exactly those keys", node_id)
 
-    def _run_checked(self, inputs, compiling):
+    def _run_checked(self, inputs, compiling, cache=None):
         """One call with every port checked before and after its node."""
         if type(inputs) is not tuple:
             inputs = tuple(inputs[n] for n in self._input_names)
@@ -893,9 +974,14 @@ class GraphModule(nn.Module):
                 check(value, expected, dtype, port, batch)
                 bound.append(value)
             if compiling:
-                # No handler for dynamo to trace; a failure while compiling
-                # surfaces as the compiler reports it.
                 result = module(*bound)
+            elif cache is not None and getattr(module, "_supports_inference_cache", False):
+                result = module(*bound, cache=cache, node_id=node_id)
+            elif self.training and node_id in self.checkpoint_nodes:
+                if any(isinstance(a, torch.Tensor) and a.requires_grad for a in bound):
+                    result = torch.utils.checkpoint.checkpoint(module, *bound, use_reentrant=False)
+                else:
+                    result = module(*bound)
             else:
                 try:
                     result = module(*bound)
@@ -906,7 +992,7 @@ class GraphModule(nn.Module):
                     outs, self._split_result(result, out_ports, out_set, node_id)):
                 check(value, expected, dtype, port, batch)
                 values[key] = value
-        outputs = {}
+        outputs = OutputDict()
         for name, ref, expected, dtype, port in output_program:
             value = values[ref]
             check(value, expected, dtype, port, batch)
@@ -929,7 +1015,7 @@ class GraphModule(nn.Module):
             key += (v.shape, v.dtype, v.device)
         return tuple(key)
 
-    def _validate(self, inputs, signature, generation, stores_changed=False):
+    def _validate(self, inputs, signature, generation, stores_changed=False, cache=None):
         """The first call for a signature: check everything, then remember it."""
         if stores_changed or generation != self._state_seen:
             # A parameter, buffer or submodule was registered, removed or
@@ -940,86 +1026,102 @@ class GraphModule(nn.Module):
             self._verify_state("build")
             self._validated = {}
             self._state_seen = generation
-        outputs = self._run_checked(inputs, compiling=False)
+        outputs = self._run_checked(inputs, compiling=False, cache=cache)
         generation = _watch_generation
         self._verify_state("forward")
         self._state_checked(generation)
         validated = self._validated
         if len(validated) >= _MAX_SIGNATURES:
             validated.clear()
-        validated[signature] = True
+        if cache is None:
+            validated[signature] = True
         return outputs
 
-    def _execute(self, inputs, single=False):
+    def _execute(self, inputs, single=False, cache=None):
         if type(inputs) is not tuple:
             inputs = tuple(inputs[n] for n in self._input_names)
-        if _is_compiling():
-            # Traced once per guard set, so the full checks cost nothing per
-            # call there and dynamo turns them into guards.
-            self._verify_state("build")
-            outputs = self._run_checked(inputs, compiling=True)
-            self._verify_state("forward")
-            if single:
-                return next(iter(outputs.values()))
-            return outputs
-        generation = _watch_generation
-        signature = self._signature(inputs)
-        # _record_stores, compared: submodules and empty stores by identity,
-        # the other stores by length and which values are None.
-        same, copies, views, store_lens, tensor_ids, shape = self._stores
+        old_cache = getattr(self, "_active_cache", None)
+        self._active_cache = cache
         try:
-            if same != copies:
-                changed = True
-            else:
-                changed = False
-                for v, expected_len in zip(views, store_lens):
-                    if len(v) != expected_len:
-                        changed = True
-                        break
-                if not changed:
-                    for t, expected_id in zip(_chain(views), tensor_ids):
-                        if id(t) != expected_id:
-                            dtypes_devices = [(x.dtype, x.device) if x is not None else None for x in _chain(views)]
-                            current_shape = [*store_lens, *map(_is, _chain(views), _NONES), *dtypes_devices]
-                            changed = current_shape != shape
-                            break
-        except Exception:  # noqa: BLE001 - a submodule's own __eq__ raised
-            changed = True
-        if changed or generation != self._state_seen or signature not in self._validated:
-            outputs = self._validate(inputs, signature, generation, changed)
-            if single:
-                return next(iter(outputs.values()))
-            return outputs
-        padding, program, output_slots = self._fast
-        values = [*inputs, *padding]
-        try:
-            for module, ins, out, node, to_clear in program:
-                result = (module(values[ins]) if type(ins) is int
-                          else module(*ins(values)) if ins is not None
-                          else module())
-                if out is not None and type(result) is _Tensor:
-                    values[out] = result
-                else:
-                    _, outs, out_ports, out_set, node_id = node
-                    for slot, value in zip(outs, self._split_result(result, out_ports, out_set, node_id)):
-                        values[slot] = value
-                for slot in to_clear:
-                    values[slot] = None
-        except Exception as error:
-            ins, _, _, _, node_id = node
-            leading = values[0]
-            self._annotate_failure(node_id, error, [values[slot] for slot in ins],
-                                   leading.shape[0] if leading.ndim else None, after_validation=True)
-            raise
-        if _watch_generation != generation:
-            # Something registered state while this call ran --- perhaps one
-            # of its own modules. Check it now, as the first call would have.
+            if _is_compiling():
+                # Traced once per guard set, so the full checks cost nothing per
+                # call there and dynamo turns them into guards.
+                self._verify_state("build")
+                outputs = self._run_checked(inputs, compiling=True, cache=cache)
+                self._verify_state("forward")
+                if single:
+                    return next(iter(outputs.values()))
+                return outputs
             generation = _watch_generation
-            self._verify_state("forward")
-            self._state_checked(generation)
-        if single:
-            return values[output_slots[0][1]]
-        return {name: values[slot] for name, slot in output_slots}
+            signature = self._signature(inputs)
+            # _record_stores, compared: submodules and empty stores by identity,
+            # the other stores by length and which values are None.
+            same, copies, views, store_lens, tensor_ids, shape = self._stores
+            try:
+                if same != copies:
+                    changed = True
+                else:
+                    changed = False
+                    for v, expected_len in zip(views, store_lens):
+                        if len(v) != expected_len:
+                            changed = True
+                            break
+                    if not changed:
+                        for t, expected_id in zip(_chain(views), tensor_ids):
+                            if id(t) != expected_id:
+                                dtypes_devices = [(x.dtype, x.device) if x is not None else None for x in _chain(views)]
+                                current_shape = [*store_lens, *map(_is, _chain(views), _NONES), *dtypes_devices]
+                                changed = current_shape != shape
+                                break
+            except Exception:  # noqa: BLE001 - a submodule's own __eq__ raised
+                changed = True
+            if changed or generation != self._state_seen or signature not in self._validated or cache is not None:
+                outputs = self._validate(inputs, signature, generation, changed, cache=cache)
+                if single:
+                    return next(iter(outputs.values()))
+                return outputs
+            padding, program, output_slots = self._fast
+            values = [*inputs, *padding]
+            try:
+                for module, ins, out, node, to_clear in program:
+                    node_id = node[4]
+                    args = (values[ins],) if type(ins) is int else tuple(ins(values)) if ins is not None else ()
+                    if cache is not None and getattr(module, "_supports_inference_cache", False):
+                        result = module(*args, cache=cache, node_id=node_id)
+                    elif self.training and node_id in self.checkpoint_nodes:
+                        if any(isinstance(a, torch.Tensor) and a.requires_grad for a in args):
+                            result = torch.utils.checkpoint.checkpoint(module, *args, use_reentrant=False)
+                        else:
+                            result = module(*args)
+                    else:
+                        result = (module(values[ins]) if type(ins) is int
+                                  else module(*ins(values)) if ins is not None
+                                  else module())
+                    if out is not None and type(result) is _Tensor:
+                        values[out] = result
+                    else:
+                        _, outs, out_ports, out_set, node_id = node
+                        for slot, value in zip(outs, self._split_result(result, out_ports, out_set, node_id)):
+                            values[slot] = value
+                    for slot in to_clear:
+                        values[slot] = None
+            except Exception as error:
+                ins, _, _, _, node_id = node
+                leading = values[0]
+                self._annotate_failure(node_id, error, [values[slot] for slot in ins],
+                                       leading.shape[0] if leading.ndim else None, after_validation=True)
+                raise
+            if _watch_generation != generation:
+                # Something registered state while this call ran --- perhaps one
+                # of its own modules. Check it now, as the first call would have.
+                generation = _watch_generation
+                self._verify_state("forward")
+                self._state_checked(generation)
+            if single:
+                return values[output_slots[0][1]]
+            return OutputDict((name, values[slot]) for name, slot in output_slots)
+        finally:
+            self._active_cache = old_cache
 
     def _bind(self, args, kwargs):
         """Bind runtime tensors to the declared external inputs, in order."""
@@ -1040,9 +1142,73 @@ class GraphModule(nn.Module):
             raise HNDLError("E_BINDING", expected)
         return tuple(bound[n] for n in names)
 
-    def forward(self, *inputs: torch.Tensor, **named: torch.Tensor) -> torch.Tensor | dict[str, torch.Tensor]:
+    def forward(
+        self,
+        *inputs: torch.Tensor,
+        cache: InferenceCache | None = None,
+        **named: torch.Tensor,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        if "cache" in named and cache is None:
+            cache = named.pop("cache")
         single = bool(inputs and not named and self._single_output)
-        return self._execute(self._bind(inputs, named), single=single)
+        return self._execute(self._bind(inputs, named), single=single, cache=cache)
+
+    def param_groups(self, weight_decay: float = 0.01) -> list[dict[str, Any]]:
+        """Partition model parameters into weight-decay and no-decay groups."""
+        all_params = list(self.parameters())
+        if not all_params:
+            return []
+
+        no_decay_node_ops = {
+            "rms_norm", "layer_norm", "group_norm", "batch_norm", "instance_norm",
+            "adaptive_norm", "adaln_zero", "grn", "l2_norm", "dy_tanh",
+            "embedding", "pos_embed", "cls_token", "learned_scale",
+        }
+        no_decay_param_names = {
+            "bias", "A_log", "dt_bias", "D", "alpha", "learned_scale", "gamma", "beta",
+        }
+
+        decay_params: list[torch.nn.Parameter] = []
+        no_decay_params: list[torch.nn.Parameter] = []
+
+        seen = set()
+        for name, param in self.named_parameters():
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+
+            if param.ndim < 2:
+                no_decay_params.append(param)
+                continue
+
+            base_name = name.split(".")[-1]
+            if base_name in no_decay_param_names or base_name.endswith("bias"):
+                no_decay_params.append(param)
+                continue
+
+            is_no_decay_node = False
+            parts = name.split(".")
+            for part in parts:
+                if part.startswith("n_"):
+                    nid = part[2:]
+                    for n in self.plan.nodes:
+                        if n.id == nid:
+                            alias = self.plan._operation_name(n.op) if hasattr(self.plan, "_operation_name") else n.op.split("@")[0]
+                            if alias in no_decay_node_ops:
+                                is_no_decay_node = True
+                            break
+
+            if is_no_decay_node:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+
+        groups = []
+        if decay_params:
+            groups.append({"params": decay_params, "weight_decay": float(weight_decay)})
+        if no_decay_params:
+            groups.append({"params": no_decay_params, "weight_decay": 0.0})
+        return groups
 
     def __getitem__(self, key: str | int | slice) -> nn.Module:
         if isinstance(key, str):
@@ -1113,8 +1279,15 @@ class GraphModule(nn.Module):
 class Network(GraphModule):
     """Tensor facade over the graph: one tensor out, or a dict of named outputs."""
 
-    def forward(self, *inputs: torch.Tensor, **named: torch.Tensor) -> torch.Tensor | dict[str, torch.Tensor]:
-        return self._execute(self._bind(inputs, named), single=self._single_output)
+    def forward(
+        self,
+        *inputs: torch.Tensor,
+        cache: InferenceCache | None = None,
+        **named: torch.Tensor,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        if "cache" in named and cache is None:
+            cache = named.pop("cache")
+        return self._execute(self._bind(inputs, named), single=self._single_output, cache=cache)
 
 
 @contextmanager
@@ -1366,7 +1539,123 @@ def _set_parameter_or_buffer(module: nn.Module, name: str, tensor: torch.Tensor)
     setattr(curr, parts[-1], tensor)
 
 
-def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None):
+def _apply_depth_scaled_init(plan: ResolvedPlan, modules: Mapping[str, nn.Module]) -> None:
+    """Scale residual branch exit projection weights by 1 / sqrt(2 * N_layers)."""
+    add_nodes = [n for n in plan.nodes if n.op.split("@")[0] == "add"]
+    if not add_nodes:
+        return
+
+    node_by_id = {n.id: n for n in plan.nodes}
+    producer_of: dict[str, str] = {}
+    for n in plan.nodes:
+        for port in n.output_shapes:
+            producer_of[f"node:{n.id}/{port}"] = n.id
+            producer_of[f"{n.id}:{port}"] = n.id
+        producer_of[n.id] = n.id
+
+    def get_ancestors(node_id: str) -> set[str]:
+        ancestors = set()
+        queue = [node_id]
+        while queue:
+            curr = queue.pop(0)
+            if curr in node_by_id:
+                for ref in node_by_id[curr].inputs.values():
+                    parent = producer_of.get(ref)
+                    if parent and parent not in ancestors:
+                        ancestors.add(parent)
+                        queue.append(parent)
+        return ancestors
+
+    def has_params(nid: str) -> bool:
+        mod = modules.get(f"n_{nid}")
+        return mod is not None and any(p.numel() > 0 for p in mod.parameters())
+
+    def find_exit_projection(start_node_id: str, shortcut_ancestors: set[str]) -> str | None:
+        curr = start_node_id
+        while curr:
+            if has_params(curr):
+                return curr
+            c_node = node_by_id.get(curr)
+            if not c_node or not c_node.inputs:
+                break
+            next_curr = None
+            for ref in c_node.inputs.values():
+                parent = producer_of.get(ref)
+                if parent and parent not in shortcut_ancestors:
+                    next_curr = parent
+                    break
+            if next_curr is None:
+                ref = next(iter(c_node.inputs.values()))
+                next_curr = producer_of.get(ref)
+            curr = next_curr
+        return None
+
+    exit_projections: list[str] = []
+    for add_node in add_nodes:
+        refs = list(add_node.inputs.values())
+        if len(refs) != 2:
+            continue
+        p0 = producer_of.get(refs[0])
+        p1 = producer_of.get(refs[1])
+        if p0 is None and p1 is not None:
+            exit_node = find_exit_projection(p1, set())
+            if exit_node:
+                exit_projections.append(exit_node)
+        elif p1 is None and p0 is not None:
+            exit_node = find_exit_projection(p0, set())
+            if exit_node:
+                exit_projections.append(exit_node)
+        elif p0 is not None and p1 is not None:
+            anc0 = get_ancestors(p0)
+            anc1 = get_ancestors(p1)
+            if p0 in anc1:
+                exit_node = find_exit_projection(p1, anc0 | {p0})
+                if exit_node:
+                    exit_projections.append(exit_node)
+            elif p1 in anc0:
+                exit_node = find_exit_projection(p0, anc1 | {p1})
+                if exit_node:
+                    exit_projections.append(exit_node)
+            else:
+                if has_params(p1) and not has_params(p0):
+                    exit_node = find_exit_projection(p1, anc0 | {p0})
+                elif has_params(p0) and not has_params(p1):
+                    exit_node = find_exit_projection(p0, anc1 | {p1})
+                else:
+                    exit_node = find_exit_projection(p1, set()) or find_exit_projection(p0, set())
+                if exit_node:
+                    exit_projections.append(exit_node)
+
+    num_layers = len(exit_projections)
+    if num_layers == 0:
+        return
+
+    import math
+    lambda_factor = 1.0 / math.sqrt(2.0 * num_layers)
+
+    for nid in exit_projections:
+        layer = modules.get(f"n_{nid}")
+        if layer is None:
+            continue
+        with torch.no_grad():
+            if hasattr(layer, "weight") and layer.weight is not None:
+                layer.weight.mul_(lambda_factor)
+            elif hasattr(layer, "o_proj") and getattr(layer.o_proj, "weight", None) is not None:
+                layer.o_proj.weight.mul_(lambda_factor)
+            elif hasattr(layer, "out_proj") and getattr(layer.out_proj, "weight", None) is not None:
+                layer.out_proj.weight.mul_(lambda_factor)
+            elif hasattr(layer, "conv3") and getattr(layer.conv3, "weight", None) is not None:
+                layer.conv3.weight.mul_(lambda_factor)
+            elif hasattr(layer, "conv2") and getattr(layer.conv2, "weight", None) is not None:
+                layer.conv2.weight.mul_(lambda_factor)
+            else:
+                for p in reversed(list(layer.parameters())):
+                    if p.ndim >= 2:
+                        p.mul_(lambda_factor)
+                        break
+
+
+def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None, checkpoint=False, init_policy="default"):
     if plan.dtype not in ("float32", "float16", "bfloat16"):
         raise HNDLError("E_SCHEMA", f"Unsupported plan dtype {plan.dtype!r}")
     dtype = DTYPES[plan.dtype]
@@ -1394,6 +1683,27 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
         plan = validate_concrete_plan(plan, registry=registry, limits=limits)
     specs = {node.id: registry.by_identity(node.op) for node in plan.nodes}
     port_orders = {node.id: specs[node.id].input_ports_for(node.args) for node in plan.nodes}
+
+    if checkpoint is True:
+        HEAVY_BLOCKS = {
+            "transformer_block", "moe", "attention", "cross_attention",
+            "latent_attention", "gated_delta_attention", "joint_attention", "mamba2"
+        }
+        checkpoint_nodes = {
+            node.id for node in plan.nodes
+            if (node.op.split("@")[0] in HEAVY_BLOCKS
+                or getattr(specs[node.id], "alias", "") in HEAVY_BLOCKS
+                or getattr(specs[node.id], "identity", "") in HEAVY_BLOCKS)
+        }
+    elif isinstance(checkpoint, (Sequence, set)) and not isinstance(checkpoint, str):
+        checkpoint_nodes = set(checkpoint)
+    elif checkpoint is False or checkpoint is None:
+        checkpoint_nodes = set()
+    else:
+        raise HNDLError("E_ARGUMENT", f"Invalid checkpoint argument {checkpoint!r}; expected bool or sequence of node IDs")
+
+    if init_policy not in ("default", "depth_scaled"):
+        raise HNDLError("E_ARGUMENT", f"Unknown init_policy {init_policy!r}; expected 'default' or 'depth_scaled'")
 
     # Bound registered storage with an allocation-free meta construction first.
     total = 0
@@ -1471,12 +1781,16 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
                     if trainable is not None:
                         parameter.requires_grad_(trainable)
                 modules[f"n_{node.id}"].train(modules[f"n_{node.id}"].training)
+
+        if init_policy == "depth_scaled":
+            _apply_depth_scaled_init(plan, modules)
+
     receipt = {"torch_version": str(torch.__version__), "device": str(device), "dtype": plan.dtype,
                "initialization_seed": initialization_seed,
                "seed_mode": "caller" if initialization_seed is None else "isolated",
                "state_bytes": total}
     cls = Network if facade else GraphModule
-    return cls(plan, modules, device, receipt, port_orders)
+    return cls(plan, modules, device, receipt, port_orders, checkpoint_nodes=checkpoint_nodes)
 
 
 def build(
@@ -1486,9 +1800,19 @@ def build(
     initialization_seed: int | None = None,
     registry: Registry | None = None,
     limits: Mapping[str, int] | None = None,
+    checkpoint: bool | Sequence[str] = False,
+    init_policy: str = "default",
 ) -> GraphModule:
     """Build a concrete plan; forward accepts named inputs and returns a dict."""
-    return _build(plan, device=device, initialization_seed=initialization_seed, registry=registry, limits=limits)
+    return _build(
+        plan,
+        device=device,
+        initialization_seed=initialization_seed,
+        registry=registry,
+        limits=limits,
+        checkpoint=checkpoint,
+        init_policy=init_policy,
+    )
 
 
 def _network(
@@ -1503,13 +1827,23 @@ def _network(
     initialization_seed: int | None = None,
     limits: Mapping[str, int] | None = None,
     input_dtype: str | Mapping[str, str] | None = None,
+    checkpoint: bool | Sequence[str] = False,
+    init_policy: str = "default",
 ) -> Network:
     import hndl
     resolve = getattr(hndl, resolve_name)
     plan = resolve(source, input_shape=input_shape, output_shape=output_shape,
                    dtype=dtype, registry=registry, limits=limits, input_dtype=input_dtype)
-    return _build(plan, device=device, initialization_seed=initialization_seed,
-                  registry=registry, facade=True, limits=limits)
+    return _build(
+        plan,
+        device=device,
+        initialization_seed=initialization_seed,
+        registry=registry,
+        facade=True,
+        limits=limits,
+        checkpoint=checkpoint,
+        init_policy=init_policy,
+    )
 
 
 def network(
@@ -1523,11 +1857,24 @@ def network(
     initialization_seed: int | None = None,
     limits: Mapping[str, int] | None = None,
     input_dtype: str | Mapping[str, str] | None = None,
+    checkpoint: bool | Sequence[str] = False,
+    init_policy: str = "default",
 ) -> Network:
     """Resolve declarative source and return a tensor-in/tensor-out module."""
-    return _network("resolve", source, input_shape=input_shape, output_shape=output_shape,
-                    device=device, dtype=dtype, registry=registry,
-                    initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
+    return _network(
+        "resolve",
+        source,
+        input_shape=input_shape,
+        output_shape=output_shape,
+        device=device,
+        dtype=dtype,
+        registry=registry,
+        initialization_seed=initialization_seed,
+        limits=limits,
+        input_dtype=input_dtype,
+        checkpoint=checkpoint,
+        init_policy=init_policy,
+    )
 
 
 def network_file(
@@ -1541,11 +1888,24 @@ def network_file(
     initialization_seed: int | None = None,
     limits: Mapping[str, int] | None = None,
     input_dtype: str | Mapping[str, str] | None = None,
+    checkpoint: bool | Sequence[str] = False,
+    init_policy: str = "default",
 ) -> Network:
     """Read declarative UTF-8 source and construct its resolved network."""
-    return _network("resolve_file", path, input_shape=input_shape, output_shape=output_shape,
-                    device=device, dtype=dtype, registry=registry,
-                    initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
+    return _network(
+        "resolve_file",
+        path,
+        input_shape=input_shape,
+        output_shape=output_shape,
+        device=device,
+        dtype=dtype,
+        registry=registry,
+        initialization_seed=initialization_seed,
+        limits=limits,
+        input_dtype=input_dtype,
+        checkpoint=checkpoint,
+        init_policy=init_policy,
+    )
 
 
 def network_from_callable(
@@ -1559,11 +1919,24 @@ def network_from_callable(
     initialization_seed: int | None = None,
     limits: Mapping[str, int] | None = None,
     input_dtype: str | Mapping[str, str] | None = None,
+    checkpoint: bool | Sequence[str] = False,
+    init_policy: str = "default",
 ) -> Network:
     """Capture trusted Python exactly once, then construct the resolved network."""
-    return _network("resolve_callable", fn, input_shape=input_shape, output_shape=output_shape,
-                    device=device, dtype=dtype, registry=registry,
-                    initialization_seed=initialization_seed, limits=limits, input_dtype=input_dtype)
+    return _network(
+        "resolve_callable",
+        fn,
+        input_shape=input_shape,
+        output_shape=output_shape,
+        device=device,
+        dtype=dtype,
+        registry=registry,
+        initialization_seed=initialization_seed,
+        limits=limits,
+        input_dtype=input_dtype,
+        checkpoint=checkpoint,
+        init_policy=init_policy,
+    )
 
 
 def load_weights(

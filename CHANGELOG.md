@@ -9,6 +9,16 @@
   - PEP 562 Lazy Loading: Added module `__getattr__` in `hndl.__init__` for lazy loading of `hndl.torch` without eager torch imports.
   - Manifest Exports: Exported `Symbol` and `NodeView` in `hndl.__all__`.
 
+- **Milestone 5: Static Profiling, Visualization, CLI & Training Lifecycle**:
+  - Static Zero-Compute Profiler (`plan.profile()`): Pure Python analytical profiler computing total and active parameter counts across all 84 operators (including routing-aware active count for sparse MoE), analytical forward/training FLOPs (1 MAC = 2 FLOPs), slot-recycled peak activation memory bytes, and KV/recurrent state memory bytes (attention, MLA, KDA, Mamba2) with zero PyTorch allocation.
+  - Mermaid Flowchart Export (`plan.to_mermaid()`): Renders `ResolvedPlan` as clean, shape-annotated Mermaid diagram with styled input/output subgraphs and edge connectivity.
+  - Plan Diffing (`plan.diff(other)`): Structural and semantic comparison between two resolved plans reporting added, removed, and modified nodes, shape deltas, parameter delta, and FLOP delta.
+  - CLI Tooling (`hndl` executable): Implemented command-line entrypoint with `inspect` (with `--sidecar`, `--batch-size`, `--profile`), `mermaid` (with `--out`), and `check` subcommands for validating individual recipe files or directories.
+  - Optimizer Parameter Groups (`model.param_groups(weight_decay=0.01)`): Deterministic partitioning of model parameters into weight decay groups (2D+ weights) and no-decay groups (1D biases, norms, embeddings, scalars).
+  - Selective Activation Checkpointing (`build(..., checkpoint=...)`): Gradient checkpointing support for heavy blocks or user-selected node IDs in training mode.
+  - Graph-Aware Depth-Scaled Initialization (`build(..., init_policy="depth_scaled")`): Topological graph traversal identifying residual branch exit projections and scaling initialization weights by $1/\sqrt{2N_{\text{layers}}}$.
+  - Stateful Autoregressive `InferenceCache`: Cache container supporting autoregressive decoding for attention, MLA, KDA, and Mamba2 with dictionary interface, per-node or full reset, and output attribute forwarding.
+
 - **Milestone 5: Diagnostics & Provenance Chains**:
   - Fuzzy Error Suggestions: Added `difflib.get_close_matches` suggestions across operator aliases in parser and registry, arguments and policies in `normalize_arguments`, undefined variables in `config.py`, parameter targets in `_prepare_parameter_settings`, and node keys in `GraphModule.__getitem__`.
   - Operator Prefix Diagnostic: Added explicit `.hndl` syntax diagnostic directing users to call operators directly without `ops.` prefix.

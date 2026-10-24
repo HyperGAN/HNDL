@@ -493,6 +493,148 @@ class ResolvedPlan(Immutable):
         from .codegen import to_python_source
         return to_python_source(self, class_name=class_name, *args, **kwargs)
 
+    def profile(
+        self,
+        batch_size: int = 1,
+        sequence_lengths: Mapping[str, int] | None = None,
+    ) -> Any:
+        """Evaluate parameter counts, FLOPs, peak memory, and KV state memory statically."""
+        from .profile import profile_plan
+        return profile_plan(self, batch_size=batch_size, sequence_lengths=sequence_lengths)
+
+    def to_mermaid(self) -> str:
+        """Render this plan as a shape-annotated Mermaid flowchart diagram."""
+        lines = ["graph TD", "    subgraph Inputs"]
+        for name, port in self.inputs.items():
+            s = port["shape"] if isinstance(port, Mapping) else port.shape
+            lines.append(f'        in_{name}["{name}<br/>{format_shape(s)}"]')
+        lines.append("    end")
+
+        for node in self.nodes:
+            op_name = self._operation_name(node.op)
+            sanitized = node.id.replace("-", "_").replace(".", "_")
+            in_s = ", ".join(f"{p}:{format_shape(s)}" for p, s in node.input_shapes.items()) if len(node.input_shapes) > 1 else (format_shape(next(iter(node.input_shapes.values()))) if node.input_shapes else "")
+            out_s = ", ".join(f"{p}:{format_shape(s)}" for p, s in node.output_shapes.items()) if len(node.output_shapes) > 1 else (format_shape(next(iter(node.output_shapes.values()))) if node.output_shapes else "")
+            shape_label = f"{in_s} -> {out_s}" if in_s else out_s
+            lines.append(f'    n_{sanitized}["{node.id}: {op_name}<br/>{shape_label}"]')
+
+        lines.append("    subgraph Outputs")
+        for name, port in self.outputs.items():
+            s = port["shape"] if isinstance(port, Mapping) else port.shape
+            lines.append(f'        out_{name}["{name}<br/>{format_shape(s)}"]')
+        lines.append("    end")
+
+        # Edges
+        for node in self.nodes:
+            sanitized = node.id.replace("-", "_").replace(".", "_")
+            for ref in node.inputs.values():
+                if ref.startswith("input:"):
+                    inp_name = ref.removeprefix("input:")
+                    lines.append(f"    in_{inp_name} --> n_{sanitized}")
+                elif ref in self.inputs:
+                    lines.append(f"    in_{ref} --> n_{sanitized}")
+                else:
+                    body = ref.removeprefix("node:")
+                    src_id = (body.split("/")[0] if "/" in body else body.split(":")[0]).replace("-", "_").replace(".", "_")
+                    lines.append(f"    n_{src_id} --> n_{sanitized}")
+
+        for name, port in self.outputs.items():
+            ref = port["ref"] if isinstance(port, Mapping) else port.ref
+            body = ref.removeprefix("node:")
+            src_id = (body.split("/")[0] if "/" in body else body.split(":")[0]).replace("-", "_").replace(".", "_")
+            lines.append(f"    n_{src_id} --> out_{name}")
+
+        return "\n".join(lines) + "\n"
+
+    def diff(self, other: ResolvedPlan) -> PlanDiff:
+        """Compare this plan structurally and semantically against another plan."""
+        return diff_plans(self, other)
+
+
+@dataclass(frozen=True)
+class PlanDiff:
+    """Semantic and structural comparison between two ResolvedPlans."""
+
+    added_nodes: tuple[str, ...]
+    removed_nodes: tuple[str, ...]
+    modified_nodes: Mapping[str, dict[str, Any]]
+    shape_deltas: Mapping[str, tuple[tuple[Any, ...], tuple[Any, ...]]]
+    param_delta: int
+    flop_delta: int
+    same_digest: bool
+
+    @property
+    def identical(self) -> bool:
+        return self.same_digest
+
+    @property
+    def parameter_delta(self) -> int:
+        return self.param_delta
+
+    def summary(self) -> str:
+        """Human-readable multi-line formatted summary of plan diff."""
+        lines = [
+            "============================================================",
+            "                     HNDL Plan Diff                         ",
+            "============================================================",
+            f"  Same Semantic Digest:   {self.same_digest}",
+            f"  Parameter Delta:        {self.param_delta:+d}",
+            f"  FLOP Delta:             {self.flop_delta:+d}",
+            f"  Added Nodes:            {list(self.added_nodes)}",
+            f"  Removed Nodes:          {list(self.removed_nodes)}",
+            f"  Modified Nodes:         {list(self.modified_nodes.keys())}",
+            "============================================================",
+        ]
+        return "\n".join(lines)
+
+    __str__ = summary
+
+
+def diff_plans(plan1: ResolvedPlan, plan2: ResolvedPlan) -> PlanDiff:
+    """Compute semantic and structural differences between plan1 and plan2."""
+    nodes1 = {n.id: n for n in plan1.nodes}
+    nodes2 = {n.id: n for n in plan2.nodes}
+
+    added = tuple(nid for nid in nodes2 if nid not in nodes1)
+    removed = tuple(nid for nid in nodes1 if nid not in nodes2)
+
+    modified: dict[str, dict[str, Any]] = {}
+    shape_deltas: dict[str, tuple[tuple[Any, ...], tuple[Any, ...]]] = {}
+
+    for nid in nodes1:
+        if nid in nodes2:
+            n1 = nodes1[nid]
+            n2 = nodes2[nid]
+            changes: dict[str, Any] = {}
+            if n1.op != n2.op:
+                changes["op"] = (n1.op, n2.op)
+            if n1.args != n2.args:
+                changes["args"] = (dict(n1.args), dict(n2.args))
+            if n1.input_shapes != n2.input_shapes:
+                changes["input_shapes"] = (dict(n1.input_shapes), dict(n2.input_shapes))
+            if n1.output_shapes != n2.output_shapes:
+                changes["output_shapes"] = (dict(n1.output_shapes), dict(n2.output_shapes))
+            if changes:
+                modified[nid] = changes
+
+            out1 = next(iter(n1.output_shapes.values())) if n1.output_shapes else ()
+            out2 = next(iter(n2.output_shapes.values())) if n2.output_shapes else ()
+            if out1 != out2:
+                shape_deltas[nid] = (out1, out2)
+
+    prof1 = plan1.profile(batch_size=1)
+    prof2 = plan2.profile(batch_size=1)
+
+    return PlanDiff(
+        added_nodes=added,
+        removed_nodes=removed,
+        modified_nodes=MappingProxyType(modified),
+        shape_deltas=MappingProxyType(shape_deltas),
+        param_delta=prof2.total_parameters - prof1.total_parameters,
+        flop_delta=prof2.forward_flops - prof1.forward_flops,
+        same_digest=(plan1.semantic_digest == plan2.semantic_digest),
+    )
+
 
 def format_plan_table(plan: ResolvedPlan, label: str) -> str:
     """Render a formatted ASCII table representing a resolved plan."""

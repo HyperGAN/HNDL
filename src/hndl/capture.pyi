@@ -1,9 +1,9 @@
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, overload
 
-from .operator import Operator, Policy
+from .operator import Operator
 from .registry import Registry
-from .types import Graph, Node
+from .types import Graph, Node, ResolvedPlan
 
 class Symbol:
     ref: str

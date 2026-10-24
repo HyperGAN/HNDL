@@ -223,7 +223,7 @@ class Capture:
         ) if (name is not _DEFAULT and isinstance(name, str) and _NODE_ID.fullmatch(name)) else None
 
         if self.registry._identities.get(op.key) is not op:
-            raise _error("E_CAPTURE", _foreign_operator(self.registry, op), source, node=node_context)
+            raise HNDLError("E_CAPTURE", _foreign_operator(self.registry, op))
         policy = kwargs.pop("policy", _DEFAULT)
         construction = {key: kwargs.pop(key) for key in ("init", "trainable") if key in kwargs}
         try:
