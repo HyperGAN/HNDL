@@ -15,6 +15,9 @@ from hndl.errors import HNDLError
 from hndl.registry import Registry
 from hndl.torch import InferenceCache, build
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+EXAMPLES_DIR = REPO_ROOT / "examples" / "networks"
+
 
 # ==============================================================================
 # Feature 38: IDE Typing & Autocompletion
@@ -218,7 +221,7 @@ class TestFeature40StaticProfiler:
         from hndl.__main__ import _load_plan
 
         for recipe in ["mlp", "gpt_tiny", "lenet5"]:
-            plan = _load_plan(pathlib.Path(f"examples/networks/{recipe}.hndl"))
+            plan = _load_plan(EXAMPLES_DIR / f"{recipe}.hndl")
             prof = plan.profile(batch_size=1)
             model_counts = hndl.torch.parameter_counts(plan)
             total_torch = sum(model_counts.values())
@@ -291,41 +294,41 @@ class TestFeature41VisualizationAndDiff:
 
 class TestFeature42CLITooling:
     def test_cli_inspect_basic(self, capsys):
-        exit_code = main(["inspect", "examples/networks/mlp.hndl"])
+        exit_code = main(["inspect", str(EXAMPLES_DIR / "mlp.hndl")])
         assert exit_code == 0
         captured = capsys.readouterr().out
         assert "Network" in captured or "linear" in captured
 
     def test_cli_inspect_with_profile(self, capsys):
-        exit_code = main(["inspect", "examples/networks/mlp.hndl", "--profile", "--batch-size", "4"])
+        exit_code = main(["inspect", str(EXAMPLES_DIR / "mlp.hndl"), "--profile", "--batch-size", "4"])
         assert exit_code == 0
         captured = capsys.readouterr().out
         assert "HNDL Static Plan Profile" in captured
         assert "Total Parameters:" in captured
 
     def test_cli_mermaid(self, capsys):
-        exit_code = main(["mermaid", "examples/networks/mlp.hndl"])
+        exit_code = main(["mermaid", str(EXAMPLES_DIR / "mlp.hndl")])
         assert exit_code == 0
         captured = capsys.readouterr().out
         assert "graph TD" in captured
 
     def test_cli_mermaid_file_output(self, tmp_path):
         out_file = tmp_path / "diagram.mmd"
-        exit_code = main(["mermaid", "examples/networks/mlp.hndl", "--out", str(out_file)])
+        exit_code = main(["mermaid", str(EXAMPLES_DIR / "mlp.hndl"), "--out", str(out_file)])
         assert exit_code == 0
         assert out_file.exists()
         content = out_file.read_text()
         assert "graph TD" in content
 
     def test_cli_check_single_file(self, capsys):
-        exit_code = main(["check", "examples/networks/gpt_tiny.hndl"])
+        exit_code = main(["check", str(EXAMPLES_DIR / "gpt_tiny.hndl")])
         assert exit_code == 0
         captured = capsys.readouterr().out
         assert "gpt_tiny.hndl" in captured
         assert "passed" in captured.lower()
 
     def test_cli_check_directory(self, capsys):
-        exit_code = main(["check", "examples/networks"])
+        exit_code = main(["check", str(EXAMPLES_DIR)])
         assert exit_code == 0
         captured = capsys.readouterr().out
         assert "25 passed, 0 failed" in captured
