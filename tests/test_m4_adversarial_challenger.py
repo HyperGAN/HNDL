@@ -1019,3 +1019,488 @@ out = linear(100, name='out', tie={'weight': 'tok_emb.weight'})
     assert torch.equal(model["tok_emb"].weight, new_weight)
     assert torch.equal(model["out"].weight, new_weight)
 
+
+# ==============================================================================
+# 7. Gate 8 Remediation Adversarial Stress Tests (v10_m4_r2)
+# ==============================================================================
+
+
+@pytest.mark.parametrize(
+    ("source", "blamed", "non_blamed"),
+    [
+        # Constant in first position
+        (
+            """
+D = 64
+D, a, b = split(3)
+""",
+            "D",
+            ["a", "b"],
+        ),
+        # Constant in middle position
+        (
+            """
+D = 64
+x, D, y = split(3)
+""",
+            "D",
+            ["x", "y"],
+        ),
+        # Constant in last position
+        (
+            """
+D = 64
+a, b, c, D = split(4)
+""",
+            "D",
+            ["a", "b", "c"],
+        ),
+        # Constant with interspersed discards
+        (
+            """
+D = 64
+_, _, D, _ = split(4)
+""",
+            "D",
+            ["_"],
+        ),
+        # List unpacking syntax with constant in middle
+        (
+            """
+D = 64
+[x, D, y] = split(3)
+""",
+            "D",
+            ["x", "y"],
+        ),
+        # Multiple constants: collision diagnostic reports the first colliding constant in unpack order
+        (
+            """
+D = 64
+E = 32
+a, D, b, E = split(4)
+""",
+            "D",
+            ["a", "b", "E"],
+        ),
+        (
+            """
+D = 64
+E = 32
+a, E, b, D = split(4)
+""",
+            "E",
+            ["a", "b", "D"],
+        ),
+    ],
+)
+def test_constant_unpacking_rebind_multiple_positions_blames_exact_constant(
+    source: str, blamed: str, non_blamed: list[str]
+) -> None:
+    """Adversarially verify that unpacking with constants at any position (first, middle, last,
+    with discards, list syntax) strictly blames the exact colliding constant name with E_BINDING,
+    and never misattributes the error to non-constant targets.
+    """
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape=("B", 12), output_shape=None)
+    assert exc_info.value.code == "E_BINDING"
+    err_msg = str(exc_info.value)
+    assert f"Constant '{blamed}' cannot be rebound" in err_msg
+    for target in non_blamed:
+        assert f"Constant '{target}'" not in err_msg, (
+            f"Diagnostic improperly blamed non-colliding target '{target}': {err_msg}"
+        )
+
+
+def test_for_loop_tuple_target_constant_rebind_raises_e_binding() -> None:
+    """Adversarially verify that attempting to rebind a constant as a tuple loop target raises E_BINDING."""
+    source = """
+D = 64
+for D in (1, 2, 3):
+    x = linear(x, 16)
+out = linear(x, 8)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 8)})
+    assert exc_info.value.code == "E_BINDING"
+    assert "Constant 'D' cannot be rebound" in str(exc_info.value)
+
+
+def test_macro_def_parameter_collides_with_constant_raises_e_binding() -> None:
+    """Adversarially verify that defining a macro parameter that collides with an existing constant
+    is strictly rejected with E_BINDING at definition time.
+    """
+    source = """
+D = 64
+def block(x, D):
+    return linear(x, D)
+out = block(x, 128)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 128)})
+    assert exc_info.value.code == "E_BINDING"
+    assert "Macro parameter 'D' collides with defined constant" in str(exc_info.value)
+
+
+def test_macro_def_multiple_parameter_collisions_blames_first() -> None:
+    """Adversarially verify that multiple colliding parameters blame the first colliding parameter in order."""
+    source = """
+D = 64
+WIDTH = 128
+def block(x, D, WIDTH):
+    return linear(x, D)
+out = block(x, 64, 128)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 64)})
+    assert exc_info.value.code == "E_BINDING"
+    assert "Macro parameter 'D' collides with defined constant" in str(exc_info.value)
+
+
+def test_macro_formal_parameters_not_constants_strictly_respected() -> None:
+    """Adversarially verify that formal parameters that are not defined as constants strictly
+    respect arguments passed at call time across multiple distinct invocations, and do not
+    interfere with global constants.
+    """
+    source = """
+D = 64
+def block(x, width):
+    h = linear(x, width)
+    return linear(h, D)
+
+h1 = block(x, 128)
+out = block(h1, 256)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 64)})
+    assert len(plan.nodes) == 4
+    # Invocation 1: width=128, D=64
+    assert plan.nodes[0].args["out_features"] == 128
+    assert plan.nodes[1].args["out_features"] == 64
+    # Invocation 2: width=256, D=64
+    assert plan.nodes[2].args["out_features"] == 256
+    assert plan.nodes[3].args["out_features"] == 64
+
+    model = build(plan, device="cpu")
+    x = torch.randn(2, 16)
+    out = model(x)
+    assert out.shape == (2, 64)
+
+
+def test_nested_macro_calls_with_parameters_and_constants() -> None:
+    """Verify deep 3-level nested macro calls correctly propagate parameters and resolve constants."""
+    source = """
+D = 64
+def inner3(x, dim):
+    return linear(x, dim)
+
+def inner2(x, dim):
+    h = inner3(x, dim)
+    return relu(h)
+
+def inner1(x, dim):
+    h = inner2(x, dim)
+    return linear(h, D)
+
+out = inner1(x, 32)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 64)})
+    assert len(plan.nodes) == 3
+    assert plan.nodes[0].args["out_features"] == 32
+    assert plan.nodes[2].args["out_features"] == 64
+
+    model = build(plan, device="cpu")
+    x = torch.randn(2, 16, requires_grad=True)
+    out = model(x)
+    assert out.shape == (2, 64)
+    loss = (out**2).sum()
+    loss.backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+def test_nested_macro_lexical_scoping_parameter_shadowing_isolation() -> None:
+    """Adversarially verify that nested macros using the same formal parameter name 'p'
+    maintain complete frame isolation via stack push/pop.
+    """
+    source = """
+def inner(x, p):
+    return linear(x, p)
+
+def middle(x, p):
+    h = inner(x, 16)
+    return linear(h, p)
+
+def outer(x, p):
+    h = middle(x, 32)
+    return linear(h, p)
+
+out = outer(x, 64)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 8)}, output_shape={"out": ("B", 64)})
+    resolved_dims = [n.args["out_features"] for n in plan.nodes]
+    # inner got p=16, middle restored p=32, outer restored p=64
+    assert resolved_dims == [16, 32, 64]
+
+
+def test_nested_macro_definition_strictly_forbidden() -> None:
+    """Adversarially verify that attempting to define a macro inside a macro is rejected with E_SYNTAX."""
+    source = """
+def outer(x):
+    def inner(y):
+        return linear(y, 16)
+    return inner(x)
+out = outer(x)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 8)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_SYNTAX"
+    assert "Nested macro definitions are not permitted" in str(exc_info.value)
+
+
+def test_macro_backward_autograd_mathematical_parity_vs_pytorch() -> None:
+    """Adversarially verify that macro execution in HNDL has exact numerical parity
+    with a manually written unrolled PyTorch model in both forward output and autograd gradients.
+    """
+    source = """
+def mlp_block(x, hidden_dim, out_dim):
+    h = linear(x, hidden_dim)
+    a = relu(h)
+    return linear(a, out_dim)
+
+h = mlp_block(x, 32, 16)
+out = mlp_block(h, 24, 8)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 8)})
+    model = build(plan, device="cpu")
+
+    class ManualMLP(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc1 = nn.Linear(16, 32)
+            self.fc2 = nn.Linear(32, 16)
+            self.fc3 = nn.Linear(16, 24)
+            self.fc4 = nn.Linear(24, 8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            h = torch.relu(self.fc1(x))
+            h = self.fc2(h)
+            h2 = torch.relu(self.fc3(h))
+            return self.fc4(h2)
+
+    manual = ManualMLP()
+
+    # Synchronize initial parameter weights
+    with torch.no_grad():
+        manual.fc1.weight.copy_(model.nodes["n_mlp_block_0_n0"].weight)
+        manual.fc1.bias.copy_(model.nodes["n_mlp_block_0_n0"].bias)
+        manual.fc2.weight.copy_(model.nodes["n_mlp_block_0_n2"].weight)
+        manual.fc2.bias.copy_(model.nodes["n_mlp_block_0_n2"].bias)
+        manual.fc3.weight.copy_(model.nodes["n_mlp_block_1_n3"].weight)
+        manual.fc3.bias.copy_(model.nodes["n_mlp_block_1_n3"].bias)
+        manual.fc4.weight.copy_(model.nodes["n_mlp_block_1_n5"].weight)
+        manual.fc4.bias.copy_(model.nodes["n_mlp_block_1_n5"].bias)
+
+    x_hndl = torch.randn(4, 16, requires_grad=True)
+    x_manual = x_hndl.clone().detach().requires_grad_(True)
+
+    out_hndl = model(x_hndl)
+    out_manual = manual(x_manual)
+    assert torch.allclose(out_hndl, out_manual, atol=1e-6)
+
+    loss_hndl = (out_hndl**2).sum()
+    loss_manual = (out_manual**2).sum()
+
+    loss_hndl.backward()
+    loss_manual.backward()
+
+    # Check input gradients match
+    assert torch.allclose(x_hndl.grad, x_manual.grad, atol=1e-6)
+
+    # Check parameter gradients match
+    assert torch.allclose(model.nodes["n_mlp_block_0_n0"].weight.grad, manual.fc1.weight.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_mlp_block_0_n0"].bias.grad, manual.fc1.bias.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_mlp_block_0_n2"].weight.grad, manual.fc2.weight.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_mlp_block_0_n2"].bias.grad, manual.fc2.bias.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_mlp_block_1_n3"].weight.grad, manual.fc3.weight.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_mlp_block_1_n3"].bias.grad, manual.fc3.bias.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_mlp_block_1_n5"].weight.grad, manual.fc4.weight.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_mlp_block_1_n5"].bias.grad, manual.fc4.bias.grad, atol=1e-6)
+
+
+def test_loop_and_macro_backward_autograd_mathematical_parity() -> None:
+    """Adversarially verify that loops containing macros have exact autograd gradient flow
+    matching unrolled manual PyTorch models.
+    """
+    source = """
+def res_block(x, hidden_dim):
+    h = linear(x, hidden_dim)
+    h = gelu(h)
+    h = linear(h, 16)
+    return add(x, h)
+
+for _ in range(3):
+    x = res_block(x, 32)
+
+out = linear(x, 8)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 8)})
+    model = build(plan, device="cpu")
+
+    class ManualLoopMacro(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = nn.ModuleList([
+                nn.ModuleDict({"fc1": nn.Linear(16, 32), "fc2": nn.Linear(32, 16)})
+                for _ in range(3)
+            ])
+            self.out = nn.Linear(16, 8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for block in self.blocks:
+                h = torch.nn.functional.gelu(block["fc1"](x))
+                h = block["fc2"](h)
+                x = x + h
+            return self.out(x)
+
+    manual = ManualLoopMacro()
+
+    with torch.no_grad():
+        for i in range(3):
+            fc1 = model.nodes[f"n_res_block_{i}_n{i * 4}"]
+            fc2 = model.nodes[f"n_res_block_{i}_n{i * 4 + 2}"]
+            manual.blocks[i]["fc1"].weight.copy_(fc1.weight)
+            manual.blocks[i]["fc1"].bias.copy_(fc1.bias)
+            manual.blocks[i]["fc2"].weight.copy_(fc2.weight)
+            manual.blocks[i]["fc2"].bias.copy_(fc2.bias)
+        manual.out.weight.copy_(model.nodes["n_n12"].weight)
+        manual.out.bias.copy_(model.nodes["n_n12"].bias)
+
+    x_h = torch.randn(4, 16, requires_grad=True)
+    x_m = x_h.clone().detach().requires_grad_(True)
+
+    out_h = model(x_h)
+    out_m = manual(x_m)
+    assert torch.allclose(out_h, out_m, atol=1e-6)
+
+    loss_h = (out_h**2).sum()
+    loss_m = (out_m**2).sum()
+
+    loss_h.backward()
+    loss_m.backward()
+
+    assert torch.allclose(x_h.grad, x_m.grad, atol=1e-6)
+    for i in range(3):
+        fc1 = model.nodes[f"n_res_block_{i}_n{i * 4}"]
+        fc2 = model.nodes[f"n_res_block_{i}_n{i * 4 + 2}"]
+        assert torch.allclose(fc1.weight.grad, manual.blocks[i]["fc1"].weight.grad, atol=1e-6)
+        assert torch.allclose(fc1.bias.grad, manual.blocks[i]["fc1"].bias.grad, atol=1e-6)
+        assert torch.allclose(fc2.weight.grad, manual.blocks[i]["fc2"].weight.grad, atol=1e-6)
+        assert torch.allclose(fc2.bias.grad, manual.blocks[i]["fc2"].bias.grad, atol=1e-6)
+    assert torch.allclose(model.nodes["n_n12"].weight.grad, manual.out.weight.grad, atol=1e-6)
+
+
+def test_multi_io_macro_backward_autograd_gradient_flow() -> None:
+    """Verify that a macro with multiple outputs supports full autograd backward flow."""
+    source = """
+def dual_head(x, d1, d2):
+    h1 = linear(x, d1)
+    h2 = linear(x, d2)
+    return h1, h2
+
+y1, y2 = dual_head(x, 16, 16)
+y = add(y1, y2)
+z1, z2 = dual_head(y, 8, 8)
+m = mul(z1, z2)
+out = linear(m, 4)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 32)}, output_shape={"out": ("B", 4)})
+    model = build(plan, device="cpu")
+
+    x = torch.randn(3, 32, requires_grad=True)
+    out = model(x)
+    assert out.shape == (3, 4)
+
+    loss = (out**2).sum()
+    loss.backward()
+
+    assert x.grad is not None and torch.isfinite(x.grad).all() and (x.grad.abs().sum() > 0)
+    for name, p in model.named_parameters():
+        assert p.grad is not None, f"{name} grad is None"
+        assert torch.isfinite(p.grad).all(), f"{name} grad not finite"
+        assert p.grad.abs().sum() > 0, f"{name} grad is zero"
+
+
+def test_nested_macro_tuple_loop_autograd_analytical_gradient_parity() -> None:
+    """Verify that nested macros called within tuple loops produce analytical autograd gradients."""
+    source = """
+def scale_block(x, factor):
+    return scale(x, factor)
+
+def residual_block(x, factor):
+    h = scale_block(x, factor)
+    return add(x, h)
+
+for f in (0.5, 0.25, 0.125):
+    x = residual_block(x, f)
+
+out = linear(x, 8)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 8)})
+    model = build(plan, device="cpu")
+
+    x = torch.randn(2, 16, requires_grad=True)
+    out = model(x)
+    loss = out.sum()
+    loss.backward()
+
+    # Theoretical multiplier: (1 + 0.5) * (1 + 0.25) * (1 + 0.125) = 2.109375
+    multiplier = 1.5 * 1.25 * 1.125
+    expected_x_grad = multiplier * model.nodes["n_n6"].weight.sum(dim=0).unsqueeze(0).expand(2, -1)
+    diff = (x.grad - expected_x_grad).abs().max().item()
+    assert diff < 1e-6, f"Empirical grad differs from analytical by {diff}"
+
+
+def test_deep_macro_loop_composition_codegen_autograd() -> None:
+    """Verify that a deep composition of macros, range loops, and constants compiles
+    via to_python_source into a standalone model that runs both forward and backward passes.
+    """
+    source = """
+DEPTH = 2
+INNER_DIM = 16
+
+def mlp(x, hidden):
+    h = linear(x, hidden)
+    h = gelu(h)
+    return linear(h, hidden)
+
+def block(x, hidden):
+    res = x
+    for _ in range(DEPTH):
+        x = mlp(x, hidden)
+    return add(res, x)
+
+for _ in range(2):
+    x = block(x, INNER_DIM)
+
+out = linear(x, 4)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 4)})
+    py_code = plan.to_python_source("DeepCompositionModel")
+
+    ns: dict = {}
+    exec(py_code, ns)
+    model = ns["DeepCompositionModel"]()
+
+    x = torch.randn(4, 16, requires_grad=True)
+    out = model(x)
+    assert out.shape == (4, 4)
+
+    loss = (out**2).sum()
+    loss.backward()
+
+    assert x.grad is not None and torch.isfinite(x.grad).all() and (x.grad.abs().sum() > 0)
+    for name, p in model.named_parameters():
+        assert p.grad is not None, f"{name} grad is None"
+        assert torch.isfinite(p.grad).all(), f"{name} grad not finite"
+        assert p.grad.abs().sum() > 0, f"{name} grad is zero"
+
+
