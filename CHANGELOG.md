@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 (2026-10-23)
 
 - Require patched build tooling (setuptools 84.2.1 and wheel 0.46.2 or newer) to prevent wheel unpack permission changes outside the extraction directory.
 - **Milestone 5 Gate Iteration 1 Remediation**:
