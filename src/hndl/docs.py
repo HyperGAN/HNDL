@@ -170,6 +170,195 @@ def render_networks(directory, registry=None):
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _format_type_annotation(arg_type):
+    from .operator import INTS, PAIR, STRS
+
+    if arg_type is int:
+        return "int"
+    if arg_type is float:
+        return "float"
+    if arg_type is bool:
+        return "bool"
+    if arg_type is str:
+        return "str"
+    if arg_type is PAIR:
+        return "int | tuple[int, int]"
+    if arg_type is INTS:
+        return "int | Sequence[int]"
+    if arg_type is STRS:
+        return "str | Sequence[str]"
+    return "Any"
+
+
+def generate_pyi(registry=None):
+    if registry is None:
+        registry = Registry.builtins()
+
+    lines = [
+        "from collections.abc import Callable, Mapping, Sequence",
+        "from typing import Any, overload",
+        "",
+        "from .operator import Operator, Policy",
+        "from .registry import Registry",
+        "from .types import Graph, Node",
+        "",
+        "class Symbol:",
+        "    ref: str",
+        "    def __init__(self, owner: Capture, ref: str) -> None: ...",
+        "    def __repr__(self) -> str: ...",
+        "",
+        "class Capture:",
+        "    registry: Registry",
+        "    input_shape: tuple[int | str, ...]",
+        "    output_shape: tuple[int | str, ...]",
+        "    dtype: str",
+        "    nodes: list[Node]",
+        "    inputs: dict[str, Symbol]",
+        "    input: Symbol",
+        "    current: Symbol | None",
+        "    def __init__(",
+        "        self,",
+        "        *,",
+        "        input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],",
+        "        output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],",
+        "        dtype: str = ...,",
+        "        registry: Registry | None = ...,",
+        "        frontend: str = ...,",
+        "        limits: Mapping[str, int] | None = ...,",
+        "        input_dtype: str | Mapping[str, str] | None = ...,",
+        "    ) -> None: ...",
+        "    def __enter__(self) -> Capture: ...",
+        "    def __exit__(self, *exc: Any) -> None: ...",
+        "    def emit(",
+        "        self,",
+        "        op: Operator,",
+        "        positional: Sequence[Any],",
+        "        keyword: Mapping[str, Any],",
+        "        *,",
+        "        source: Mapping[str, Any] | None = ...,",
+        "    ) -> Symbol | tuple[Symbol, ...]: ...",
+        "    def finish(self, selected: Any = ...) -> Graph: ...",
+        "",
+        "class OperatorNamespace:",
+        "    def __init__(self, registry: Registry | None = ...) -> None: ...",
+        "    def __repr__(self) -> str: ...",
+        "    def __dir__(self) -> list[str]: ...",
+        "    @staticmethod",
+        "    def scope(prefix: str): ...",
+    ]
+
+    for alias, op in sorted(registry._aliases.items()):
+        ret_type = (
+            "tuple[Symbol, ...]"
+            if (len(op.outputs) > 1 or op.outputs[0].variadic or op.outputs_from is not None)
+            else "Symbol"
+        )
+        doc = f'        """{op.summary}'
+        if op.doc:
+            doc += f"\n\n        {op.doc.strip()}"
+        doc += '\n        """'
+
+        pos_args = []
+        kw_args = []
+        seen_default = False
+        for name, arg in op.args.items():
+            ann = _format_type_annotation(arg.type)
+            if not arg.positional:
+                if arg.has_default:
+                    def_str = f'"{arg.default}"' if isinstance(arg.default, str) else repr(arg.default)
+                    kw_args.append(f"{name}: {ann} = {def_str}")
+                elif arg.inferable:
+                    kw_args.append(f"{name}: {ann} | None = None")
+                else:
+                    kw_args.append(f"{name}: {ann} = ...")
+            else:
+                if arg.has_default:
+                    seen_default = True
+                    def_str = f'"{arg.default}"' if isinstance(arg.default, str) else repr(arg.default)
+                    pos_args.append(f"{name}: {ann} = {def_str}")
+                elif arg.inferable:
+                    seen_default = True
+                    pos_args.append(f"{name}: {ann} | None = None")
+                elif seen_default:
+                    pos_args.append(f"{name}: {ann} = ...")
+                else:
+                    pos_args.append(f"{name}: {ann}")
+
+        common_kw = [
+            "name: str | None = None",
+            "policy: str | None = None",
+            "init: Mapping[str, Any] | None = None",
+            "trainable: Mapping[str, bool] | bool | None = None",
+            "tie: Mapping[str, str] | None = None",
+        ]
+
+        is_unary = len(op.inputs) == 1 and not op.inputs[0].variadic and op.inputs[0].name == "x"
+        is_variadic = bool(op.inputs and op.inputs[0].variadic)
+
+        all_kw = kw_args + common_kw
+
+        if is_unary:
+            p1 = ["self", "x: Symbol", *pos_args]
+            if all_kw:
+                p1 += ["*", *all_kw]
+            p2 = ["self", *pos_args]
+            if all_kw:
+                p2 += ["*", *all_kw]
+
+            lines.append("    @overload")
+            lines.append(f"    def {alias}(" + ", ".join(p1) + f") -> {ret_type}:")
+            lines.append(doc)
+            lines.append("        ...")
+            lines.append("    @overload")
+            lines.append(f"    def {alias}(" + ", ".join(p2) + f") -> {ret_type}:")
+            lines.append(doc)
+            lines.append("        ...")
+        elif is_variadic:
+            p = ["self", "*x: Symbol", *pos_args, *all_kw]
+            lines.append(f"    def {alias}(" + ", ".join(p) + f") -> {ret_type}:")
+            lines.append(doc)
+            lines.append("        ...")
+        else:
+            ports = [f"{port.name}: Symbol" for port in op.inputs]
+            p = ["self", *ports, *pos_args]
+            if all_kw:
+                p += ["*", *all_kw]
+            lines.append(f"    def {alias}(" + ", ".join(p) + f") -> {ret_type}:")
+            lines.append(doc)
+            lines.append("        ...")
+
+    lines.extend([
+        "",
+        "ops: OperatorNamespace",
+        "",
+        "def scope(prefix: str): ...",
+        "",
+        "def capture_callable(",
+        "    fn: Callable[..., Any],",
+        "    *,",
+        "    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],",
+        "    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],",
+        "    dtype: str = 'float32',",
+        "    registry: Registry | None = None,",
+        "    limits: Mapping[str, int] | None = None,",
+        "    input_dtype: str | Mapping[str, str] | None = None,",
+        ") -> Graph: ...",
+        "",
+        "def resolve_callable(",
+        "    fn: Callable[..., Any],",
+        "    *,",
+        "    input_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],",
+        "    output_shape: tuple[int | str, ...] | Mapping[str, tuple[int | str, ...]],",
+        "    dtype: str = 'float32',",
+        "    registry: Registry | None = None,",
+        "    limits: Mapping[str, int] | None = None,",
+        "    input_dtype: str | Mapping[str, str] | None = None,",
+        ") -> ResolvedPlan: ...",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate operator and network documentation from declarations.")
     parser.add_argument("--out", default="docs/operators", help="Output directory for operator pages")
@@ -181,6 +370,8 @@ def main(argv=None):
     pages = generate()
     networks_page = Path(args.networks_out)
     networks_text = render_networks(args.networks) if Path(args.networks).is_dir() else None
+    pyi_file = Path("src/hndl/capture.pyi")
+    pyi_text = generate_pyi()
     if args.check:
         stale = [name for name, text in pages.items()
                  if not (out / name).exists() or (out / name).read_text(encoding="utf-8") != text]
@@ -188,11 +379,13 @@ def main(argv=None):
         if networks_text is not None and (not networks_page.exists()
                                           or networks_page.read_text(encoding="utf-8") != networks_text):
             stale.append(str(networks_page))
+        if not pyi_file.exists() or pyi_file.read_text(encoding="utf-8") != pyi_text:
+            stale.append(str(pyi_file))
         if stale or extra:
             print("Stale generated docs: " + ", ".join(stale + [f"{name} (unexpected)" for name in extra]), file=sys.stderr)
             print("Run `python -m hndl.docs` and commit the result.", file=sys.stderr)
             return 1
-        print(f"{len(pages)} operator pages and {networks_page} are current.")
+        print(f"{len(pages)} operator pages, {networks_page}, and {pyi_file} are current.")
         return 0
     out.mkdir(parents=True, exist_ok=True)
     for name, text in pages.items():
@@ -203,7 +396,9 @@ def main(argv=None):
     if networks_text is not None:
         networks_page.parent.mkdir(parents=True, exist_ok=True)
         networks_page.write_text(networks_text, encoding="utf-8")
-    print(f"Wrote {len(pages)} pages to {out} and {networks_page}")
+    pyi_file.parent.mkdir(parents=True, exist_ok=True)
+    pyi_file.write_text(pyi_text, encoding="utf-8")
+    print(f"Wrote {len(pages)} pages to {out}, {networks_page}, and {pyi_file}")
     return 0
 
 

@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+import inspect
 import re
+import sys
 from typing import TYPE_CHECKING, Any
 
 from .errors import HNDLError, source_location
@@ -320,6 +322,84 @@ class Capture:
                      named_inputs=self.input_contracts, named_outputs=outputs)
 
 
+def _map_arg_type(arg_type: Any) -> Any:
+    from .operator import INTS, PAIR, STRS
+
+    if arg_type is int:
+        return int
+    if arg_type is float:
+        return float
+    if arg_type is bool:
+        return bool
+    if arg_type is str:
+        return str
+    if arg_type is PAIR:
+        return int | tuple[int, int]
+    if arg_type is INTS:
+        return int | Sequence[int]
+    if arg_type is STRS:
+        return str | Sequence[str]
+    return Any
+
+
+def build_operator_signature(op: Operator) -> inspect.Signature:
+    params: list[inspect.Parameter] = []
+    has_required_pos_arg = any(
+        a.positional and not a.has_default and not a.inferable for a in op.args.values()
+    )
+
+    if len(op.inputs) == 1 and not op.inputs[0].variadic and op.inputs[0].name == "x":
+        def_val = inspect.Parameter.empty if has_required_pos_arg else None
+        ann = Symbol if has_required_pos_arg else (Symbol | None)
+        params.append(
+            inspect.Parameter("x", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=def_val, annotation=ann)
+        )
+    elif op.inputs and op.inputs[0].variadic:
+        params.append(
+            inspect.Parameter("x", inspect.Parameter.VAR_POSITIONAL, annotation=Symbol)
+        )
+    else:
+        for port in op.inputs:
+            params.append(
+                inspect.Parameter(port.name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Symbol)
+            )
+
+    seen_default = False if has_required_pos_arg else True
+    for name, arg in op.args.items():
+        type_ann = _map_arg_type(arg.type)
+        if arg.has_default:
+            default_val = arg.default
+            seen_default = True
+        elif arg.inferable:
+            default_val = None
+            type_ann = type_ann | None
+            seen_default = True
+        else:
+            default_val = inspect.Parameter.empty
+
+        if arg.positional and not seen_default:
+            kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
+        elif arg.positional and seen_default and default_val is not inspect.Parameter.empty:
+            kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
+        else:
+            kind = inspect.Parameter.KEYWORD_ONLY
+
+        params.append(inspect.Parameter(name, kind, default=default_val, annotation=type_ann))
+
+    params.append(inspect.Parameter("name", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=str | None))
+    params.append(inspect.Parameter("policy", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=str | None))
+    params.append(inspect.Parameter("init", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=Mapping[str, Any] | None))
+    params.append(inspect.Parameter("trainable", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=Mapping[str, bool] | bool | None))
+    params.append(inspect.Parameter("tie", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=Mapping[str, str] | None))
+
+    ret_type = (
+        tuple[Symbol, ...]
+        if (len(op.outputs) > 1 or op.outputs[0].variadic or op.outputs_from is not None)
+        else Symbol
+    )
+    return inspect.Signature(parameters=params, return_annotation=ret_type)
+
+
 class OperatorNamespace:
     """Attribute factories for symbolic operator calls.
 
@@ -340,6 +420,13 @@ class OperatorNamespace:
     def __repr__(self) -> str:
         return "hndl.ops" if self._registry is None else f"<operators of {self._registry!r}>"
 
+    def __dir__(self) -> list[str]:
+        if self._registry is not None:
+            return sorted(self._registry._aliases.keys())
+        capture = _ACTIVE.get()
+        registry = Registry.builtins() if capture is None else capture.registry
+        return sorted(registry._aliases.keys())
+
     def __getattr__(self, alias: str) -> Callable[..., Any]:
         if alias.startswith("_"):
             raise AttributeError(alias)
@@ -356,9 +443,12 @@ class OperatorNamespace:
             capture = _ACTIVE.get()
             if capture is None:
                 raise HNDLError("E_CAPTURE", "Symbolic operations require an active authoring capture")
-            return capture.emit(op, args, kwargs)
+            lineno = sys._getframe(1).f_lineno
+            return capture.emit(op, args, kwargs, source={"line": lineno})
 
         operation.__name__ = alias
+        operation.__doc__ = op.summary + ("\n\n" + op.doc.strip() if op.doc else "")
+        operation.__signature__ = build_operator_signature(op)
         return operation
 
     @staticmethod
@@ -367,11 +457,19 @@ class OperatorNamespace:
             capture = _ACTIVE.get()
             if capture is None:
                 raise HNDLError("E_CAPTURE", "Symbolic operations require an active authoring capture")
-            # Resolved on every call, so a factory read in one capture and
-            # called in another follows the registry it is called under.
-            return capture.emit(capture.registry.get(alias), args, kwargs)
+            op = capture.registry.get(alias)
+            lineno = sys._getframe(1).f_lineno
+            return capture.emit(op, args, kwargs, source={"line": lineno})
 
         operation.__name__ = alias
+        capture = _ACTIVE.get()
+        reg = Registry.builtins() if capture is None else capture.registry
+        try:
+            op = reg.get(alias)
+            operation.__doc__ = op.summary + ("\n\n" + op.doc.strip() if op.doc else "")
+            operation.__signature__ = build_operator_signature(op)
+        except Exception:
+            pass
         return operation
 
 

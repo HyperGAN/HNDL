@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Milestone 5: DX, IDE Autocomplete & Type Stubs**:
+  - `OperatorNamespace.__dir__`: Added dynamic alias listing enabling tab completion across all 84 registered operators.
+  - Operator Factory Docstrings & Signatures: Attached docstrings and inspect.Signature to dynamic operator factories synthesized in `hndl.ops`.
+  - Type Stub Generator (`src/hndl/capture.pyi`): Generated and verified comprehensive `.pyi` interface stub for `hndl.ops` covering all 84 built-in operators with typed signatures and overloads, verified via `python -m hndl.docs --check`.
+  - PEP 562 Lazy Loading: Added module `__getattr__` in `hndl.__init__` for lazy loading of `hndl.torch` without eager torch imports.
+  - Manifest Exports: Exported `Symbol` and `NodeView` in `hndl.__all__`.
+
 - **Milestone 4 Gate Iteration 1 Remediation**:
   - `codegen.py`: Corrected parameter dictionary lookups in `_format_module_constructor` for `embedding` (`dim`), `layer_norm` (`D`, `affine`, `bias`), and `rms_norm` (`D`, `affine`), enabling zero-dependency standalone instantiation and execution.
   - `codegen.py` Subgraphs & Custom Modules: Applied `textwrap.dedent` to extracted custom module class sources; cleanly embedded composite subgraphs (`Registry.subgraph`) as standalone `Submodel_<alias>` PyTorch classes with zero dependencies on closures and zero indentation errors.

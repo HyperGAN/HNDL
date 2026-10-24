@@ -39,11 +39,14 @@ Repository = "https://github.com/HyperGAN/HNDL"
 Issues = "https://github.com/HyperGAN/HNDL/issues"
 Specification = "https://github.com/HyperGAN/HNDL/blob/master/SPEC.md"
 
+[project.scripts]
+hndl = "hndl.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-hndl = ["py.typed"]
+hndl = ["py.typed", "capture.pyi"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
