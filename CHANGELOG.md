@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Require patched build tooling (setuptools 84.2.1 and wheel 0.46.2 or newer) to prevent wheel unpack permission changes outside the extraction directory.
 - **Milestone 5 Gate Iteration 1 Remediation**:
   - `registry.py`: Removed top-level PyTorch import (`from torch import nn`), deferring `nn` import to `Registry.subgraph`, ensuring that importing `hndl` does not eagerly load PyTorch into `sys.modules` in clean Python processes.
   - PEP 562 Lazy Loading Tests: Added isolated subprocess verification tests to `tests/test_m5_tooling_lifecycle.py` and `tests/e2e/test_v010_e2e.py` certifying that `import hndl` does not introduce `torch` into `sys.modules`.
