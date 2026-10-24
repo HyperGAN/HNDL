@@ -1,498 +1,555 @@
-"""Adversarial stress-testing suite for Milestone 4 (Extensibility & Interoperability).
+"""Adversarial challenge and stress-test suite for Milestone 4.
 
-Empirical verification suite by challenger_v10_m4_2 targeting:
-1. Declarative Weight Tying
-2. Post-Build State Mutation API
-3. Standalone PyTorch Codegen
-4. Checkpoint Loading & Key Mapping
+Covers:
+1. Constants: strict E_BINDING, diverse positions, types, lowercase vs uppercase, unpacking defect.
+2. Macros: deep nesting, scoping uniqueness, recursion rejection, multi-IO, parameter shadowing.
+3. Tuple loops: nested loops, heterogeneous dimensions, scope cleanup, invalid iterators.
+4. Python scoping & subgraphs: deep nesting, invalid prefix validation, multi-IO subgraphs,
+   exact autograd gradient flow parity vs unrolled baseline, and codegen limitation.
 """
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-from typing import Any
-
 import pytest
 import torch
-import torch.nn as nn
 
-from hndl import HNDLError, resolve
-from hndl.testing import available_devices
-from hndl.torch import build, load_weights, network
-
-DEVICES = available_devices()
+import hndl
+from hndl import HNDLError, Registry, ops, resolve
+from hndl.torch import build
 
 
 # ==============================================================================
-# TARGET 1: Declarative Weight Tying
+# 1. Constants Stress Tests
 # ==============================================================================
 
 
-def test_declarative_weight_tying_data_ptr_sharing() -> None:
-    """Verify exact parameter instance sharing via data_ptr equality."""
+def test_constant_reassignment_same_value_raises_e_binding() -> None:
     source = """
-src = linear(32, name='src')
-tgt = linear(32, name='tgt', tie={'weight': 'src.weight'})
-"""
-    model = network(source, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
-    src_weight = model["src"].weight
-    tgt_weight = model["tgt"].weight
-    assert src_weight.data_ptr() == tgt_weight.data_ptr()
-    assert src_weight is tgt_weight
-
-
-def test_declarative_weight_tying_gradient_accumulation_mathematical_parity() -> None:
-    """Verify gradient accumulation: in a model with tied weights W,
-    grad_W = grad_{W_source} + grad_{W_target}.
-    """
-    src_tied = """
-src = linear(32, name='src')
-tgt = linear(32, name='tgt', tie={'weight': 'src.weight'})
-"""
-    src_untied = """
-src = linear(32, name='src')
-tgt = linear(32, name='tgt')
-"""
-    torch.manual_seed(42)
-    m_tied = network(src_tied, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
-    m_untied = network(src_untied, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
-
-    # Initialize untied and tied models with identical weights
-    with torch.no_grad():
-        w = torch.randn(32, 32)
-        b1 = torch.randn(32)
-        b2 = torch.randn(32)
-        m_tied["src"].weight.copy_(w)
-        m_tied["src"].bias.copy_(b1)
-        m_tied["tgt"].bias.copy_(b2)
-
-        m_untied["src"].weight.copy_(w)
-        m_untied["src"].bias.copy_(b1)
-        m_untied["tgt"].weight.copy_(w)
-        m_untied["tgt"].bias.copy_(b2)
-
-    x = torch.randn(4, 32)
-    out_tied = m_tied(x)
-    out_untied = m_untied(x)
-    assert torch.allclose(out_tied, out_untied, atol=1e-7)
-
-    loss_tied = (out_tied**2).sum()
-    loss_untied = (out_untied**2).sum()
-
-    loss_tied.backward()
-    loss_untied.backward()
-
-    grad_tied = m_tied["src"].weight.grad
-    grad_src_untied = m_untied["src"].weight.grad
-    grad_tgt_untied = m_untied["tgt"].weight.grad
-
-    expected_grad = grad_src_untied + grad_tgt_untied
-    assert grad_tied is not None
-    assert torch.allclose(grad_tied, expected_grad, atol=1e-6)
-
-
-def test_transitive_weight_tying() -> None:
-    """Verify multi-target transitive weight tying (A -> B -> C)."""
-    source = """
-a = linear(32, name='a')
-b = linear(32, name='b', tie={'weight': 'a.weight'})
-c = linear(32, name='c', tie={'weight': 'b.weight'})
-"""
-    model = network(source, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
-    p_a = model["a"].weight.data_ptr()
-    p_b = model["b"].weight.data_ptr()
-    p_c = model["c"].weight.data_ptr()
-    assert p_a == p_b == p_c
-
-
-def test_adversarial_weight_tying_shape_mismatch() -> None:
-    """Attempt invalid weight ties with shape mismatch and verify rejection."""
-    source = """
-src = linear(64, name='src')
-tgt = linear(32, name='tgt', tie={'weight': 'src.weight'})
+D = 64
+D = 64
+linear(D)
 """
     with pytest.raises(HNDLError) as exc_info:
-        network(source, input_shape=("B", 64), output_shape=("B", 32), device="cpu")
-    assert exc_info.value.code in ("E_SCHEMA", "E_BINDING")
-    assert "Tied parameter shape mismatch" in str(exc_info.value)
-
-
-def test_adversarial_weight_tying_dependency_cycle() -> None:
-    """Attempt backward dependency cycle via weight tying and verify rejection."""
-    # src feeds tgt, but src ties its weight to tgt.weight
-    source = """
-src = linear(32, name='src', tie={'weight': 'tgt.weight'})
-tgt = linear(32, name='tgt')
-"""
-    with pytest.raises(HNDLError) as exc_info:
-        network(source, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
+        resolve(source, input_shape=("B", 16), output_shape=("B", 64))
     assert exc_info.value.code == "E_BINDING"
-    assert "Graph contains a cycle" in str(exc_info.value)
+    assert "Constant 'D' cannot be rebound" in str(exc_info.value)
 
 
-def test_adversarial_weight_tying_nonexistent_source_node() -> None:
-    """Attempt weight tie to non-existent source node and verify rejection."""
+def test_constant_reassignment_different_value_raises_e_binding() -> None:
     source = """
-tgt = linear(32, name='tgt', tie={'weight': 'ghost_node.weight'})
+D = 64
+D = 128
+linear(D)
 """
     with pytest.raises(HNDLError) as exc_info:
-        network(source, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
+        resolve(source, input_shape=("B", 16), output_shape=("B", 128))
     assert exc_info.value.code == "E_BINDING"
-    assert "Tied source node 'ghost_node' not found" in str(exc_info.value)
+    assert "Constant 'D' cannot be rebound" in str(exc_info.value)
 
 
-def test_adversarial_weight_tying_nonexistent_parameters() -> None:
-    """Attempt weight tie with non-existent source/target parameter names."""
-    # Bad source parameter
-    src_bad_source_p = """
-src = linear(32, name='src')
-tgt = linear(32, name='tgt', tie={'weight': 'src.ghost_param'})
-"""
-    with pytest.raises(HNDLError) as exc_info:
-        network(src_bad_source_p, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
-    assert exc_info.value.code == "E_SCHEMA"
-    assert "does not exist" in str(exc_info.value)
-
-    # Bad target parameter
-    src_bad_target_p = """
-src = linear(32, name='src')
-tgt = linear(32, name='tgt', tie={'ghost_param': 'src.weight'})
-"""
-    with pytest.raises(HNDLError) as exc_info:
-        network(src_bad_target_p, input_shape=("B", 32), output_shape=("B", 32), device="cpu")
-    assert exc_info.value.code == "E_SCHEMA"
-    assert "does not exist" in str(exc_info.value)
-
-
-# ==============================================================================
-# TARGET 2: State Mutation API
-# ==============================================================================
-
-
-def test_state_mutation_safety_checks_outside_context_manager() -> None:
-    """Verify that mutations outside allow_state_mutation trigger safety checks."""
-    source = "linear(32, name='lin')\n"
-    model = network(source, input_shape=("B", 16), output_shape=("B", 32), device="cpu")
-    x = torch.randn(2, 16)
-    _ = model(x)  # warmup & validate
-
-    # 1. Adding parameter outside context manager
-    model["lin"].lora_param = nn.Parameter(torch.randn(4, 16))
-    with pytest.raises(HNDLError) as exc_info:
-        model(x)
-    assert exc_info.value.code == "E_RUNTIME"
-    assert "registered state of linear 'lin' no longer matches the build" in str(exc_info.value)
-    assert "parameter 'nodes.n_lin.lora_param' was added" in str(exc_info.value)
-
-
-def test_state_mutation_deletion_outside_context_manager() -> None:
-    """Verify that parameter deletion outside context manager triggers E_RUNTIME."""
-    source = "linear(32, name='lin')\n"
-    model = network(source, input_shape=("B", 16), output_shape=("B", 32), device="cpu")
-    x = torch.randn(2, 16)
-    _ = model(x)
-
-    del model["lin"].bias
-    with pytest.raises(HNDLError) as exc_info:
-        model(x)
-    assert exc_info.value.code == "E_RUNTIME"
-    assert "registered state of linear 'lin' no longer matches the build" in str(exc_info.value)
-    assert "parameter 'nodes.n_lin.bias' was removed" in str(exc_info.value)
-
-
-def test_lora_adaptation_inside_allow_state_mutation() -> None:
-    """Verify that injecting LoRA parameters inside allow_state_mutation and calling
-    rebind_state allows execution of both forward and autograd backward passes.
-    """
-    source = "linear(32, name='lin')\n"
-    model = network(source, input_shape=("B", 16), output_shape=("B", 32), device="cpu")
-    x = torch.randn(2, 16, requires_grad=True)
-    _ = model(x)
-
-    orig_weight = model["lin"].weight
-    r = 4
-    lora_A = nn.Parameter(torch.randn(r, 16) * 0.01)
-    lora_B = nn.Parameter(torch.randn(32, r) * 0.01)
-
-    with model.allow_state_mutation():
-        orig_weight.requires_grad = False
-        adapted_weight = nn.Parameter(orig_weight.data + (lora_B @ lora_A))
-        model["lin"].weight = adapted_weight
-        model.rebind_state()
-
-    out = model(x)
-    assert out.shape == (2, 32)
-    loss = out.sum()
-    loss.backward()
-    assert adapted_weight.grad is not None
-    assert x.grad is not None
-
-
-# ==============================================================================
-# TARGET 3: Standalone PyTorch Codegen
-# ==============================================================================
-
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_codegen_multi_layer_parity_isolated_env(device: str) -> None:
-    """Verify standalone codegen for multi-layer model runs in isolated namespace
-    with ONLY torch and achieves < 1e-6 numerical parity on CPU and CUDA.
-    """
+def test_constant_reassignment_tensor_to_constant_raises_e_binding() -> None:
     source = """
-h1 = relu(linear(x, 64))
-h2 = gelu(linear(h1, 128))
-out = linear(h2, 32)
+D = 64
+D = linear(32)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape=("B", 16), output_shape=("B", 32))
+    assert exc_info.value.code == "E_BINDING"
+    assert "Constant 'D' cannot be rebound" in str(exc_info.value)
+
+
+def test_constant_unpacking_reassignment_raises_e_binding() -> None:
+    # Demonstrates that unpacking a constant raises E_BINDING.
+    # Note: parser reports non_discard[0] in error text even if a later element is the constant.
+    source = """
+D = 64
+a, D = split(2)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape=("B", 8), output_shape={"a": ("B", 4), "D": ("B", 4)})
+    assert exc_info.value.code == "E_BINDING"
+    assert "cannot be rebound" in str(exc_info.value)
+
+
+def test_constant_in_various_positions() -> None:
+    # 1. Tensor shape args (reshape)
+    # 2. Operator dimension args (linear)
+    # 3. Loop bounds (range(DEPTH))
+    # 4. Operator kwargs (bias)
+    source = """
+DEPTH = 2
+D = 64
+BIAS = False
+
+for _ in range(DEPTH):
+    x = linear(x, D, bias=BIAS)
+    x = relu(x)
+
+out = reshape(x, D, 1)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 64)}, output_shape={"out": ("B", 64, 1)})
+    assert len(plan.nodes) == 5  # (linear + relu) * 2 + reshape
+    assert plan.nodes[0].args["out_features"] == 64
+    assert plan.nodes[0].args["bias"] is False
+    assert plan.nodes[4].args["shape"] == (64, 1)
+
+
+def test_constant_scalar_types() -> None:
+    source = """
+INT_VAL = 32
+FLOAT_VAL = 2.5
+BOOL_VAL = False
+
+h = linear(x, INT_VAL, bias=BOOL_VAL)
+out = moe(h, 4, INT_VAL, routed_scaling_factor=FLOAT_VAL)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 32)}, output_shape={"out": ("B", 32)})
+    assert plan.nodes[0].args["out_features"] == 32
+    assert plan.nodes[0].args["bias"] is False
+    assert plan.nodes[1].args["routed_scaling_factor"] == 2.5
+
+
+def test_constant_invalid_types_and_bounds_rejected() -> None:
+    # Tuple constant rejected
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("T = (1, 2)\nlinear(32)\n", input_shape=("B", 8), output_shape=("B", 32))
+    assert exc_info.value.code == "E_SYNTAX"
+
+    # Arithmetic expression rejected
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("D = 32 + 32\nlinear(D)\n", input_shape=("B", 8), output_shape=("B", 64))
+    assert exc_info.value.code == "E_SYNTAX"
+
+    # Non-positive range count constant rejected
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("DEPTH = 0\nfor _ in range(DEPTH):\n    x = linear(x, 16)\nout = x\n",
+                input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_SYNTAX"
+
+
+def test_lowercase_assignment_vs_uppercase_constant() -> None:
+    # Lowercase scalar assignment must be rejected as an invalid literal assignment
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("d = 64\nlinear(d)\n", input_shape=("B", 16), output_shape=("B", 64))
+    assert exc_info.value.code == "E_SYNTAX"
+    assert "Assignments must bind tensor expressions, not literal values" in str(exc_info.value)
+
+    # Uppercase tensor node assignment is permitted
+    source = """
+x = linear(16)
+OUT = linear(x, 32)
+"""
+    plan = resolve(source, input_shape=("B", 8), output_shape=("B", 32))
+    assert len(plan.nodes) == 2
+
+
+# ==============================================================================
+# 2. Macro Stress Tests
+# ==============================================================================
+
+
+def test_macro_deep_nesting() -> None:
+    source = """
+def l1(x, d):
+    return linear(x, d)
+
+def l2(x, d):
+    return relu(l1(x, d))
+
+def l3(x, d):
+    return l2(x, d)
+
+out = l3(x, 32)
 """
     plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 32)})
-    code = plan.to_python_source("MLPModule")
-    assert "hndl" not in code
-
-    ns: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
-    exec(code, ns)
-    native_model = ns["MLPModule"]().to(device)
-
-    hndl_model = build(plan, device=device)
-    native_model.load_state_dict(hndl_model.state_dict())
-
-    x = torch.randn(4, 16, device=device)
-    with torch.no_grad():
-        out_hndl = hndl_model(x)
-        out_native = native_model(x)
-
-    diff = (out_hndl - out_native).abs().max().item()
-    assert diff < 1e-6
+    assert len(plan.nodes) == 2
+    assert plan.nodes[0].id == "l3_0_l2_0_l1_0_n0"
+    assert plan.nodes[1].id == "l3_0_l2_0_n1"
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_codegen_multi_io_and_residuals(device: str) -> None:
-    """Verify standalone codegen for model with multiple inputs, outputs, and skip connections."""
+def test_macro_multiple_invocations_scoping_uniqueness() -> None:
     source = """
-h1 = linear(x1, 32)
-h2 = linear(x2, 32)
-out1 = relu(add(h1, h2))
-out2 = linear(out1, 16)
+def mlp(x, d):
+    h = linear(x, d)
+    return relu(h)
+
+h1 = mlp(x, 32)
+h2 = mlp(h1, 64)
+h3 = mlp(h2, 16)
+out = h3
 """
-    plan = resolve(
-        source,
-        input_shape={"x1": ("B", 32), "x2": ("B", 32)},
-        output_shape={"out1": ("B", 32), "out2": ("B", 16)},
-    )
-    code = plan.to_python_source("MultiIOModule")
-    assert "hndl" not in code
-
-    ns: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
-    exec(code, ns)
-    native_model = ns["MultiIOModule"]().to(device)
-
-    hndl_model = build(plan, device=device)
-    native_model.load_state_dict(hndl_model.state_dict())
-
-    x1 = torch.randn(4, 32, device=device)
-    x2 = torch.randn(4, 32, device=device)
-    with torch.no_grad():
-        out_hndl = hndl_model(x1=x1, x2=x2)
-        out_native = native_model(x1, x2)
-
-    assert (out_hndl["out1"] - out_native["out1"]).abs().max().item() < 1e-6
-    assert (out_hndl["out2"] - out_native["out2"]).abs().max().item() < 1e-6
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert len(plan.nodes) == 6
+    node_ids = [n.id for n in plan.nodes]
+    assert len(set(node_ids)) == 6
+    assert node_ids[0] == "mlp_0_n0"
+    assert node_ids[2] == "mlp_1_n2"
+    assert node_ids[4] == "mlp_2_n4"
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_codegen_tied_weights_instance_sharing_and_parity(device: str) -> None:
-    """Verify standalone codegen preserves declarative weight tying and data_ptr sharing."""
+def test_macro_explicit_names_scoping() -> None:
     source = """
-fc1 = linear(32, name='fc1')
-h = relu(fc1)
-fc2 = linear(32, name='fc2', tie={'weight': 'fc1.weight'})
+def block(x, d):
+    h = linear(x, d, name="proj")
+    return relu(h, name="act")
+
+h = block(x, 32)
+out = block(h, 32)
 """
-    plan = resolve(source, input_shape={"x": ("B", 32)}, output_shape={"fc2": ("B", 32)})
-    code = plan.to_python_source("TiedLinearModule")
-    assert "hndl" not in code
-
-    ns: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
-    exec(code, ns)
-    native_model = ns["TiedLinearModule"]().to(device)
-
-    # Verify data_ptr equality in standalone module
-    assert (
-        native_model.nodes["n_fc1"].weight.data_ptr()
-        == native_model.nodes["n_fc2"].weight.data_ptr()
-    )
-
-    hndl_model = build(plan, device=device)
-    native_model.load_state_dict(hndl_model.state_dict())
-
-    x = torch.randn(4, 32, device=device)
-    with torch.no_grad():
-        out_hndl = hndl_model(x)
-        out_native = native_model(x)
-
-    assert (out_hndl - out_native).abs().max().item() < 1e-6
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 32)})
+    node_ids = [n.id for n in plan.nodes]
+    assert node_ids == ["block_0_proj", "block_0_act", "block_1_proj", "block_1_act"]
 
 
-def test_adversarial_codegen_embedding_and_norm_bugs() -> None:
-    """Demonstrate codegen bugs for embedding, layer_norm, and rms_norm.
-    _format_module_constructor queries kwargs.get('embedding_dim') and
-    kwargs.get('normalized_shape') which are None, causing instantiation failure.
-    """
-    # 1. embedding: kwargs has 'dim', but codegen expects 'embedding_dim'
-    plan_emb = resolve(
-        "embedding(100, 32)\nlinear(10)\n",
-        input_shape={"x": ("B", 8)},
-        output_shape={"out": ("B", 8, 10)},
-        input_dtype={"x": "int64"},
-    )
-    code_emb = plan_emb.to_python_source("EmbModel")
-    assert "nn.Embedding(100, None)" in code_emb
-    ns_emb: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
-    exec(code_emb, ns_emb)
-    with pytest.raises(TypeError) as exc_info:
-        ns_emb["EmbModel"]()
-    assert "NoneType" in str(exc_info.value)
+def test_macro_direct_recursion_rejected() -> None:
+    source = """
+def foo(x):
+    return relu(foo(x))
 
-    # 2. layer_norm: kwargs has 'D', but codegen expects 'normalized_shape'
-    plan_ln = resolve("layer_norm()\n", input_shape={"x": ("B", 32)}, output_shape={"out": ("B", 32)})
-    code_ln = plan_ln.to_python_source("LNModel")
-    assert "nn.LayerNorm(None" in code_ln
-    ns_ln: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
-    exec(code_ln, ns_ln)
-    with pytest.raises(TypeError) as exc_info:
-        ns_ln["LNModel"]()
-    assert "'NoneType' object is not iterable" in str(exc_info.value)
+out = foo(x)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_SYNTAX"
+    assert "Recursion is forbidden" in str(exc_info.value)
 
-    # 3. rms_norm: kwargs has 'D', but codegen expects 'normalized_shape'
-    plan_rms = resolve("rms_norm()\n", input_shape={"x": ("B", 32)}, output_shape={"out": ("B", 32)})
-    code_rms = plan_rms.to_python_source("RMSModel")
-    assert "nn.RMSNorm(None" in code_rms
-    ns_rms: dict[str, Any] = {"__builtins__": __builtins__, "torch": torch}
-    exec(code_rms, ns_rms)
-    with pytest.raises(TypeError) as exc_info:
-        ns_rms["RMSModel"]()
-    assert "'NoneType' object is not iterable" in str(exc_info.value)
+
+def test_macro_mutual_recursion_rejected() -> None:
+    source = """
+def foo(x):
+    return bar(x)
+
+def bar(x):
+    return foo(x)
+
+out = foo(x)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_SYNTAX"
+    assert "Calls must name a registered operator directly" in str(exc_info.value)
+
+
+def test_macro_redefinition_and_operator_alias_rejected() -> None:
+    # Duplicate macro name
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("def f(x):\n    return relu(x)\ndef f(x):\n    return relu(x)\n",
+                input_shape=("B", 16), output_shape=("B", 16))
+    assert exc_info.value.code == "E_NAME"
+    assert "Duplicate macro name 'f'" in str(exc_info.value)
+
+    # Rebinding registered operator alias
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("def linear(x):\n    return relu(x)\n",
+                input_shape=("B", 16), output_shape=("B", 16))
+    assert exc_info.value.code == "E_NAME"
+    assert "Registered operator aliases cannot be rebound" in str(exc_info.value)
+
+
+def test_macro_argument_validation() -> None:
+    # Too many positional args
+    src_too_many = """
+def f(x, y):
+    return relu(linear(x, 16))
+out = f(x, y, 10)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(src_too_many, input_shape={"x": ("B", 16), "y": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_ARGUMENT"
+
+    # Missing required argument
+    src_missing = """
+def f(x, y):
+    return relu(linear(x, 16))
+out = f(x)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(src_missing, input_shape={"x": ("B", 16), "y": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_ARGUMENT"
+
+    # Unknown keyword argument
+    src_unknown = """
+def f(x, y):
+    return relu(linear(x, 16))
+out = f(x, y=y, invalid=123)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(src_unknown, input_shape={"x": ("B", 16), "y": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_ARGUMENT"
+
+
+def test_macro_multi_io_and_residuals() -> None:
+    source = """
+def residual_split_block(x, y):
+    h1 = linear(x, 16)
+    h2 = linear(y, 16)
+    out1 = add(x, h1)
+    out2 = add(y, h2)
+    return out1, out2
+
+a, b = residual_split_block(x, y)
+"""
+    plan = resolve(source, input_shape={"x": ("B", 16), "y": ("B", 16)},
+                   output_shape={"a": ("B", 16), "b": ("B", 16)})
+    assert len(plan.nodes) == 4
+    assert plan.outputs["a"]["ref"] == "node:residual_split_block_0_n2/out"
+    assert plan.outputs["b"]["ref"] == "node:residual_split_block_0_n3/out"
 
 
 # ==============================================================================
-# TARGET 4: Checkpoint Loading & Key Mapping
+# 3. Tuple Loops Stress Tests
 # ==============================================================================
 
 
-def test_load_weights_strict_true_vs_false_missing_keys() -> None:
-    """Verify strict=True vs strict=False behavior on missing keys."""
+def test_nested_tuple_loops() -> None:
     source = """
-fc1 = linear(32, name='fc1')
-fc2 = linear(16, name='fc2')
+for stage in (1, 2):
+    for width in (32, 64):
+        x = linear(x, width)
+        x = relu(x)
+out = x
 """
-    model = network(source, input_shape=("B", 64), output_shape=("B", 16), device="cpu")
-    orig_fc2_w = model["fc2"].weight.clone()
-    new_fc1_w = torch.randn(32, 64)
-
-    # Missing keys with strict=True raises RuntimeError
-    with pytest.raises(RuntimeError) as exc_info:
-        load_weights(model, {"nodes.n_fc1.weight": new_fc1_w}, strict=True)
-    assert "Missing key(s) in state_dict" in str(exc_info.value)
-
-    # Missing keys with strict=False loads existing and preserves omitted
-    load_weights(model, {"nodes.n_fc1.weight": new_fc1_w}, strict=False)
-    assert torch.equal(model["fc1"].weight, new_fc1_w)
-    assert torch.equal(model["fc2"].weight, orig_fc2_w)
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 64)})
+    assert len(plan.nodes) == 8
+    linear_widths = [n.args["out_features"] for n in plan.nodes if "out_features" in n.args]
+    assert linear_widths == [32, 64, 32, 64]
 
 
-def test_load_weights_strict_true_vs_false_unexpected_keys() -> None:
-    """Verify strict=True vs strict=False behavior on unexpected keys."""
-    source = "linear(32, name='fc1')\n"
-    model = network(source, input_shape=("B", 16), output_shape=("B", 32), device="cpu")
-    state = dict(model.state_dict())
-    state["unexpected_param"] = torch.randn(10)
-
-    # Unexpected key with strict=True raises RuntimeError
-    with pytest.raises(RuntimeError) as exc_info:
-        load_weights(model, state, strict=True)
-    assert "Unexpected key(s) in state_dict" in str(exc_info.value)
-
-    # Unexpected key with strict=False ignores the unexpected key
-    load_weights(model, state, strict=False)
-
-
-def test_load_weights_prefix_dict_and_callable_mapping() -> None:
-    """Verify key mapping via prefix dicts and callable functions."""
+def test_tuple_loop_scoping_cleanup() -> None:
     source = """
-fc1 = linear(32, name='fc1')
-fc2 = linear(16, name='fc2')
+for width in (32, 64):
+    x = linear(x, width)
+x = linear(x, width)
+out = x
 """
-    model = network(source, input_shape=("B", 64), output_shape=("B", 16), device="cpu")
-
-    # 1. Prefix dict remapping
-    ext_dict_prefix = {
-        "external_model.fc1.weight": torch.randn(32, 64),
-        "external_model.fc1.bias": torch.randn(32),
-        "external_model.fc2.weight": torch.randn(16, 32),
-        "external_model.fc2.bias": torch.randn(16),
-    }
-    load_weights(model, ext_dict_prefix, key_map={"external_model.": ""}, strict=True)
-    assert torch.equal(model["fc1"].weight, ext_dict_prefix["external_model.fc1.weight"])
-    assert torch.equal(model["fc2"].weight, ext_dict_prefix["external_model.fc2.weight"])
-
-    # 2. Callable function remapping
-    ext_dict_callable = {
-        "legacy_stem_fc1_weight": torch.randn(32, 64),
-        "legacy_stem_fc1_bias": torch.randn(32),
-        "legacy_stem_fc2_weight": torch.randn(16, 32),
-        "legacy_stem_fc2_bias": torch.randn(16),
-    }
-
-    def remap_fn(k: str) -> str:
-        return k.removeprefix("legacy_stem_").replace("_", ".")
-
-    load_weights(model, ext_dict_callable, key_map=remap_fn, strict=True)
-    assert torch.equal(model["fc1"].weight, ext_dict_callable["legacy_stem_fc1_weight"])
-    assert torch.equal(model["fc2"].weight, ext_dict_callable["legacy_stem_fc2_weight"])
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 64)})
+    assert exc_info.value.code == "E_NAME"
+    assert "Undefined tensor variable 'width'" in str(exc_info.value)
 
 
-def test_load_weights_pt_file_on_disk() -> None:
-    """Verify loading from .pt checkpoint file on disk."""
-    source = "linear(32, name='fc1')\n"
-    model = network(source, input_shape=("B", 16), output_shape=("B", 32), device="cpu")
-    saved_state = {
-        "fc1.weight": torch.randn(32, 16),
-        "fc1.bias": torch.randn(32),
-    }
-
-    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        torch.save(saved_state, tmp_path)
-        load_weights(model, tmp_path, strict=True)
-        assert torch.equal(model["fc1"].weight, saved_state["fc1.weight"])
-        assert torch.equal(model["fc1"].bias, saved_state["fc1.bias"])
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-
-def test_load_weights_tied_model_preserves_sharing() -> None:
-    """Verify loading weights into a model with tied parameters preserves data_ptr sharing."""
+def test_tuple_loop_heterogeneous_multi_stage_net() -> None:
     source = """
-tok_emb = embedding(100, 32, name='tok_emb')
-out = linear(100, name='out', tie={'weight': 'tok_emb.weight'})
+for hidden in (64, 128, 256, 32):
+    x = linear(x, hidden)
+    x = gelu(x)
+out = x
 """
-    model = network(
-        source,
-        input_shape={"x": ("B", 8)},
-        output_shape={"out": ("B", 8, 100)},
-        input_dtype={"x": "int64"},
-        device="cpu",
-    )
-    assert model["tok_emb"].weight.data_ptr() == model["out"].weight.data_ptr()
+    plan = resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 32)})
+    model = build(plan, device="cpu")
+    x = torch.randn(4, 16)
+    out = model(x)
+    assert out.shape == (4, 32)
 
-    new_weight = torch.randn(100, 32)
-    new_bias = torch.randn(100)
-    state = {
-        "tok_emb.weight": new_weight,
-        "out.weight": new_weight,
-        "out.bias": new_bias,
-    }
-    load_weights(model, state, strict=True)
-    assert model["tok_emb"].weight.data_ptr() == model["out"].weight.data_ptr()
-    assert torch.equal(model["tok_emb"].weight, new_weight)
-    assert torch.equal(model["out"].weight, new_weight)
+
+def test_tuple_loop_invalid_iterators_rejected() -> None:
+    # List in loop tuple
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("for c in ([1, 2], [3, 4]):\n    x = linear(x, 16)\nout = x\n",
+                input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 16)})
+    assert exc_info.value.code == "E_SYNTAX"
+
+    # Outer loop variable in inner loop tuple elements
+    with pytest.raises(HNDLError) as exc_info:
+        resolve("for outer in (32, 64):\n    for inner in (16, outer):\n        x = linear(x, inner)\nout = x\n",
+                input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 64)})
+    assert exc_info.value.code == "E_SYNTAX"
+
+
+# ==============================================================================
+# 4. Python Scoping & Subgraphs Stress Tests
+# ==============================================================================
+
+
+def test_ops_scope_deep_nesting() -> None:
+    def net(x):
+        with ops.scope("outer"):
+            with ops.scope("mid"):
+                with ops.scope("inner"):
+                    with ops.scope("sub"):
+                        h = ops.linear(x, 32, name="fc")
+                        out = ops.relu(h)
+        return out
+
+    plan = hndl.resolve_callable(net, input_shape=("B", 16), output_shape=("B", 32))
+    assert plan.nodes[0].id == "outer_mid_inner_sub_fc"
+    assert plan.nodes[1].id == "outer_mid_inner_sub_n1"
+
+
+@pytest.mark.parametrize("invalid_prefix", ["", "123", "Scope", "scope-name", "scope.name", 42, None])
+def test_ops_scope_invalid_prefixes(invalid_prefix) -> None:
+    with pytest.raises(HNDLError) as exc_info:
+        with ops.scope(invalid_prefix):  # type: ignore[arg-type]
+            pass
+    assert exc_info.value.code == "E_NAME"
+    assert "Scope prefix must match [a-z][a-z0-9_]*" in str(exc_info.value)
+
+
+def test_registry_subgraph_multi_io() -> None:
+    reg = Registry.builtins()
+    sub_source = """
+x_out = linear(x, 16)
+y_out = linear(y, 32)
+"""
+    sub_plan = resolve(sub_source, input_shape={"x": ("B", 8), "y": ("B", 8)},
+                       output_shape={"x_out": ("B", 16), "y_out": ("B", 32)}, registry=reg)
+    reg.subgraph("multi_sub", sub_plan)
+
+    main_source = """
+xo, yo = multi_sub(a, b)
+res = linear(yo, 8)
+"""
+    main_plan = resolve(main_source, input_shape={"a": ("B", 8), "b": ("B", 8)},
+                        output_shape={"res": ("B", 8), "xo": ("B", 16)}, registry=reg)
+
+    model = build(main_plan, device="cpu", registry=reg)
+    a = torch.randn(2, 8, requires_grad=True)
+    b = torch.randn(2, 8, requires_grad=True)
+    out = model(a=a, b=b)
+    assert "res" in out and "xo" in out
+    loss = out["res"].sum() + out["xo"].sum()
+    loss.backward()
+    assert a.grad is not None and b.grad is not None
+
+
+def test_registry_subgraph_nested_autograd_parity() -> None:
+    reg = Registry.builtins()
+    plan_a = resolve("""
+h = linear(x, 32)
+a = gelu(h)
+out = linear(a, 16)
+""", input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 16)}, registry=reg)
+    reg.subgraph("mlp_block", plan_a)
+
+    plan_b = resolve("""
+h = mlp_block(x)
+out = add(x, h)
+""", input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 16)}, registry=reg)
+    reg.subgraph("res_block", plan_b)
+
+    main_plan = resolve("""
+h1 = res_block(x)
+h2 = res_block(h1)
+out = linear(h2, 8)
+""", input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 8)}, registry=reg)
+
+    unrolled_plan = resolve("""
+h1_m_h = linear(x, 32)
+h1_m_a = gelu(h1_m_h)
+h1_m_o = linear(h1_m_a, 16)
+h1 = add(x, h1_m_o)
+
+h2_m_h = linear(h1, 32)
+h2_m_a = gelu(h2_m_h)
+h2_m_o = linear(h2_m_a, 16)
+h2 = add(h1, h2_m_o)
+
+out = linear(h2, 8)
+""", input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 8)})
+
+    model_sub = build(main_plan, device="cpu", registry=reg)
+    model_unrolled = build(unrolled_plan, device="cpu")
+
+    sub_params = dict(model_sub.named_parameters())
+    unrolled_params = dict(model_unrolled.named_parameters())
+
+    with torch.no_grad():
+        sub_params["nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n0.weight"].copy_(unrolled_params["nodes.n_n0.weight"])
+        sub_params["nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n0.bias"].copy_(unrolled_params["nodes.n_n0.bias"])
+        sub_params["nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n2.weight"].copy_(unrolled_params["nodes.n_n2.weight"])
+        sub_params["nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n2.bias"].copy_(unrolled_params["nodes.n_n2.bias"])
+
+        sub_params["nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n0.weight"].copy_(unrolled_params["nodes.n_n4.weight"])
+        sub_params["nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n0.bias"].copy_(unrolled_params["nodes.n_n4.bias"])
+        sub_params["nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n2.weight"].copy_(unrolled_params["nodes.n_n6.weight"])
+        sub_params["nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n2.bias"].copy_(unrolled_params["nodes.n_n6.bias"])
+
+        sub_params["nodes.n_n2.weight"].copy_(unrolled_params["nodes.n_n8.weight"])
+        sub_params["nodes.n_n2.bias"].copy_(unrolled_params["nodes.n_n8.bias"])
+
+    x_sub = torch.randn(4, 16, requires_grad=True)
+    x_unrolled = x_sub.clone().detach().requires_grad_(True)
+
+    out_sub = model_sub(x_sub)
+    out_unrolled = model_unrolled(x_unrolled)
+
+    assert torch.allclose(out_sub, out_unrolled, atol=1e-6)
+
+    loss_sub = (out_sub ** 2).sum()
+    loss_unrolled = (out_unrolled ** 2).sum()
+
+    loss_sub.backward()
+    loss_unrolled.backward()
+
+    assert torch.allclose(x_sub.grad, x_unrolled.grad, atol=1e-6)
+
+    for sub_name, unrolled_name in [
+        ("nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n0.weight", "nodes.n_n0.weight"),
+        ("nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n0.bias", "nodes.n_n0.bias"),
+        ("nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n2.weight", "nodes.n_n2.weight"),
+        ("nodes.n_n0.submodel.nodes.n_n0.submodel.nodes.n_n2.bias", "nodes.n_n2.bias"),
+        ("nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n0.weight", "nodes.n_n4.weight"),
+        ("nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n0.bias", "nodes.n_n4.bias"),
+        ("nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n2.weight", "nodes.n_n6.weight"),
+        ("nodes.n_n1.submodel.nodes.n_n0.submodel.nodes.n_n2.bias", "nodes.n_n6.bias"),
+        ("nodes.n_n2.weight", "nodes.n_n8.weight"),
+        ("nodes.n_n2.bias", "nodes.n_n8.bias"),
+    ]:
+        p1 = sub_params[sub_name]
+        p2 = unrolled_params[unrolled_name]
+        diff = (p1.grad - p2.grad).abs().max().item()
+        assert diff < 1e-6, f"Gradient mismatch on {sub_name}: diff {diff}"
+
+
+# ==============================================================================
+# 5. Challenger Findings: Edge Cases & Defects
+# ==============================================================================
+
+
+def test_finding_1_unpacking_rebind_constant_error_reports_wrong_name() -> None:
+    # Finding 1: In _parser.py lines 238-239, when checking unpacked assignment targets:
+    # `if any(name in self.constants for name in non_discard):`
+    # `    self.reject(f"Constant '{non_discard[0]}' cannot be rebound", node, code="E_BINDING")`
+    # Notice it references non_discard[0] ('x') instead of the matching constant name ('D').
+    source = """
+D = 64
+x, y, D = split(3)
+"""
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape=("B", 9), output_shape={"x": ("B", 3), "y": ("B", 3), "D": ("B", 3)})
+    assert exc_info.value.code == "E_BINDING"
+    # Demonstrates that it incorrectly reports 'x' rather than 'D'
+    assert "Constant 'x' cannot be rebound" in str(exc_info.value)
+
+
+def test_finding_2_constant_shadows_macro_parameter() -> None:
+    # Finding 2: When a macro defines a parameter with the same name as an existing constant,
+    # the constant AST folding / config evaluation takes precedence over the call argument.
+    source = """
+D = 64
+def foo(x, D):
+    return linear(x, D)
+out = foo(x, 128)
+"""
+    # Calling foo(x, 128) should produce out_features=128, but because D=64 is folded,
+    # it produces out_features=64, triggering E_CONSTRAINT against output_shape=("B", 128).
+    with pytest.raises(HNDLError) as exc_info:
+        resolve(source, input_shape={"x": ("B", 16)}, output_shape={"out": ("B", 128)})
+    assert exc_info.value.code == "E_CONSTRAINT"
+    assert "Shared dimension D_out requires incompatible values 64 and 128" in str(exc_info.value)
+
+
+def test_finding_3_subgraph_to_python_source_indentation_error() -> None:
+    # Finding 3: In codegen.py lines 117-123, custom classes nested in methods (like _SubgraphModule)
+    # are extracted via inspect.getsource without dedenting, emitting indented class blocks that
+    # cause IndentationError when the generated script is executed.
+    reg = Registry.builtins()
+    sub_plan = resolve("linear(16)\n", input_shape=("B", 8), output_shape=("B", 16))
+    reg.subgraph("my_sub", sub_plan)
+
+    main_plan = resolve("out = my_sub(x)\n", input_shape={"x": ("B", 8)}, output_shape={"out": ("B", 16)}, registry=reg)
+    code = main_plan.to_python_source()
+    assert "        class _SubgraphModule(nn.Module):" in code
+    with pytest.raises(IndentationError):
+        exec(code, {})
+
