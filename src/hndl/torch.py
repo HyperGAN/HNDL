@@ -1052,7 +1052,15 @@ class GraphModule(nn.Module):
                 for n in self.plan.nodes:
                     if n.source and n.source.get("binding") == key:
                         return self.nodes[f"n_{n.id}"]
-                raise KeyError(key) from None
+                available = [n.id for n in self.plan.nodes]
+                for n in self.plan.nodes:
+                    if n.source and n.source.get("binding"):
+                        available.append(n.source["binding"])
+                import difflib
+
+                matches = difflib.get_close_matches(key, available, n=1)
+                suggestion = f". Did you mean {matches[0]!r}?" if matches else ""
+                raise KeyError(f"{key}{suggestion}") from None
         if not self._chain:
             raise TypeError("Branched graphs support node-name lookup only")
         layers = tuple(self.nodes.values())
@@ -1272,7 +1280,14 @@ def _prepare_parameter_settings(layer, node, dtype):
     for code, assignments in (("E_INITIALIZATION", initialization), ("E_TRAINABILITY", trainability)):
         for name in sorted(assignments):
             if name not in parameters:
-                detail = "is a buffer, not a parameter" if name in buffers else "is not a registered parameter"
+                if name in buffers:
+                    detail = "is a buffer, not a parameter"
+                else:
+                    import difflib
+
+                    matches = difflib.get_close_matches(name, parameters.keys(), n=1)
+                    suggestion = f". Did you mean {matches[0]!r}?" if matches else ""
+                    detail = f"is not a registered parameter{suggestion}"
                 raise HNDLError(code, f"Parameter target {name!r} {detail}", node=node.id)
 
     by_id, names, storage_groups, buffer_storages = {}, {}, {}, set()

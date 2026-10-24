@@ -151,7 +151,8 @@ class _Interpreter:
             self.explicit_names.add(name)
             return name
         suffix = "_".join(str(index) for index, _ in self.iterations)
-        node_id = name + suffix
+        separator = "_" if (name and name[-1].isdigit()) else ""
+        node_id = f"{name}{separator}{suffix}"
         if node_id in self.capture._ids:
             earlier = self.suffixed.get(node_id)
             if earlier is not None:
@@ -175,7 +176,11 @@ class _Interpreter:
                 return self.locals[name]
             if name in self.constants:
                 return self.constants[name]
-            raise _error("E_NAME", f"Undefined tensor variable {name!r}", self.where(expression["source"]))
+            import difflib
+            candidates = list(self.locals.keys()) + list(self.constants.keys())
+            matches = difflib.get_close_matches(name, candidates, n=1)
+            suggestion = f". Did you mean {matches[0]!r}?" if matches else ""
+            raise _error("E_NAME", f"Undefined tensor variable {name!r}{suggestion}", self.where(expression["source"]))
         if kind == "literal":
             return expression["value"]
         if kind in ("tuple", "list", "tensor_tuple"):

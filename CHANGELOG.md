@@ -9,6 +9,13 @@
   - PEP 562 Lazy Loading: Added module `__getattr__` in `hndl.__init__` for lazy loading of `hndl.torch` without eager torch imports.
   - Manifest Exports: Exported `Symbol` and `NodeView` in `hndl.__all__`.
 
+- **Milestone 5: Diagnostics & Provenance Chains**:
+  - Fuzzy Error Suggestions: Added `difflib.get_close_matches` suggestions across operator aliases in parser and registry, arguments and policies in `normalize_arguments`, undefined variables in `config.py`, parameter targets in `_prepare_parameter_settings`, and node keys in `GraphModule.__getitem__`.
+  - Operator Prefix Diagnostic: Added explicit `.hndl` syntax diagnostic directing users to call operators directly without `ops.` prefix.
+  - Solver Shape Provenance: Implemented origin tracking in `_Solver`, reporting establishing origin labels and full conflicting shapes in `E_CONSTRAINT` and `E_RESHAPE`.
+  - Loop Naming Separation: Separated digit-ending node names from loop iteration indices using an underscore (`pwconv1_0`).
+  - Caller Line Number Capture: Recorded caller line numbers (`sys._getframe(1).f_lineno`) during native Python capture.
+
 - **Milestone 4 Gate Iteration 1 Remediation**:
   - `codegen.py`: Corrected parameter dictionary lookups in `_format_module_constructor` for `embedding` (`dim`), `layer_norm` (`D`, `affine`, `bias`), and `rms_norm` (`D`, `affine`), enabling zero-dependency standalone instantiation and execution.
   - `codegen.py` Subgraphs & Custom Modules: Applied `textwrap.dedent` to extracted custom module class sources; cleanly embedded composite subgraphs (`Registry.subgraph`) as standalone `Submodel_<alias>` PyTorch classes with zero dependencies on closures and zero indentation errors.

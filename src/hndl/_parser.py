@@ -427,6 +427,8 @@ class Validator:
                 return {"kind": "constant", "id": node.id, "value": self.constants[node.id], "source": self.location(node)}
             return {"kind": "name", "id": node.id, "source": self.location(node)}
         if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "ops":
+                self.reject(f"In .hndl configuration, call operators directly ('{node.func.attr}(...)') without 'ops.' prefix", node)
             if not isinstance(node.func, ast.Name):
                 self.reject("Calls must name a registered operator directly", node)
             alias = node.func.id
@@ -440,7 +442,10 @@ class Validator:
                                    for keyword in node.keywords],
                         "source": self.location(node)}
             if alias not in self.aliases:
-                self.reject("Calls must name a registered operator directly", node)
+                import difflib
+                matches = difflib.get_close_matches(alias, sorted(self.aliases), n=1)
+                suggestion = f". Did you mean {matches[0]!r}?" if matches else ""
+                self.reject(f"Calls must name a registered operator directly: unknown operator {alias!r}{suggestion}", node)
             if any(isinstance(arg, ast.Starred) for arg in node.args):
                 self.reject("Star argument expansion is not permitted", node)
             self.keywords(node)

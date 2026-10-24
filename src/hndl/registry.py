@@ -95,7 +95,10 @@ class Registry:
         try:
             return self._aliases[alias]
         except (KeyError, TypeError):
-            raise HNDLError("E_OPERATOR", f"Unknown operator alias {alias!r}; register it explicitly") from None
+            import difflib
+            matches = difflib.get_close_matches(str(alias), self._aliases.keys(), n=1) if isinstance(alias, str) else []
+            suggestion = f". Did you mean {matches[0]!r}?" if matches else ""
+            raise HNDLError("E_OPERATOR", f"Unknown operator alias {alias!r}; register it explicitly{suggestion}") from None
 
     def by_identity(self, identity):
         try:
@@ -296,11 +299,22 @@ def normalize_arguments(op, positional, kwargs, policy=None):
             args[name] = value
     unknown = set(args) - set(op.args)
     if unknown:
-        raise HNDLError("E_ARGUMENT", f"Unknown arguments for {op.alias}: {', '.join(sorted(unknown))}")
+        import difflib
+        suggestions = []
+        for u in sorted(unknown):
+            m = difflib.get_close_matches(str(u), op.args.keys(), n=1)
+            if m:
+                suggestions.append(f"'{u}' (did you mean '{m[0]}'?)")
+            else:
+                suggestions.append(f"'{u}'")
+        raise HNDLError("E_ARGUMENT", f"Unknown arguments for {op.alias}: {', '.join(suggestions)}")
     if policy is not None:
         profile = op.policies.get(policy) if type(policy) is str else None
         if profile is None:
-            raise HNDLError("E_POLICY_CONFLICT", f"Policy {policy!r} does not apply to {op.key}")
+            import difflib
+            matches = difflib.get_close_matches(str(policy), op.policies.keys(), n=1) if isinstance(policy, str) else []
+            suggestion = f". Did you mean policy={matches[0]!r}?" if matches else ""
+            raise HNDLError("E_POLICY_CONFLICT", f"Policy {policy!r} does not apply to {op.key}{suggestion}")
         for name, value in profile.requires.items():
             expected = op.args[name].validate(value, name)
             if name in args:

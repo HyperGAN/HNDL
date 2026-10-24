@@ -256,6 +256,13 @@ class _Solver:
         # The batch entry every port of the node being solved shares, unless the
         # operator declares that it moves tensors across the batch axis itself.
         self.node_batch = None
+        self.origins = {}
+        for name, entry in graph.inputs.items():
+            for axis in range(len(entry["shape"])):
+                self.origins[(f"input:{name}", axis)] = f"external input contract '{name}'"
+        for name, entry in graph.outputs.items():
+            for axis in range(len(entry["shape"])):
+                self.origins[(entry["ref"], axis)] = f"external output contract '{name}'"
         self.shapes = {f"input:{name}": list(entry["shape"]) for name, entry in graph.inputs.items()}
         self.args = {node.id: dict(node.args) for node in nodes}
         self.changed = False
@@ -291,21 +298,32 @@ class _Solver:
         old = self.shapes.get(ref)
         if old is None:
             self.shapes[ref] = values
+            origin = f"node '{self.node.id}' ({self.specs[self.node.id].alias})" if self.node else "contract"
+            for axis, val in enumerate(values):
+                if val is not None and (ref, axis) not in self.origins:
+                    self.origins[(ref, axis)] = origin
             self.changed = True
             return
         if len(old) != len(values):
-            self.error(code, f"Rank conflict for {ref}: {len(old)} versus {len(values)}")
+            old_orig = self.origins.get((ref, 0), "existing contract")
+            new_orig = f"node '{self.node.id}' ({self.specs[self.node.id].alias})" if self.node else "incoming contract"
+            self.error(code, f"Rank conflict for {ref}: {len(old)} (established by {old_orig}) versus {len(values)} (required by {new_orig}); full shapes: {format_shape(old)} vs {format_shape(values)}")
         for index, value in enumerate(values):
             if value is None:
                 continue
             if old[index] is None:
                 old[index] = value
+                self.origins[(ref, index)] = (
+                    f"node '{self.node.id}' ({self.specs[self.node.id].alias})" if self.node else "contract"
+                )
                 self.changed = True
             elif old[index] != value:
+                old_orig = self.origins.get((ref, index), "existing contract")
+                new_orig = f"node '{self.node.id}' ({self.specs[self.node.id].alias})" if self.node else "incoming contract"
                 if index == 0:
-                    self.error(code, f"Batch {old[index]!r} at {ref} conflicts with required {value!r}")
+                    self.error(code, f"Batch {old[index]!r} (established by {old_orig}) at {ref} conflicts with required {value!r} (required by {new_orig}); full shapes: {format_shape(old)} vs {format_shape(values)}")
                 else:
-                    self.error(code, f"Dimension {index} at {ref}: {old[index]} conflicts with required {value}")
+                    self.error(code, f"Dimension {index} at {ref}: {old[index]} (established by {old_orig}) conflicts with required {value} (required by {new_orig}); full shapes: {format_shape(old)} vs {format_shape(values)}")
         merged_known = [v for v in old[1:] if v is not None]
         if prod(merged_known) > self.limits["max_elements"]:
             self.error("E_RESOURCE", f"Tensor {ref} exceeds max_elements per example")
