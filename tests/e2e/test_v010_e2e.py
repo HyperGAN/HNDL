@@ -86,15 +86,11 @@ def check_b01() -> None:
 
 
 def check_b04() -> None:
-    """Skip test if B-04 (grn float16 overflow) is pending M1 remediation."""
-    try:
-        from hndl.operators.grn import GRN
-        g = GRN(32).half()
-        x = torch.randn(1, 32, 32, 32, dtype=torch.float16) * 10.0
-        if not g(x).isfinite().all():
-            pytest.skip("B-04 (grn float16 overflow) pending M1 remediation")
-    except Exception:
-        pytest.skip("B-04 pending M1 remediation")
+    """Verify B-04 (grn float16 overflow) is remediated."""
+    from hndl.operators.grn import GRN
+    g = GRN(C=32).half()
+    x = torch.randn(1, 32, 32, 32, dtype=torch.float16) * 10.0
+    assert g(x).isfinite().all()
 
 
 def check_b06() -> None:
@@ -234,8 +230,8 @@ class TestTier1FeatureCoverage:
 
         # SinusoidalEmbed high timestep numerical stability
         source_sin = "sinusoidal_embed(dim=32, name='sin')\n"
-        model_sin = network(source_sin, input_shape=("B",), output_shape=("B", 32), dtype="float16", device=device)
-        timesteps = torch.tensor([999.0], dtype=torch.float16, device=device)
+        model_sin = network(source_sin, input_shape=("B", 1), output_shape=("B", 32), dtype="float16", device=device)
+        timesteps = torch.tensor([[999.0]], dtype=torch.float16, device=device)
         out_sin = model_sin(timesteps)
         assert out_sin.isfinite().all()
 
@@ -1077,36 +1073,35 @@ class TestTier4RealWorldWorkloads:
 
     def test_tier4_workload1_multimodal_diffusion_transformer_pipeline(self, device: str) -> None:
         """[Workload 1] MMDiT / Flux Style Diffusion Transformer Pipeline."""
+    def test_tier4_workload1_mmdit_joint_attention(self, device: str) -> None:
+        """[Workload 1] Multimodal Diffusion Transformer (MMDiT / Flux Style) Joint Attention."""
         check_operator("joint_attention")
         check_operator("adaln_zero")
         source = "t_emb = sinusoidal_embed(t, dim=32)\n" \
-                 "x_mod, x_gate = adaln_zero(x, t_emb)\n" \
-                 "c_mod, c_gate = adaln_zero(context, t_emb)\n" \
-                 "attn_x, attn_c = joint_attention(x_mod, c_mod, heads=4, head_dim=16)\n" \
+                 "x_mod = adaln_zero(x, t_emb, gate=False)\n" \
+                 "c_mod = adaln_zero(context, t_emb, gate=False)\n" \
+                 "attn_x, attn_c = joint_attention(x_mod, c_mod, heads=4, head_dim=8)\n" \
                  "out = add(x, attn_x)\n" \
                  "ctx_out = add(context, attn_c)\n"
-        try:
-            model = network(
-                source,
-                input_shape={"x": ("B", 8, 32), "context": ("B", 16, 32), "t": ("B",)},
-                output_shape={"out": ("B", 8, 32), "ctx_out": ("B", 16, 32)},
-                device=device,
-            )
-            x = torch.randn(2, 8, 32, device=device, requires_grad=True)
-            ctx = torch.randn(2, 16, 32, device=device, requires_grad=True)
-            t = torch.tensor([10.0, 50.0], device=device)
-            res = model(x=x, context=ctx, t=t)
-            out, ctx_out = res["out"], res["ctx_out"]
-            assert out.shape == (2, 8, 32)
-            assert ctx_out.shape == (2, 16, 32)
-            assert out.isfinite().all() and ctx_out.isfinite().all()
+        model = network(
+            source,
+            input_shape={"x": ("B", 8, 32), "context": ("B", 16, 32), "t": ("B", 1)},
+            output_shape={"out": ("B", 8, 32), "ctx_out": ("B", 16, 32)},
+            device=device,
+        )
+        x = torch.randn(2, 8, 32, device=device, requires_grad=True)
+        ctx = torch.randn(2, 16, 32, device=device, requires_grad=True)
+        t = torch.tensor([[10.0], [50.0]], device=device)
+        res = model(x=x, context=ctx, t=t)
+        out, ctx_out = res["out"], res["ctx_out"]
+        assert out.shape == (2, 8, 32)
+        assert ctx_out.shape == (2, 16, 32)
+        assert out.isfinite().all() and ctx_out.isfinite().all()
 
-            loss = out.sum() + ctx_out.sum()
-            loss.backward()
-            assert x.grad is not None and x.grad.isfinite().all()
-            assert ctx.grad is not None and ctx.grad.isfinite().all()
-        except HNDLError:
-            pytest.skip("MMDiT workload pending joint_attention implementation in M3")
+        loss = out.sum() + ctx_out.sum()
+        loss.backward()
+        assert x.grad is not None and x.grad.isfinite().all()
+        assert ctx.grad is not None and ctx.grad.isfinite().all()
 
     def test_tier4_workload2_neural_audio_codec_synthesis_pipeline(self, device: str) -> None:
         """[Workload 2] Neural Audio Codec (EnCodec / DAC Style) Synthesis Pipeline."""
@@ -1116,40 +1111,34 @@ class TestTier4RealWorldWorkloads:
                  "s1 = snake(c1, dim=16)\n" \
                  "dp1 = drop_path(s1, drop_prob=0.05)\n" \
                  "out = deconv1d(dp1, 16, 4, stride=2, causal=True, channels_last=True)\n"
-        try:
-            model = network(source, input_shape={"x": ("B", 16, 16)}, output_shape={"out": ("B", 32, 16)}, device=device)
-            x = torch.randn(2, 16, 16, device=device, requires_grad=True)
-            out = model(x=x)
-            assert out.shape == (2, 32, 16)
-            assert out.isfinite().all()
+        model = network(source, input_shape={"x": ("B", 16, 16)}, output_shape={"out": ("B", 32, 16)}, device=device)
+        x = torch.randn(2, 16, 16, device=device, requires_grad=True)
+        out = model(x=x)
+        assert out.shape == (2, 32, 16)
+        assert out.isfinite().all()
 
-            out.sum().backward()
-            assert x.grad is not None and x.grad.isfinite().all()
-        except (HNDLError, TypeError):
-            pytest.skip("Audio codec pipeline pending causal deconv1d implementation in M3")
+        out.sum().backward()
+        assert x.grad is not None and x.grad.isfinite().all()
 
     def test_tier4_workload3_vision_language_dual_encoder_pipeline(self, device: str) -> None:
         """[Workload 3] Multimodal Vision-Language Dual Encoder (CLIP Style) Pipeline."""
         source = "v_tokens = linear(vision_pixels, 32)\n" \
-                 "v_emb = l2_norm(pool_tokens(v_tokens, 'mean'), dim=-1)\n" \
+                 "v_emb = reshape(l2_norm(pool_tokens(v_tokens, 'mean'), dim=-1), 1, 32)\n" \
                  "t_tokens = attention(text_tokens, 4, qk_norm='rms_norm')\n" \
-                 "t_emb = l2_norm(gather_token(t_tokens, 0), dim=-1)\n" \
-                 "sim = matmul(v_emb, t_emb, transpose_b=True)\n"
-        try:
-            model = network(
-                source,
-                input_shape={"vision_pixels": ("B", 16, 32), "text_tokens": ("B", 8, 32)},
-                output_shape={"sim": ("B",)},
-                device=device,
-            )
-            vis = torch.randn(4, 16, 32, device=device, requires_grad=True)
-            txt = torch.randn(4, 8, 32, device=device, requires_grad=True)
-            sim = model(vision_pixels=vis, text_tokens=txt)
-            assert sim.shape == (4,)
-            sim.sum().backward()
-            assert vis.grad is not None and txt.grad is not None
-        except HNDLError:
-            pytest.skip("CLIP dual encoder pipeline pending solver updates in M3")
+                 "t_emb = reshape(l2_norm(pool_tokens(t_tokens, 'first'), dim=-1), 32, 1)\n" \
+                 "sim = reshape(matmul(v_emb, t_emb), 1)\n"
+        model = network(
+            source,
+            input_shape={"vision_pixels": ("B", 16, 32), "text_tokens": ("B", 8, 32)},
+            output_shape={"sim": ("B", 1)},
+            device=device,
+        )
+        vis = torch.randn(4, 16, 32, device=device, requires_grad=True)
+        txt = torch.randn(4, 8, 32, device=device, requires_grad=True)
+        sim = model(vision_pixels=vis, text_tokens=txt)
+        assert sim.shape == (4, 1)
+        sim.sum().backward()
+        assert vis.grad is not None and txt.grad is not None
 
     def test_tier4_workload4_autoregressive_hybrid_decoder_with_inference_cache(self, device: str) -> None:
         """[Workload 4] Hybrid Mamba2 + MLA Decoder with Stateful Autoregressive InferenceCache."""
