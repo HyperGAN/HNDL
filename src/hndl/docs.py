@@ -371,6 +371,8 @@ def main(argv=None):
     networks_page = Path(args.networks_out)
     networks_text = render_networks(args.networks) if Path(args.networks).is_dir() else None
     pyi_file = Path("src/hndl/capture.pyi")
+    if not pyi_file.exists():
+        pyi_file = Path(__file__).with_name("capture.pyi")
     pyi_text = generate_pyi()
     if args.check:
         stale = [name for name, text in pages.items()
