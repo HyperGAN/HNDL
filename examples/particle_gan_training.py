@@ -1,6 +1,6 @@
 """Exercise HNDL networks with the public ParticleGAN 0.9.4 trainer on CPU.
 
-Install the optional integration: ``pip install 'hndl[particlegan]'``.
+From this updated checkout, install: ``pip install '.[particlegan]'``.
 The generator is a frozen linear base plus a zero-initialized rank-2 update.
 This small synthetic GAN checks interoperability, not pretrained slider quality.
 """

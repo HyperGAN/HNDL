@@ -3,10 +3,11 @@
 HNDL builds the network graphs used by a particle GAN or particle LoRA. The
 training application owns attachment to the frozen base, conditioning, particle
 bank, objective, optimizer state, sampling and exports. Install the optional
-integration with:
+integration from this updated checkout (the published HNDL 0.10.0 wheel does
+not yet include this extra):
 
 ```sh
-python -m pip install 'hndl[particlegan]'
+python -m pip install '.[particlegan]'
 ```
 
 This extra requires `particlegan>=0.9.4,<0.10`; ordinary HNDL installations do
