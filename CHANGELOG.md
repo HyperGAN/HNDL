@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add the optional `particlegan` extra for ParticleGAN 0.9.4 and a CPU example that trains a frozen-base, low-rank HNDL graph with the public default recipe and a real particle prior. Document existing routed particle-slider integration and its recipe/version boundaries.
+
 ## 0.10.0 (2026-10-23)
 
 - Require patched build tooling (setuptools 84.2.1 and wheel 0.46.2 or newer) to prevent wheel unpack permission changes outside the extraction directory.

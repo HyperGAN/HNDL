@@ -122,6 +122,7 @@ nav = [
     "* [Home](index.md)",
     "* Guide",
     "    * [Pretrained networks](pretrained.md)",
+    "    * [ParticleGAN and particle sliders](particle-sliders.md)",
     "    * [Adding an operator](ADDING_OPERATORS.md)",
     "* Operators",
     "    * [Catalog](operators/index.md)",
