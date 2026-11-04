@@ -480,6 +480,11 @@ Shape declarations are claims made by trusted application code. Configs only cal
 
 ## Experiment with less boilerplate
 
+For particle GANs and low-rank adaptation, install `.[particlegan]` from this checkout and see
+the [ParticleGAN and particle-slider guide](https://hypergan.github.io/HNDL/particle-sliders/). Its CPU
+example uses ParticleGAN's public trainer and default recipe with a frozen-base
+HNDL graph; the guide also describes the existing routed particle adapters.
+
 Change `linear(64)` to `linear(128)`, resolve the same input/output constraints, and send the resulting model through your existing training and evaluation loop. Compare accuracy, loss, or inference time while keeping architecture definitions small and readable. HNDL handles the connecting dimensions; your application owns metrics, optimizers, and the search over candidates.
 
 For inspection without building a model, use the pure resolver:
