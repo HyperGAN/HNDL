@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Guard cached decoding against computational buffer changes, including frozen weight buffers, and reject model state without mutation version counters; reject overlapping graph sessions and cache resets during active calls.
+
 - Add opt-in packed QKV, cross-attention KV, SwiGLU and expert parameter storage while preserving parameter objects, optimizer references, gradients and checkpoint keys; add bounded selected-route MoE execution with adaptive grouped/padded dispatch and an explicit memory threshold.
 - Add an optional FlexAttention backend for softcap and sliding-window attention with bounded block-mask caching and explicit fallback for unsupported devices, dtypes, dense bias and attention dropout.
 - Add native inference deployment through `hndl.deployment.export` and `load`, with reusable AOTInductor packages, weight/operator/environment fingerprints, exact runtime input guards, checksum verification, atomic package replacement, and bounded artifact storage.

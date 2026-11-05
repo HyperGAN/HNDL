@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import chain
+import threading
 from typing import Any
 import weakref
 
@@ -22,9 +24,20 @@ class _NodeState:
     tensors: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
+def _state_version(tensor):
+    try:
+        return tensor._version
+    except RuntimeError as error:
+        raise HNDLError(
+            "E_RUNTIME", "cached model state must track mutation versions; create parameters and buffers "
+            "outside torch.inference_mode() before using an InferenceCache",
+        ) from error
+
+
 def _parameter_signature(module):
-    return tuple((id(p), p._version, p.data_ptr(), tuple(p.shape), p.stride(), p.dtype, p.device)
-                 for p in module.parameters())
+    # Frozen and quantized weights may be buffers rather than Parameters.
+    return tuple((id(t), _state_version(t), t.data_ptr(), tuple(t.shape), t.stride(), t.dtype, t.device)
+                 for t in chain(module.parameters(), module.buffers()))
 
 
 class InferenceCache:
@@ -47,6 +60,8 @@ class InferenceCache:
         self._model_epoch = None
         self._graph_nodes = None
         self._active = False
+        self._active_thread = None
+        self._session_lock = threading.Lock()
         self._invalid = False
 
     @property
@@ -60,20 +75,27 @@ class InferenceCache:
         self._states[node_id] = state
 
     def reset(self, node_id: str | None = None) -> None:
-        if node_id is None:
-            self._states.clear()
-            self._model = None
-            self._input_signature = None
-            self._model_parameters = None
-            self._model_epoch = None
-            self._graph_nodes = None
-            self._invalid = False
-        else:
-            self._states.pop(node_id, None)
-            # A composite operator uses hierarchical child keys.
-            for key in tuple(self._states):
-                if key.startswith(node_id + "/"):
-                    del self._states[key]
+        if not self._session_lock.acquire(blocking=False):
+            raise HNDLError("E_RUNTIME", "cannot reset an active InferenceCache session")
+        try:
+            if node_id is None:
+                self._states.clear()
+                self._model = None
+                self._input_signature = None
+                self._model_parameters = None
+                self._model_epoch = None
+                self._graph_nodes = None
+                self._invalid = False
+                self._active = False
+                self._active_thread = None
+            else:
+                self._states.pop(node_id, None)
+                # A composite operator uses hierarchical child keys.
+                for key in tuple(self._states):
+                    if key.startswith(node_id + "/"):
+                        del self._states[key]
+        finally:
+            self._session_lock.release()
 
     def __contains__(self, node_id: str) -> bool:
         return node_id in self._states
@@ -115,6 +137,18 @@ class InferenceCache:
 
     def _begin_call(self, model, inputs):
         """Bind a graph session; the runtime validates its streamable time axes."""
+        if not self._session_lock.acquire(blocking=False):
+            raise HNDLError("E_RUNTIME", "an InferenceCache cannot be reused concurrently or recursively")
+        try:
+            self._active_thread = threading.get_ident()
+            self._bind_call(model, inputs)
+        except BaseException:
+            self._active = False
+            self._active_thread = None
+            self._session_lock.release()
+            raise
+
+    def _bind_call(self, model, inputs):
         if self._invalid:
             raise HNDLError("E_RUNTIME", "the previous cached call failed; reset() before decoding again")
         if self._active:
@@ -131,7 +165,7 @@ class InferenceCache:
         epoch = getattr(model, "_preparation_epoch", None)
         if self._model is not None and (self._model() is not model or signature != self._input_signature
                                        or parameters != self._model_parameters or epoch != self._model_epoch):
-            raise HNDLError("E_RUNTIME", "cache model, parameters, batch, features, dtype or device changed; reset() first")
+            raise HNDLError("E_RUNTIME", "cache model, parameters/buffers, batch, features, dtype or device changed; reset() first")
         if self._graph_nodes is not None and any(not isinstance(self._states.get(key), _NodeState) for key in self._graph_nodes):
             raise HNDLError("E_RUNTIME", "part of the graph cache was reset; reset() the complete session before decoding")
         positions = {self._states[key].position for key in (self._graph_nodes or ())}
@@ -144,7 +178,19 @@ class InferenceCache:
         self._active = True
 
     def _end_call(self, success):
-        self._active = False
+        if not self._active or self._active_thread != threading.get_ident():
+            raise HNDLError("E_RUNTIME", "only the active InferenceCache session may finish its call")
+        try:
+            self._finish_call(success)
+        except BaseException:
+            self._invalid = True
+            raise
+        finally:
+            self._active = False
+            self._active_thread = None
+            self._session_lock.release()
+
+    def _finish_call(self, success):
         if not success:
             self._invalid = True
         else:
@@ -160,6 +206,8 @@ class InferenceCache:
 
     def _node(self, module, node_id: str | None, x: torch.Tensor, kind: str,
               sequence_axis: int = 1) -> _NodeState:
+        if self._session_lock.locked() and self._active_thread != threading.get_ident():
+            raise HNDLError("E_RUNTIME", "an InferenceCache cannot be reused concurrently")
         if self._invalid:
             raise HNDLError("E_RUNTIME", "the previous cached call failed; reset() before decoding again")
         if module.training or torch.is_grad_enabled():
@@ -184,7 +232,7 @@ class InferenceCache:
         elif (not isinstance(state, _NodeState) or state.owner() is not module
               or state.kind != kind or state.signature != signature
               or state.parameters != parameters):
-            raise HNDLError("E_RUNTIME", f"cache state for {node_id!r} has a different owner, parameters, batch, width, dtype or device; reset it first")
+            raise HNDLError("E_RUNTIME", f"cache state for {node_id!r} has a different owner, parameters/buffers, batch, width, dtype or device; reset it first")
         if state.position + x.shape[sequence_axis] > self.max_seq_len:
             raise HNDLError("E_RUNTIME", f"cache capacity {self.max_seq_len} exceeded at {node_id!r}; reset or create a larger cache")
         return state

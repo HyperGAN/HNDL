@@ -28,10 +28,17 @@ cache.reset()  # Start an independent sequence.
 
 Use `eval()` together with `torch.no_grad()` or `torch.inference_mode()`.
 Cached state belongs to one model, batch, feature shape, dtype, device, and
-parameter version. Reset the cache after changing any of them. Autocast mode
+parameter or buffer version. Reset the cache after changing any of them. Autocast mode
 must also stay fixed. Each session needs its own cache; concurrent or recursive
 reuse of a cache is unsupported. If a graph call fails after modifying state,
 reset the cache before retrying.
+
+Overlapping graph calls fail immediately, including calls made while another
+call is validating its inputs and model state. Resetting all or part of a cache
+while a graph call is active is rejected. Create model parameters and buffers
+outside `torch.inference_mode()` so their version counters can detect changes;
+inference tensors used as model state are rejected with a diagnostic. This
+restriction does not apply to the cache's own KV and recurrent tensors.
 
 `attention` and `transformer_block` require `causal=True`. Grouped-query
 attention, query/key normalization, sliding causal windows, and logit softcaps
