@@ -127,6 +127,7 @@ nav = [
     "    * [Prepared execution](prepared-execution.md)",
     "    * [Optimized operators](optimized-operators.md)",
     "    * [Native inference deployment](deployment.md)",
+    "    * [Performance measurements](performance.md)",
     "    * [Adding an operator](ADDING_OPERATORS.md)",
     "* Operators",
     "    * [Catalog](operators/index.md)",

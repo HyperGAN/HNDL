@@ -1,0 +1,296 @@
+{
+  "compiler_headers": {
+    "cuda_cccl": "13.0.85",
+    "cuda_crt": "13.0.88",
+    "cuda_runtime": "13.0.96",
+    "development_headers": "3.14.10",
+    "runtime_python": "3.14.8"
+  },
+  "environment": {
+    "cpu": "AMD Ryzen 9 5900X 12-Core Processor",
+    "cuda_visible_devices": "1",
+    "gpu": "NVIDIA RTX A6000",
+    "intraop_threads": 1,
+    "kind": "environment",
+    "python": "3.14.8",
+    "torch": "2.14.1+cu130"
+  },
+  "measurements": [
+    {
+      "batch": 1,
+      "device": "cpu",
+      "generated_over_eager": 0.948,
+      "kind": "training",
+      "median_us": {
+        "eager": 216.158,
+        "generated": 204.819
+      },
+      "window": "complete_suite"
+    },
+    {
+      "batch": 32,
+      "device": "cpu",
+      "generated_over_eager": 0.954,
+      "kind": "training",
+      "median_us": {
+        "eager": 270.836,
+        "generated": 258.506
+      },
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "device": "cuda:0",
+      "generated_over_eager": 0.952,
+      "kind": "training",
+      "median_us": {
+        "eager": 494.516,
+        "generated": 470.926
+      },
+      "window": "complete_suite"
+    },
+    {
+      "batch": 32,
+      "device": "cuda:0",
+      "generated_over_eager": 0.969,
+      "kind": "training",
+      "median_us": {
+        "eager": 512.413,
+        "generated": 496.329
+      },
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_bytes": 557056,
+      "cached_step_us": 554.146,
+      "device": "cpu",
+      "kind": "incremental",
+      "max_seq_len": 272,
+      "prefix": 256,
+      "recompute_step_us": 3385.529,
+      "steps": 16,
+      "width": 128,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_bytes": 2129920,
+      "cached_step_us": 641.847,
+      "device": "cpu",
+      "kind": "incremental",
+      "max_seq_len": 1040,
+      "prefix": 1024,
+      "recompute_step_us": 18091.409,
+      "steps": 16,
+      "width": 128,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_bytes": 8519680,
+      "cached_step_us": 2375.426,
+      "device": "cpu",
+      "kind": "incremental",
+      "max_seq_len": 1040,
+      "prefix": 1024,
+      "recompute_step_us": 138512.643,
+      "steps": 16,
+      "width": 512,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_bytes": 557056,
+      "cached_step_us": 934.663,
+      "device": "cuda:0",
+      "kind": "incremental",
+      "max_seq_len": 272,
+      "prefix": 256,
+      "recompute_step_us": 677.624,
+      "steps": 16,
+      "width": 128,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_bytes": 2129920,
+      "cached_step_us": 909.804,
+      "device": "cuda:0",
+      "kind": "incremental",
+      "max_seq_len": 1040,
+      "prefix": 1024,
+      "recompute_step_us": 936.121,
+      "steps": 16,
+      "width": 128,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_bytes": 8519680,
+      "cached_step_us": 1042.509,
+      "device": "cuda:0",
+      "kind": "incremental",
+      "max_seq_len": 1040,
+      "prefix": 1024,
+      "recompute_step_us": 2730.639,
+      "steps": 16,
+      "width": 512,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_hit_ms": 25.544,
+      "device": "cpu",
+      "export_seconds": 7.635,
+      "fresh_inductor_cache": true,
+      "kind": "deployment",
+      "load_ms": 3.343,
+      "median_us": {
+        "eager": 34.57,
+        "native": 23.45,
+        "native_exclusive": 25.042
+      },
+      "package_bytes": 1690415,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "cache_hit_ms": 26.823,
+      "device": "cuda:0",
+      "export_seconds": 5.42,
+      "fresh_inductor_cache": true,
+      "kind": "deployment",
+      "load_ms": 14.856,
+      "median_us": {
+        "eager": 83.906,
+        "native": 842.475,
+        "native_exclusive": 72.671
+      },
+      "package_bytes": 1779700,
+      "window": "complete_suite"
+    },
+    {
+      "batch": 1,
+      "device": "cpu",
+      "generated_setup_ms": 0.841,
+      "kind": "inference",
+      "median_us": {
+        "eager": 34.732,
+        "generated": 27.538
+      },
+      "window": "prepared_cache_reuse_recheck",
+      "workspace": {}
+    },
+    {
+      "batch": 32,
+      "device": "cpu",
+      "generated_setup_ms": 0.223,
+      "kind": "inference",
+      "median_us": {
+        "eager": 56.38,
+        "generated": 47.942
+      },
+      "window": "prepared_cache_reuse_recheck",
+      "workspace": {}
+    },
+    {
+      "batch": 1,
+      "device": "cuda:0",
+      "generated_setup_ms": 1.732,
+      "kind": "inference",
+      "median_us": {
+        "eager": 82.782,
+        "generated": 71.722,
+        "replay_borrowed": 34.759,
+        "replay_clone": 47.567
+      },
+      "window": "prepared_cache_reuse_recheck",
+      "workspace": {
+        "replay_borrowed": {
+          "graphs": 1,
+          "reported_bytes": 2097408,
+          "reserved_delta_bytes": 2097152,
+          "setup_ms": 6.491
+        },
+        "replay_clone": {
+          "graphs": 1,
+          "reported_bytes": 2097408,
+          "reserved_delta_bytes": 23068672,
+          "setup_ms": 6.768
+        }
+      }
+    },
+    {
+      "batch": 32,
+      "device": "cuda:0",
+      "generated_setup_ms": 2.323,
+      "kind": "inference",
+      "median_us": {
+        "eager": 91.961,
+        "generated": 80.508,
+        "replay_borrowed": 47.055,
+        "replay_clone": 51.099
+      },
+      "window": "prepared_cache_reuse_recheck",
+      "workspace": {
+        "replay_borrowed": {
+          "graphs": 1,
+          "reported_bytes": 2105344,
+          "reserved_delta_bytes": 2097152,
+          "setup_ms": 3.953
+        },
+        "replay_clone": {
+          "graphs": 1,
+          "reported_bytes": 2105344,
+          "reserved_delta_bytes": 23068672,
+          "setup_ms": 3.944
+        }
+      }
+    },
+    {
+      "after_clear_reserved_delta_bytes": 0,
+      "device": "cuda:0",
+      "entries": [
+        {
+          "batch": 1,
+          "reported_bytes": 2097408,
+          "reserved_delta_bytes": 23068672
+        },
+        {
+          "batch": 2,
+          "reported_bytes": 2097664,
+          "reserved_delta_bytes": 23068672
+        },
+        {
+          "batch": 3,
+          "reported_bytes": 2097920,
+          "reserved_delta_bytes": 23068672
+        },
+        {
+          "batch": 4,
+          "reported_bytes": 2098176,
+          "reserved_delta_bytes": 23068672
+        },
+        {
+          "batch": 5,
+          "reported_bytes": 2098432,
+          "reserved_delta_bytes": 23068672
+        },
+        {
+          "batch": 6,
+          "reported_bytes": 2098688,
+          "reserved_delta_bytes": 23068672
+        }
+      ],
+      "kind": "workspace_eviction",
+      "max_bytes": 8388608,
+      "max_graphs": 1,
+      "window": "prepared_cache_reuse_recheck"
+    }
+  ],
+  "method": "Median of three interleaved round medians; stateful steps use three finite bursts. Prepared inference was retimed after correcting signature-key reuse.",
+  "schema_version": 1,
+  "validation": "Complete suite: 17 passed, one CPU-only replay-workspace skip. Prepared replay recheck: 5 passed, one CPU-only skip.",
+  "workload_source": "tests/benchmark/test_prepared_execution.py"
+}
