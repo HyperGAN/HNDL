@@ -326,11 +326,11 @@ class PreparedNetwork(nn.Module):
             derived = {}
             for value in captured_state:
                 pointer = value.untyped_storage().data_ptr()
-                key = (value.device, pointer)
-                if (value.device == device and key not in registered
+                storage_key = (value.device, pointer)
+                if (value.device == device and storage_key not in registered
                         and not any(segment["address"] <= pointer < segment["address"] + segment["total_size"]
                                     for segment in segments)):
-                    derived[key] = value.untyped_storage().nbytes()
+                    derived[storage_key] = value.untyped_storage().nbytes()
             size = (sum(segment["total_size"] for segment in segments) + input_bytes
                     if segments else max(torch.cuda.memory_reserved(device),
                                          torch.cuda.memory_allocated(device) - before))

@@ -383,3 +383,24 @@ def test_cuda_replay_pins_rotary_tables_after_cache_growth_and_eviction():
         scratch = torch.full((2, 8, 64), 1e6, device="cuda:0")
         torch.testing.assert_close(prepared(x), expected)
         assert scratch.isfinite().all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_replay_reuses_one_capture_for_repeated_parameterized_calls(monkeypatch):
+    source = network("linear(16); silu(); linear(4)", input_shape=("B", 8),
+                     output_shape=("B", 4), device="cuda:0").eval()
+    captures = []
+    constructor = torch.cuda.CUDAGraph
+
+    def tracked_graph(*args, **kwargs):
+        captures.append(1)
+        return constructor(*args, **kwargs)
+
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", tracked_graph)
+    x = torch.randn(2, 8, device="cuda:0")
+    with torch.inference_mode():
+        fast = source.prepare(backend="cuda_graph")
+        for shift in range(4):
+            torch.testing.assert_close(fast(x + shift), source(x + shift))
+        assert len(captures) == 1
+        assert fast.cache_info["graphs"] == 1
