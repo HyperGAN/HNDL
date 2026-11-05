@@ -481,12 +481,16 @@ class Attention(nn.Module):
             cos, sin = cos[..., offset:end, :], sin[..., offset:end, :]
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
         k, v = _kv_append(cache, state, k, v)
+        key_start = max(0, offset - self.window_size + 1) if self.window_size > 0 else 0
+        if key_start:
+            k, v = k[..., key_start:, :], v[..., key_start:, :]
+        query_offset, key_count = offset - key_start, end - key_start
         # SDPA's rectangular is_causal mask is top-left aligned. A decoding
         # chunk needs absolute, bottom-right alignment instead.
         mask = None
-        is_causal = offset == 0 and count > 1
-        if self.window_size > 0 or (offset > 0 and count > 1):
-            mask = _decode_mask(offset, count, end, x.device, self.window_size)
+        is_causal = query_offset == 0 and count > 1
+        if self.window_size > 0 or (query_offset > 0 and count > 1):
+            mask = _decode_mask(query_offset, count, key_count, x.device, self.window_size)
             is_causal = False
         if self.logit_softcap > 0:
             repeats = self.heads // self.kv_heads
@@ -494,7 +498,7 @@ class Attention(nn.Module):
             scores = qg @ k.unsqueeze(2).transpose(-2, -1) / math.sqrt(self.head_dim)
             scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
             if mask is None and count > 1:
-                mask = _decode_mask(offset, count, end, x.device)
+                mask = _decode_mask(query_offset, count, key_count, x.device)
             if mask is not None:
                 scores = scores.masked_fill(~mask, float("-inf"))
             attended = (scores.softmax(dim=-1) @ v.unsqueeze(2)).reshape(batch, self.heads, count, self.head_dim)

@@ -60,7 +60,9 @@ an operator; a transformer block uses the child key `node_id + '/attention'`.
 
 The cache retains the existing dictionary interface: `get`, `set`, indexing,
 `keys`, `values`, `items`, and `reset(node_id)`. Resetting a composite node also
-clears its child states. When using layers directly, supply a unique `node_id`
+clears its child states. A graph session requires a complete `reset()` after
+clearing one of its nodes, so layers cannot silently lose part of the prefix.
+When using layers directly, supply a unique `node_id`
 to each cache-aware layer.
 
 Spatial relative-position attention, spatial RoPE, and YaRN's current

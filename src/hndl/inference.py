@@ -22,6 +22,11 @@ class _NodeState:
     tensors: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
+def _parameter_signature(module):
+    return tuple((id(p), p._version, p.data_ptr(), tuple(p.shape), p.stride(), p.dtype, p.device)
+                 for p in module.parameters())
+
+
 class InferenceCache:
     """KV and recurrent state with a fixed maximum sequence length.
 
@@ -38,6 +43,9 @@ class InferenceCache:
         self._states: dict[str, Any] = {}
         self._model = None
         self._input_signature = None
+        self._model_parameters = None
+        self._model_epoch = None
+        self._graph_nodes = None
         self._active = False
         self._invalid = False
 
@@ -56,6 +64,9 @@ class InferenceCache:
             self._states.clear()
             self._model = None
             self._input_signature = None
+            self._model_parameters = None
+            self._model_epoch = None
+            self._graph_nodes = None
             self._invalid = False
         else:
             self._states.pop(node_id, None)
@@ -113,17 +124,39 @@ class InferenceCache:
         values = tuple(inputs.values()) if isinstance(inputs, dict) else tuple(inputs)
         if not values or any(not isinstance(x, torch.Tensor) or x.ndim not in (2, 3) for x in values):
             raise HNDLError("E_RUNTIME", "cached graph inputs must be rank-2 token IDs or rank-3 sequences")
-        signature = tuple((tuple(x.shape[:1]) + tuple(x.shape[2:]), x.dtype, x.device) for x in values)
-        if self._model is not None and (self._model() is not model or signature != self._input_signature):
-            raise HNDLError("E_RUNTIME", "cache model, batch, features, dtype or device changed; reset() first")
+        signature = tuple((tuple(x.shape[:1]) + tuple(x.shape[2:]), x.dtype, x.device,
+                           torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type))
+                          for x in values)
+        parameters = _parameter_signature(model)
+        epoch = getattr(model, "_preparation_epoch", None)
+        if self._model is not None and (self._model() is not model or signature != self._input_signature
+                                       or parameters != self._model_parameters or epoch != self._model_epoch):
+            raise HNDLError("E_RUNTIME", "cache model, parameters, batch, features, dtype or device changed; reset() first")
+        if self._graph_nodes is not None and any(not isinstance(self._states.get(key), _NodeState) for key in self._graph_nodes):
+            raise HNDLError("E_RUNTIME", "part of the graph cache was reset; reset() the complete session before decoding")
+        positions = {self._states[key].position for key in (self._graph_nodes or ())}
+        if len(positions) > 1:
+            raise HNDLError("E_RUNTIME", "cached graph positions differ; reset() before decoding")
         self._model = weakref.ref(model)
         self._input_signature = signature
+        self._model_parameters = parameters
+        self._model_epoch = epoch
         self._active = True
 
     def _end_call(self, success):
         self._active = False
         if not success:
             self._invalid = True
+        else:
+            nodes = frozenset(key for key, value in self._states.items() if isinstance(value, _NodeState))
+            positions = {self._states[key].position for key in nodes}
+            if len(positions) > 1:
+                self._invalid = True
+                raise HNDLError("E_RUNTIME", "cached graph operators consumed different positions; reset() before decoding")
+            if self._graph_nodes is not None and self._graph_nodes != nodes:
+                self._invalid = True
+                raise HNDLError("E_RUNTIME", "cached graph operators changed; reset() before decoding")
+            self._graph_nodes = nodes
 
     def _node(self, module, node_id: str | None, x: torch.Tensor, kind: str,
               sequence_axis: int = 1) -> _NodeState:
@@ -139,8 +172,7 @@ class InferenceCache:
             raise HNDLError("E_RUNTIME", "incremental decoding expects a nonempty sequence tensor")
         signature = (tuple(size for i, size in enumerate(x.shape) if i != sequence_axis), x.dtype, x.device,
                      torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type))
-        parameters = tuple((id(p), p._version, tuple(p.shape), p.dtype, p.device)
-                           for p in module.parameters())
+        parameters = _parameter_signature(module)
         state = self._states.get(node_id)
         if state is None:
             state = _NodeState(weakref.ref(module), kind, signature, parameters)

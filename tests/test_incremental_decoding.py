@@ -178,3 +178,99 @@ def test_length_dependent_rope_is_explicitly_unsupported(source):
     layer = make_layer(source, "cpu")
     with torch.no_grad(), pytest.raises(HNDLError, match="length-independent|YaRN"):
         layer(torch.randn(2, 1, 16), cache=InferenceCache(), node_id="a")
+
+
+@pytest.mark.parametrize("source", [
+    "attention(4, causal=True, kv_heads=2, rope=True, qk_norm='rms_norm')",
+    "latent_attention(4, kv_lora_rank=8, qk_nope_head_dim=4, qk_rope_head_dim=4, v_head_dim=4)",
+    "mamba2(d_model=16, d_state=4, heads=4, head_dim=8, chunk_size=4)",
+    "gated_delta_attention(4, head_dim=4, chunk_size=4, decay_kind='head')",
+    "gated_delta_attention(4, head_dim=4, chunk_size=4, decay_kind='channel')",
+])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float16, torch.bfloat16])
+def test_partitioned_precision(source, dtype, device):
+    if device == "cpu" and dtype != torch.float64:
+        pytest.skip("reduced precision qualification is on CUDA")
+    layer = make_layer(source, device).to(dtype=dtype)
+    x = torch.randn(2, 13, 16, device=device, dtype=dtype)
+    with torch.no_grad():
+        expected = layer(x)
+        actual, _ = streamed(layer, x, (5, 1, 3, 4))
+    tol = {torch.float64: (1e-8, 1e-9), torch.float16: (1e-2, 2e-3), torch.bfloat16: (5e-2, 1e-2)}[dtype]
+    torch.testing.assert_close(actual, expected, rtol=tol[0], atol=tol[1])
+
+
+def test_cache_rejects_owner_and_dtype_drift(device):
+    layer = make_layer("attention(4, causal=True)", device)
+    other = make_layer("attention(4, causal=True)", device)
+    cache = InferenceCache()
+    x = torch.randn(2, 1, 16, device=device)
+    with torch.no_grad():
+        layer(x, cache=cache, node_id="a")
+        with pytest.raises(HNDLError, match="owner"):
+            other(x, cache=cache, node_id="a")
+        layer.double()
+        with pytest.raises(HNDLError, match="dtype"):
+            layer(x.double(), cache=cache, node_id="a")
+        cache.reset()
+        layer(x.double(), cache=cache, node_id="a")
+
+
+def test_cache_rejects_graph_model_and_batch_drift(device):
+    model = network("attention(4, causal=True)", input_shape=("B", 13, 16), output_shape=("B", 13, 16), device=device).eval()
+    other = network("attention(4, causal=True)", input_shape=("B", 13, 16), output_shape=("B", 13, 16), device=device).eval()
+    cache = InferenceCache()
+    inputs = (torch.randn(2, 1, 16, device=device),)
+    with torch.no_grad():
+        cache._begin_call(model, inputs)
+        cache._end_call(True)
+        with pytest.raises(HNDLError, match="model"):
+            cache._begin_call(other, inputs)
+        with pytest.raises(HNDLError, match="batch"):
+            cache._begin_call(model, (inputs[0][:1],))
+        cache.reset()
+        cache._begin_call(other, inputs)
+        cache._end_call(True)
+
+
+def test_cache_stops_positional_overflow_before_advancing(device):
+    layer = make_layer("pos_embed(13)", device)
+    cache = InferenceCache(max_seq_len=32)
+    with torch.no_grad():
+        layer(torch.randn(2, 13, 16, device=device), cache=cache, node_id="position")
+        with pytest.raises(HNDLError, match="max_len"):
+            layer(torch.randn(2, 1, 16, device=device), cache=cache, node_id="position")
+    assert cache.position("position") == 13
+
+
+def test_graph_guards_all_parameters_and_structure_epoch(device):
+    model = network("linear(16)\nattention(4, causal=True)", input_shape=("B", 13, 16),
+                    output_shape=("B", 13, 16), device=device).eval()
+    inputs = (torch.randn(2, 1, 16, device=device),)
+    cache = InferenceCache()
+    with torch.no_grad():
+        cache._begin_call(model, inputs)
+        cache._end_call(True)
+        model[0].weight.add_(1)
+        with pytest.raises(HNDLError, match="parameters"):
+            cache._begin_call(model, inputs)
+        cache.reset()
+        cache._begin_call(model, inputs)
+        cache._end_call(True)
+        model._preparation_epoch = 1
+        with pytest.raises(HNDLError, match="model"):
+            cache._begin_call(model, inputs)
+
+
+def test_partial_graph_reset_cannot_silently_lose_context(device):
+    model = network("attention(4, causal=True)", input_shape=("B", 13, 16),
+                    output_shape=("B", 13, 16), device=device).eval()
+    inputs = (torch.randn(2, 1, 16, device=device),)
+    cache = InferenceCache()
+    with torch.no_grad():
+        cache._begin_call(model, inputs)
+        model[0](inputs[0], cache=cache, node_id="a")
+        cache._end_call(True)
+        cache.reset("a")
+        with pytest.raises(HNDLError, match="complete session"):
+            cache._begin_call(model, inputs)
