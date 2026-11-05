@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 (2026-11-04)
 
 - Add opt-in performance measurements and a hardware-specific report covering prepared setup/inference/training, bounded replay memory, incremental decoding, packed operators, fused attention and native deployment startup/runtime.
 - Add exclusive native deployment execution on supporting PyTorch loaders, with host-call and CUDA-stream guards, and reject root hooks or custom root forwards that cannot preserve export semantics.
@@ -14,7 +14,8 @@
 - Add bounded incremental inference caches for causal attention, transformer blocks, latent attention (including compressed weight absorption), Mamba2, gated delta attention, learned positions and RoPE, with absolute position offsets, reusable KV storage, recurrent/convolution state, and session validation.
 - Guard cached decoding against computational buffer changes, including frozen weight buffers, and reject model state without mutation version counters; reject overlapping graph sessions and active resets, and bind each CUDA session to one stream until reset.
 - Dispatch pretrained shape callbacks with named layer selections correctly, preserving legacy positional output callbacks without binding `layers` twice.
-- Add the optional `particlegan` extra for ParticleGAN 0.9.4 and a CPU example that trains a frozen-base, low-rank HNDL graph with the public default recipe and a real particle prior. Document existing routed particle-slider integration and its recipe/version boundaries.
+- Keep ParticleGAN as a separately installed dependency of its optional CPU example and integration tests; document frozen-base low-rank training and routed particle-slider integration while HNDL requires only PyTorch.
+- Label standalone generated Python source with the current HNDL package version.
 
 ## 0.10.0 (2026-10-23)
 

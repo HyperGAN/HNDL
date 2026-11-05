@@ -4,7 +4,7 @@
 
 Write your network in Python syntax, as a declarative config or a Python function. Give HNDL its input and output shapes, and it works out the connecting dimensions. Inspect what it built, access individual layers, and use the model in your PyTorch training code.
 
-**Status: 0.10.0.** Config strings with bounded `for` loops, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 84 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
+**Status: 0.11.0.** Config strings with bounded `for` loops, named inputs and outputs, native Python functions, bidirectional shape inference, branches, a catalog of 84 documented operators from `linear` to `transformer_block`, a generic `pretrained(...)` loader for Hugging Face and timm checkpoints, and a PyTorch backend with float32/float16/bfloat16 plans. See the [operator catalog](https://hypergan.github.io/HNDL/operators/), the [authored networks](https://hypergan.github.io/HNDL/networks/), and the [implementation notes](https://hypergan.github.io/HNDL/IMPLEMENTATION/). Diagnostics below are illustrative.
 
 Install on Linux with Python 3.11–3.14:
 
@@ -76,6 +76,24 @@ features = model[:2]                     # nn.Sequential sharing these layers
 Unnamed operations receive IDs such as `n0`; `model["n0"]` and `model[0]` return the same module. Optional names appear in the branching example below. Slices reuse their parameters, so training a slice also updates the original model. The complete model retains its resolved shape contract; a slice is a regular PyTorch sequence. Standard `state_dict()`, `train()`, and `eval()` remain available. Moving the model with `.cpu()` or `.cuda()` and casting it with `.double()`, `.half()`, `.bfloat16()`, `.float()`, or `.to(dtype=...)` retarget the runtime checks too, so a cast model takes tensors of its new compute dtype; ports declared as integers, such as token ids, keep the dtype the plan declared. Those checks run once: the first call with a given input shape, dtype and device checks every layer's inputs and outputs against the plan, and later calls with the same inputs run the layers directly, at close to hand-written speed. A mismatch is an `E_RUNTIME` error naming the layer, its operation and its source line, with the expected and actual shapes; an error raised inside a layer keeps its own type and gains a note with the same details. And `copy.deepcopy(model)` returns an independent model --- its own parameters and buffers, the same trainability flags and training mode, and no draw on the random state --- which is what a moving-average copy of a model needs. The resolved plan is immutable, so the copy shares it. To store a model, save `model.plan.to_json()` next to `torch.save(model.state_dict())` and rebuild it; pickling the module itself is not supported.
 
 Initial weights use PyTorch’s normal random state. For repeatable initialization in the same environment, call [`torch.manual_seed(7)`](https://docs.pytorch.org/docs/stable/notes/randomness.html#pytorch-random-number-generator) before constructing the network.
+
+## Faster repeated execution
+
+Prepare an existing model to run a generated tensor program while sharing its
+parameters, optimizer references and checkpoint names:
+
+```python
+fast = model.prepare()
+scores = fast(x)
+```
+
+The [prepared execution guide](docs/prepared-execution.md) covers bounded CUDA
+graph replay, measured backend selection and output ownership. Causal models
+can use [incremental inference caches](docs/incremental-decoding.md) to process
+only new tokens. Optional [packed operators and fused attention](docs/optimized-operators.md)
+and [native deployment packages](docs/deployment.md) provide more execution
+choices. See the [performance measurements](docs/performance.md) for setup,
+inference, training and memory results on CPU and CUDA.
 
 ## The same network in native Python
 
@@ -480,9 +498,9 @@ Shape declarations are claims made by trusted application code. Configs only cal
 
 ## Experiment with less boilerplate
 
-For particle GANs and low-rank adaptation, install `.[particlegan]` from this checkout and see
+For particle GANs and low-rank adaptation, see
 the [ParticleGAN and particle-slider guide](https://hypergan.github.io/HNDL/particle-sliders/). Its CPU
-example uses ParticleGAN's public trainer and default recipe with a frozen-base
+example installs ParticleGAN separately and uses its public trainer and default recipe with a frozen-base
 HNDL graph; the guide also describes the existing routed particle adapters.
 
 Change `linear(64)` to `linear(128)`, resolve the same input/output constraints, and send the resulting model through your existing training and evaluation loop. Compare accuracy, loss, or inference time while keeping architecture definitions small and readable. HNDL handles the connecting dimensions; your application owns metrics, optimizers, and the search over candidates.
