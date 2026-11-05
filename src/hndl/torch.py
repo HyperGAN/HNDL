@@ -318,6 +318,8 @@ class GraphModule(nn.Module):
     def __init__(self, plan, modules, device, receipt, port_orders, checkpoint_nodes=None):
         super().__init__()
         self.plan = plan
+        self._preparation_epoch = 0
+        self._prepared_dependents = weakref.WeakSet()
         self.nodes = _NodeModules(modules)
         self._runtime_device = device
         self.checkpoint_nodes = frozenset(checkpoint_nodes or ())
@@ -414,7 +416,43 @@ class GraphModule(nn.Module):
         self._state_seen = _watch_generation
         self._stores = self._record_stores()
         self._fast = self._build_fast_program()
+        self._compiled = _UNCOMPILED
         self._validated.clear()
+        self._preparation_epoch += 1
+        self._notify_prepared()
+
+    def _notify_prepared(self):
+        for prepared in tuple(self._prepared_dependents):
+            prepared._refresh()
+
+    def train(self, mode=True):
+        changed = self.training != mode
+        super().train(mode)
+        if changed and hasattr(self, "_prepared_dependents"):
+            self._preparation_epoch += 1
+            self._notify_prepared()
+        return self
+
+    def prepare(self, example_inputs=None, *, backend="generated", max_graphs=4,
+                max_graph_bytes=256 * 1024 * 1024, clone_outputs=True, pack=False,
+                attention_backend="reference"):
+        """Prepare a generated or CUDA graph executor sharing these parameters.
+
+        Example inputs are an ordered tuple or a mapping of input names. CUDA
+        graph execution requires eval mode inside no_grad or inference_mode.
+        Direct structural edits require rebind_state() before using a prepared
+        executor; ordinary optimizer updates preserve its parameter references.
+        """
+        from .prepared import PreparedNetwork
+        return PreparedNetwork(
+            self, example_inputs, backend=backend, max_graphs=max_graphs,
+            max_graph_bytes=max_graph_bytes, clone_outputs=clone_outputs,
+            pack=pack, attention_backend=attention_backend)
+
+    def export(self, directory, example_inputs, **options):
+        """Compile and cache an inference deployment package (AOTInductor)."""
+        from .deployment import export
+        return export(self, example_inputs, directory, **options)
 
     def __setattr__(self, name, value):
         if name in ("nodes", "plan") and hasattr(self, name):
@@ -439,7 +477,7 @@ class GraphModule(nn.Module):
         result = type(self).__new__(type(self))
         memo[id(self)] = result
         for name, value in self.__dict__.items():
-            if name == "_stores":
+            if name in {"_stores", "_prepared_dependents"}:
                 continue  # rebuilt below from the copy's own modules
             # The architecture lock guards attribute writes; this rebuilds the
             # instance dictionary directly, exactly as unpickling would.
@@ -451,6 +489,7 @@ class GraphModule(nn.Module):
         object.__setattr__(result, "_compiled", _UNCOMPILED)
         object.__setattr__(result, "_fast", result._build_fast_program())
         object.__setattr__(result, "_validated", {})
+        object.__setattr__(result, "_prepared_dependents", weakref.WeakSet())
         object.__setattr__(result, "_stores", result._record_stores())
         _watch(result._state_program)
         return result
@@ -483,6 +522,8 @@ class GraphModule(nn.Module):
         self._validated.clear()
         self._validated = {}
         self._state_seen = None
+        self._preparation_epoch += 1
+        self._notify_prepared()
         return self
 
     def _effective_dtype(self, dtype, is_compute=True):

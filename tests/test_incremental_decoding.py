@@ -257,7 +257,7 @@ def test_graph_guards_all_parameters_and_structure_epoch(device):
         cache.reset()
         cache._begin_call(model, inputs)
         cache._end_call(True)
-        model._preparation_epoch = 1
+        model._preparation_epoch = getattr(model, "_preparation_epoch", 0) + 1
         with pytest.raises(HNDLError, match="model"):
             cache._begin_call(model, inputs)
 
