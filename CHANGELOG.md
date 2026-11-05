@@ -2,8 +2,10 @@
 
 ## Unreleased
 
+
 - Use packed QKV projections in prepared self-attention and gated delta attention, and dispatch prepared softcap/sliding-window self-attention to fused FlexAttention without dense window masks, including incremental position offsets.
 - Add prepared graph execution sharing existing parameters, optimizer references and checkpoint names, with generated tensor lifetimes, optional bounded CUDA graph replay, independent or borrowed outputs, and measured inference strategy selection.
+- Validate incremental graphs against tokenwise sequence contracts, unify the public inference cache APIs, and generate cached forward programs after the first checked input signature instead of rechecking every layer on every decoding step.
 - Rebuild checked shape programs after `rebind_state()` so the first call after a layer replacement uses the new layer.
 - Add opt-in packed QKV, cross-attention KV, SwiGLU and expert parameter storage while preserving parameter objects, optimizer references, gradients and checkpoint keys; add bounded selected-route MoE execution with adaptive grouped/padded dispatch and an explicit memory threshold.
 - Add an optional FlexAttention backend for softcap and sliding-window attention with bounded block-mask caching and explicit fallback for unsupported devices, dtypes, dense bias and attention dropout.
