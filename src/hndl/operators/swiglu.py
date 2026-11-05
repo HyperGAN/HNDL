@@ -2,6 +2,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
+from ._packing import project
 from ._relations import non_image
 
 
@@ -72,4 +73,7 @@ class SwiGLU(nn.Module):
         self.down = nn.Linear(hidden, D, bias=bias)
 
     def forward(self, x):
-        return self.down(F.silu(self.gate(x)) * self.up(x))
+        if not getattr(self, "_hndl_packing", False):
+            return self.down(F.silu(self.gate(x)) * self.up(x))
+        gate, up = project(self, x, ("gate", "up"))
+        return self.down(F.silu(gate) * up)

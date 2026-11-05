@@ -3,6 +3,8 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
+from ._attention_backend import clear_attention_cache, specialized_attention
+from ._packing import project
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, operator
@@ -156,6 +158,7 @@ class CrossAttention(nn.Module):
     def _apply(self, fn, recurse=True):
         res = super()._apply(fn, recurse=recurse)
         self._mask_cache.clear()
+        clear_attention_cache(self)
         return res
 
     def forward(self, x, context):
@@ -163,8 +166,9 @@ class CrossAttention(nn.Module):
         sources = context.shape[1]
         heads, kv_heads, head_dim = self.heads, self.kv_heads, self.head_dim
         q = self.q_proj(x).view(batch, positions, heads, head_dim).transpose(1, 2)
-        k = self.k_proj(context).view(batch, sources, kv_heads, head_dim).transpose(1, 2)
-        v = self.v_proj(context).view(batch, sources, kv_heads, head_dim).transpose(1, 2)
+        k_raw, v_raw = project(self, context, ("k_proj", "v_proj"))
+        k = k_raw.view(batch, sources, kv_heads, head_dim).transpose(1, 2)
+        v = v_raw.view(batch, sources, kv_heads, head_dim).transpose(1, 2)
 
         if self.qk_norm == "rms_norm":
             q = self.q_norm(q)
@@ -173,7 +177,15 @@ class CrossAttention(nn.Module):
             q = F.normalize(q, p=2, dim=-1, eps=self.eps)
             k = F.normalize(k, p=2, dim=-1, eps=self.eps)
 
-        if self.logit_softcap > 0.0:
+        attended = None
+        if getattr(self, "_hndl_flex_attention", False):
+            attended = specialized_attention(
+                q, k, v, softcap=self.logit_softcap,
+                dropout_p=self.dropout if self.training else 0.0, owner=self,
+            )
+        if attended is not None:
+            pass
+        elif self.logit_softcap > 0.0:
             if kv_heads != heads:
                 repeats = heads // kv_heads
                 q_view = q.view(batch, kv_heads, repeats, positions, head_dim)

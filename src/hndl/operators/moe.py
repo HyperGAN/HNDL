@@ -5,7 +5,54 @@ from torch.nn import functional as F
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ._relations import non_image
+from ._packing import expert_parameters
 from .feed_forward import ACTIVATIONS
+
+
+
+class _RoutedLinear(torch.autograd.Function):
+    """Selected-expert matmuls with a bounded temporary in both passes.
+
+    Backward gathers weights again instead of saving one matrix per route.
+    That keeps activation memory proportional to routes, not routes*weights.
+    """
+
+    @staticmethod
+    def forward(ctx, inputs, weights, expert_ids, bias):
+        ctx.save_for_backward(inputs, weights, expert_ids)
+        ctx.has_bias = bias is not None
+        tile = max(1, min(64, 1048576 // (weights.shape[1] * weights.shape[2])))
+        ctx.tile = tile
+        out = inputs.new_empty((inputs.shape[0], weights.shape[1]))
+        for start in range(0, inputs.shape[0], tile):
+            end = start + tile
+            chosen = weights[expert_ids[start:end]]
+            result = torch.bmm(chosen, inputs[start:end].unsqueeze(-1)).squeeze(-1)
+            if bias is not None:
+                result = result + bias[expert_ids[start:end]]
+            out[start:end] = result
+        return out
+
+    @staticmethod
+    def backward(ctx, gradient):
+        inputs, weights, expert_ids = ctx.saved_tensors
+        input_gradient = torch.empty_like(inputs) if ctx.needs_input_grad[0] else None
+        weight_gradient = torch.zeros_like(weights) if ctx.needs_input_grad[1] else None
+        bias_gradient = (gradient.new_zeros((weights.shape[0], weights.shape[1]))
+                         if ctx.has_bias and ctx.needs_input_grad[3] else None)
+        for start in range(0, inputs.shape[0], ctx.tile):
+            end = start + ctx.tile
+            ids = expert_ids[start:end]
+            grad = gradient[start:end]
+            if input_gradient is not None:
+                input_gradient[start:end] = torch.bmm(
+                    weights[ids].transpose(1, 2), grad.unsqueeze(-1)).squeeze(-1)
+            if weight_gradient is not None:
+                products = grad.unsqueeze(-1) * inputs[start:end].unsqueeze(1)
+                weight_gradient = weight_gradient.index_add(0, ids, products)
+            if bias_gradient is not None:
+                bias_gradient = bias_gradient.index_add(0, ids, grad)
+        return input_gradient, weight_gradient, None, bias_gradient
 
 
 def _validate(args):
@@ -156,117 +203,52 @@ class MixtureOfExperts(nn.Module):
         values, indices = torch.topk(logits, self.top_k, dim=-1)
         if self.scoring == "sigmoid":
             scores = torch.sigmoid(values)
-            weights = scores / (scores.sum(dim=-1, keepdim=True).clamp(min=1e-4))
+            weights = scores / scores.sum(dim=-1, keepdim=True).clamp(min=1e-4)
         else:
             weights = torch.softmax(values, dim=-1)
-
-        N = flat.shape[0]
-        if N == 0:
+        if flat.shape[0] == 0:
             return flat.reshape(x.shape)
 
-        E = len(self.experts)
-        token_ids = torch.arange(N, device=flat.device).unsqueeze(1).expand(-1, self.top_k).reshape(-1)
-        flat_expert_ids = indices.reshape(-1)
-        flat_weights = weights.reshape(-1, 1)
+        token_ids = torch.arange(flat.shape[0], device=flat.device).repeat_interleave(self.top_k)
+        expert_ids = indices.reshape(-1)
+        routed_inputs = flat[token_ids]
+        up_w = expert_parameters(self, "up")
+        down_w = expert_parameters(self, "down")
+        up_b = expert_parameters(self, "up", "bias") if self.bias else None
+        down_b = expert_parameters(self, "down", "bias") if self.bias else None
 
-        sort_order = torch.argsort(flat_expert_ids)
-        sorted_expert_ids = flat_expert_ids[sort_order]
-        sorted_token_ids = token_ids[sort_order]
-        sorted_weights = flat_weights[sort_order]
-        sorted_inputs = flat[sorted_token_ids]
+        # Grouped GEMM is useful where available. The portable route below
+        # needs neither E*N padding nor a CPU readback of expert token counts.
+        grouped = (getattr(self, "_hndl_grouped_mm", False)
+                   and routed_inputs.dtype in (torch.bfloat16, torch.float16)
+                   and (not torch.compiler.is_compiling() or routed_inputs.dtype == torch.bfloat16))
+        if grouped:
+            order = torch.argsort(expert_ids)
+            routed_inputs = routed_inputs[order]
+            expert_ids = expert_ids[order]
+            token_ids = token_ids[order]
+            routing_weights = weights.reshape(-1, 1)[order]
+            counts = F.one_hot(expert_ids, num_classes=len(self.experts)).sum(dim=0)
+            offsets = counts.cumsum(0).to(torch.int32)
 
-        elem_bytes = sorted_inputs.element_size()
-        stride_ok = (
-            (self.d_model * elem_bytes) % 16 == 0 and (self.hidden * elem_bytes) % 16 == 0
-        )
-        use_grouped = (
-            hasattr(torch, "_grouped_mm")
-            and stride_ok
-            and sorted_inputs.dtype in (torch.float16, torch.bfloat16, torch.float32)
-            and (
-                not torch.compiler.is_compiling()
-                or sorted_inputs.dtype == torch.bfloat16
-            )
-        )
-
-        if use_grouped:
-            if torch.compiler.is_compiling():
-                counts = F.one_hot(sorted_expert_ids, num_classes=E).sum(dim=0)
-            else:
-                counts = torch.bincount(sorted_expert_ids, minlength=E)
-            offs = torch.cumsum(counts, dim=0, dtype=torch.int32)
-
-            if self.expert_kind == "swiglu":
-                gate_w = torch.stack([e.gate.weight for e in self.experts]).transpose(1, 2)
-                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
-                g = torch._grouped_mm(sorted_inputs, gate_w, offs)
-                u = torch._grouped_mm(sorted_inputs, up_w, offs)
-                if self.bias:
-                    gate_b = torch.stack([e.gate.bias for e in self.experts])
-                    up_b = torch.stack([e.up.bias for e in self.experts])
-                    g = g + gate_b[sorted_expert_ids]
-                    u = u + up_b[sorted_expert_ids]
-                act = F.silu(g) * u
-                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
-                expert_out = torch._grouped_mm(act, down_w, offs)
-                if self.bias:
-                    down_b = torch.stack([e.down.bias for e in self.experts])
-                    expert_out = expert_out + down_b[sorted_expert_ids]
-            else:
-                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
-                h = torch._grouped_mm(sorted_inputs, up_w, offs)
-                if self.bias:
-                    up_b = torch.stack([e.up.bias for e in self.experts])
-                    h = h + up_b[sorted_expert_ids]
-                act = self.experts[0].activation(h)
-                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
-                expert_out = torch._grouped_mm(act, down_w, offs)
-                if self.bias:
-                    down_b = torch.stack([e.down.bias for e in self.experts])
-                    expert_out = expert_out + down_b[sorted_expert_ids]
+            def linear(inputs, weight, bias):
+                result = torch._grouped_mm(inputs, weight.transpose(1, 2), offsets)
+                return result if bias is None else result + bias[expert_ids]
         else:
-            counts = F.one_hot(sorted_expert_ids, num_classes=E).sum(dim=0)
-            offs = torch.cat([torch.zeros(1, dtype=torch.long, device=flat.device), torch.cumsum(counts, 0)[:-1]])
-            intra_idx = torch.arange(sorted_expert_ids.shape[0], device=flat.device) - offs[sorted_expert_ids]
+            routing_weights = weights.reshape(-1, 1)
 
-            C_max = N
-            packed_inputs = torch.zeros(E, C_max, self.d_model, device=flat.device, dtype=flat.dtype)
-            packed_inputs[sorted_expert_ids, intra_idx] = sorted_inputs
+            def linear(inputs, weight, bias):
+                return _RoutedLinear.apply(inputs, weight, expert_ids, bias)
 
-            if self.expert_kind == "swiglu":
-                gate_w = torch.stack([e.gate.weight for e in self.experts]).transpose(1, 2)
-                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
-                g = torch.bmm(packed_inputs, gate_w)
-                u = torch.bmm(packed_inputs, up_w)
-                if self.bias:
-                    gate_b = torch.stack([e.gate.bias for e in self.experts]).unsqueeze(1)
-                    up_b = torch.stack([e.up.bias for e in self.experts]).unsqueeze(1)
-                    g = g + gate_b
-                    u = u + up_b
-                act = F.silu(g) * u
-                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
-                expert_out_bmm = torch.bmm(act, down_w)
-                if self.bias:
-                    down_b = torch.stack([e.down.bias for e in self.experts]).unsqueeze(1)
-                    expert_out_bmm = expert_out_bmm + down_b
-            else:
-                up_w = torch.stack([e.up.weight for e in self.experts]).transpose(1, 2)
-                h = torch.bmm(packed_inputs, up_w)
-                if self.bias:
-                    up_b = torch.stack([e.up.bias for e in self.experts]).unsqueeze(1)
-                    h = h + up_b
-                act = self.experts[0].activation(h)
-                down_w = torch.stack([e.down.weight for e in self.experts]).transpose(1, 2)
-                expert_out_bmm = torch.bmm(act, down_w)
-                if self.bias:
-                    down_b = torch.stack([e.down.bias for e in self.experts]).unsqueeze(1)
-                    expert_out_bmm = expert_out_bmm + down_b
-
-            expert_out = expert_out_bmm[sorted_expert_ids, intra_idx]
-
-        expert_out = expert_out * sorted_weights
-        out = torch.zeros_like(flat)
-        out.index_add_(0, sorted_token_ids, expert_out)
+        up = linear(routed_inputs, up_w, up_b)
+        if self.expert_kind == "swiglu":
+            gate_w = expert_parameters(self, "gate")
+            gate_b = expert_parameters(self, "gate", "bias") if self.bias else None
+            hidden = F.silu(linear(routed_inputs, gate_w, gate_b)) * up
+        else:
+            hidden = self.experts[0].activation(up)
+        expert_out = linear(hidden, down_w, down_b) * routing_weights
+        out = torch.zeros_like(flat).index_add(0, token_ids, expert_out)
         if self.routed_scaling_factor != 1.0:
             out = out * self.routed_scaling_factor
         return out.reshape(x.shape)
