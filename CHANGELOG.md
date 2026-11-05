@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add bounded incremental inference caches for causal attention, transformer blocks, latent attention (including compressed weight absorption), Mamba2, gated delta attention, learned positions and RoPE, with absolute position offsets, reusable KV storage, recurrent/convolution state, and session validation.
+
 ## 0.10.0 (2026-10-23)
 
 - Require patched build tooling (setuptools 84.2.1 and wheel 0.46.2 or newer) to prevent wheel unpack permission changes outside the extraction directory.
