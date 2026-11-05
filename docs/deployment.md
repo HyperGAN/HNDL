@@ -51,7 +51,9 @@ training. The loaded callable disables gradient recording itself. Stateful
 incremental decoding caches are not part of a deployment artifact.
 
 Compilation needs the C++ toolchain used by PyTorch; CUDA compilation also
-needs a compatible CUDA toolchain and GPU. The `.pt2` archive contains native
+needs a compatible CUDA toolchain and GPU. Set `CUDA_HOME` to a complete CUDA
+toolkit with runtime, CRT and CCCL headers and linkable CUDA runtime libraries.
+The `.pt2` archive contains native
 code, weights, and compiled kernels. The JSON manifest next to it records the
 environment that produced it. Load checks the package checksum, PyTorch build,
 Python version, CPU capabilities or GPU architecture, and numerical execution

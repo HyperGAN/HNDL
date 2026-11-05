@@ -45,6 +45,10 @@ _DERIVED_TABLES = {
     "hndl.operators.rope": {"_cache"},
     "hndl.operators.latent_attention": {"_cache"},
 }
+_PREPARED_METADATA = frozenset({
+    "_hndl_packed_layouts", "_hndl_packing_blocked", "_hndl_attention_masks",
+    "_hndl_attention_backend", "_hndl_attention_fallback_reason",
+})
 
 
 def _json(value):
@@ -132,7 +136,9 @@ def _semantic(value, seen=None):
         return {"method": _semantic(value.__func__, seen), "self": _semantic(value.__self__, seen)}
     if inspect.isfunction(value):
         globals_used = {name: value.__globals__[name] for name in value.__code__.co_names
-                        if name in value.__globals__ and not name.startswith("__")}
+                        if name in value.__globals__ and not name.startswith("__")
+                        and not (value.__module__ == "hndl.operators._attention_backend"
+                                 and name == "_compiled_flex")}
         return {"function": f"{value.__module__}.{value.__qualname__}",
                 "code": _semantic(value.__code__, seen), "source": _source(value),
                 "defaults": _semantic(value.__defaults__, seen),
@@ -149,7 +155,7 @@ def _semantic(value, seen=None):
 def _implementation(model):
     modules = []
     for name, module in model.nodes.named_modules():
-        ignored = _MODULE_INTERNALS | _DERIVED_TABLES.get(type(module).__module__, set())
+        ignored = _MODULE_INTERNALS | _PREPARED_METADATA | _DERIVED_TABLES.get(type(module).__module__, set())
         attrs = {key: value for key, value in vars(module).items() if key not in ignored}
         # Forward hooks are inference behavior; serialization/backward hooks are
         # not. Include code and closure state rather than registration IDs.
@@ -195,7 +201,7 @@ def _environment(device):
     return result
 
 
-def _toolchain():
+def _toolchain(device):
     command = shlex.split(os.environ.get("CXX") or shutil.which("g++") or "c++")
     try:
         result = subprocess.run([*command, "--version"], capture_output=True, text=True, timeout=5)
@@ -206,10 +212,19 @@ def _toolchain():
         triton = metadata.version("triton")
     except metadata.PackageNotFoundError:
         triton = None
-    return {"cxx": command, "version": version, "triton": triton,
-            "environment": {name: os.environ[name] for name in
-                            ("CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CUDA_HOME", "CUDA_PATH",
-                             "TORCH_CUDA_ARCH_LIST") if name in os.environ}}
+    result = {"cxx": command, "version": version, "triton": triton,
+              "environment": {name: os.environ[name] for name in
+                              ("CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CUDA_HOME", "CUDA_PATH",
+                               "TORCH_CUDA_ARCH_LIST") if name in os.environ}}
+    if device.type == "cuda":
+        from torch.utils.cpp_extension import CUDA_HOME
+
+        if CUDA_HOME is not None:
+            result["cuda_headers"] = {
+                name: _file_digest(Path(CUDA_HOME) / "include" / name)
+                for name in ("cuda.h", "cuda_runtime_api.h", "crt/host_defines.h", "nv/target")
+                if (Path(CUDA_HOME) / "include" / name).is_file()}
+    return result
 
 
 def _inputs(model, example_inputs):
@@ -336,7 +351,8 @@ def export(model, example_inputs, directory, *, cache=True, max_entries=8,
         model(*values)  # validate contracts and materialize derived lookup tables
     specification = {
         "plan": model.plan.semantic_digest, "implementation": _implementation(model),
-        "state": _state(model), "environment": _environment(values[0].device), "toolchain": _toolchain(),
+        "state": _state(model), "environment": _environment(values[0].device),
+        "toolchain": _toolchain(values[0].device),
         "inputs": [_contract(name, value) for name, value in zip(model.plan.inputs, values)],
         "outputs": list(model.plan.outputs), "inductor_configs": configs,
         "exporter": {"deployment": _file_digest(__file__),

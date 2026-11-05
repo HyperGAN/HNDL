@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -220,3 +221,22 @@ def test_native_cpu_compile_load_and_input_guards(tmp_path, monkeypatch, named):
     monkeypatch.setattr(deployment, "_environment", lambda device: {**environment(device), "torch": "different"})
     with pytest.raises(HNDLError, match="runtime or hardware"):
         load(artifact)
+
+
+@pytest.mark.cuda
+def test_native_cuda_compile_load_and_cache_reuse(tmp_path):
+    if not torch.cuda.is_available():
+        pytest.skip("native CUDA deployment requires a CUDA device")
+    if not os.environ.get("CUDA_HOME"):
+        pytest.skip("native CUDA compilation requires a configured CUDA toolkit (CUDA_HOME)")
+    device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
+    model = network("linear(128); relu(); linear(10)", input_shape=("B", 64),
+                    output_shape=("B", 10), device=device).eval()
+    x = torch.randn(2, 64, device=device)
+    with torch.no_grad():
+        expected = model(x)
+    artifact = export(model, (x,), tmp_path)
+    actual = load(artifact)(x)
+    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+    assert actual.device == x.device
+    assert export(model, (x,), tmp_path).cache_hit
