@@ -724,7 +724,9 @@ def test_a_torch_error_inside_a_node_keeps_its_type_and_names_the_node(fail_from
                     device="cpu", registry=_flaky_registry(fail_from_call))
     for _ in range(fail_from_call - 1):
         model(torch.randn(2, 4))
-    with pytest.raises(RuntimeError, match=r"^mat1 and mat2 shapes cannot be multiplied \(2x4 and 3x3\)\n") as caught:
+    # Newer Torch versions prefix the kernel name; preserve the same error
+    # and dimensions while checking HNDL's added context independently.
+    with pytest.raises(RuntimeError, match=r"^(?:mm: )?mat1 and mat2 shapes cannot be multiplied \(2x4 and 3x3\)\n") as caught:
         model(torch.randn(2, 4))
     assert type(caught.value) is RuntimeError
     assert _hndl_notes(caught.value) == [
@@ -793,7 +795,7 @@ def test_an_upstream_node_changing_its_output_after_validation_is_reported_at_th
     model = network('drifts(name="d")\nlinear(4, name="head")', input_shape=("B", 4), output_shape=("B", 4),
                     device="cpu", registry=registry)
     model(torch.randn(2, 4))
-    with pytest.raises(RuntimeError, match="^mat1 and mat2") as caught:
+    with pytest.raises(RuntimeError, match=r"^(?:addmm: )?mat1 and mat2 shapes cannot be multiplied \(2x2 and 4x4\)") as caught:
         model(torch.randn(2, 4))
     assert _hndl_notes(caught.value)[0].splitlines()[:2] == [
         "HNDL: raised inside node 'head' (linear, line 2, column 1)",
