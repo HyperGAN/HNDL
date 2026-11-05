@@ -357,3 +357,29 @@ def test_root_hooks_keep_original_module_identity_and_execute_once():
     for _ in range(2):
         torch.testing.assert_close(prepared(x), expected)
     assert calls == ["before", "after", "before", "after"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_replay_pins_rotary_tables_after_cache_growth_and_eviction():
+    source = network("attention(4,rope=True,causal=True)", input_shape=("B", 8, 64),
+                     output_shape=("B", 8, 64), device="cuda:0").eval()
+    # Different valid sequence sizes are normally supplied through separate
+    # resolved contracts. A second model sharing the layer grows its table.
+    other = network("attention(4,rope=True,causal=True)", input_shape=("B", 16, 64),
+                    output_shape=("B", 16, 64), device="cuda:0").eval()
+    other.nodes._modules["n_n0"] = source[0]
+    other.rebind_state()
+    x = torch.randn(2, 8, 64, device="cuda:0")
+    with torch.inference_mode():
+        expected = source(x)
+        prepared = source.prepare(backend="cuda_graph")
+        torch.testing.assert_close(prepared(x), expected)
+        pointers = {t.untyped_storage().data_ptr() for tables in source[0]._rope_cache.values() for t in tables}
+        other(torch.randn(2, 16, 64, device="cuda:0"))
+        source[0]._rope_cache.clear()
+        entry = next(iter(prepared._graphs.values()))
+        retained = {t.untyped_storage().data_ptr() for t in entry[5]}
+        assert pointers <= retained
+        scratch = torch.full((2, 8, 64), 1e6, device="cuda:0")
+        torch.testing.assert_close(prepared(x), expected)
+        assert scratch.isfinite().all()

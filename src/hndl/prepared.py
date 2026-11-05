@@ -132,6 +132,32 @@ def _clone_output(result):
     return result.clone()
 
 
+def _captured_tensors(model):
+    """Pin tensor storage in derived tables as well as registered model state."""
+    result, seen = [], set()
+
+    def collect(value):
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, torch.Tensor):
+            result.append(value.detach())
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                collect(item)
+        elif not isinstance(value, nn.Module) and not callable(value) and hasattr(value, "__dict__"):
+            collect(vars(value))
+
+    collect(model._parameters)
+    collect(model._buffers)
+    for module in model.nodes.modules():
+        collect(vars(module))
+    return tuple(result)
+
+
 class PreparedNetwork(nn.Module):
     """A generated executor sharing a graph's layers, hooks and optimizer state.
 
@@ -294,17 +320,27 @@ class PreparedNetwork(nn.Module):
                         if segment["device"] == device.index
                         and tuple(segment.get("segment_pool_id", ())) == tuple(graph.pool())]
             input_bytes = sum(v.untyped_storage().nbytes() for v in static_inputs)
+            captured_state = _captured_tensors(self.source)
+            registered = {(v.device, v.untyped_storage().data_ptr()) for v in (
+                *self.source.parameters(), *self.source.buffers())}
+            derived = {}
+            for value in captured_state:
+                pointer = value.untyped_storage().data_ptr()
+                key = (value.device, pointer)
+                if (value.device == device and key not in registered
+                        and not any(segment["address"] <= pointer < segment["address"] + segment["total_size"]
+                                    for segment in segments)):
+                    derived[key] = value.untyped_storage().nbytes()
             size = (sum(segment["total_size"] for segment in segments) + input_bytes
                     if segments else max(torch.cuda.memory_reserved(device),
                                          torch.cuda.memory_allocated(device) - before))
+            size += sum(derived.values())
         if size > self.max_graph_bytes:
             raise HNDLError("E_RESOURCE", f"CUDA graph needs {size} bytes; max_graph_bytes={self.max_graph_bytes}")
         while self._graphs and self._graph_bytes + size > self.max_graph_bytes:
             self._evict_graph()
         # Keep the actual captured storage alive through in-flight replay, even
         # if a Parameter is replaced or its .data storage is reassigned.
-        captured_state = tuple(value.detach() for value in (
-            *self.source.parameters(), *self.source.buffers()))
         entry = (graph, static_inputs, outputs, size, torch.cuda.Event(), captured_state)
         self._graphs[key] = entry
         self._graph_bytes += size

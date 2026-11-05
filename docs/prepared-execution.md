@@ -51,8 +51,10 @@ the number of graphs and their retained CUDA allocations. A graph larger than
 the byte budget raises `E_RESOURCE`; evicted graphs release their owned buffers.
 `fast.cache_info` reports the retained graph count and byte accounting;
 `fast.clear_cache()` releases all entries. The byte budget counts graph-owned
-private pools, including inactive captured intermediates, and persistent input
-buffers. Model weights, caller-owned output clones, shared CUDA library
+private pools, including inactive captured intermediates, persistent input
+buffers and pinned derived tables such as rotary embeddings and block masks.
+Shared tables are counted conservatively for each retaining entry. Model weights,
+caller-owned output clones, shared CUDA library
 workspaces and PyTorch's ordinary allocator cache are outside that budget.
 Capture uses one shared stream per CUDA device; library warmup has a fixed
 framework footprint rather than requiring a new stream for each cache entry.
