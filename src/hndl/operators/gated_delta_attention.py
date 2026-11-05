@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..inference import _causal_conv
+from ._packing import clear_packed_cache, project
 from ..operator import Arg, Example, operator
 
 
@@ -277,11 +278,20 @@ class GatedDeltaAttention(nn.Module):
         self.rms_norm_weight = nn.Parameter(torch.ones(self.heads, self.head_dim))
         self.o_proj = nn.Linear(inner_dim, self.D, bias=self.bias)
 
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        if getattr(self, "_hndl_packing", False):
+            clear_packed_cache(self)
+        return result
+
     def _prepare_inputs(self, x, state=None):
         b, t, _ = x.shape
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        if getattr(self, "_hndl_packing", False):
+            q, k, v = project(self, x, ("q_proj", "k_proj", "v_proj"))
+        else:
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
 
         if self.conv_size > 0:
             pad = (self.conv_size - 1, 0)
