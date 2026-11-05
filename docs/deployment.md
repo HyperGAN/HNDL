@@ -50,6 +50,12 @@ that require gradients, and continue using the original HNDL model for
 training. The loaded callable disables gradient recording itself. Stateful
 incremental decoding caches are not part of a deployment artifact.
 
+Export the original `GraphModule` or `Network`. Root forward/pre-forward hooks,
+global forward hooks, and custom root forward overrides are rejected because a
+generated tensor executor cannot preserve their original root-call semantics.
+Put that computation in a registered operator instead. Ordinary hooks on
+individual node modules remain part of captured operator behavior.
+
 Compilation needs the C++ toolchain used by PyTorch; CUDA compilation also
 needs a compatible CUDA toolchain and GPU. Set `CUDA_HOME` to a complete CUDA
 toolkit with runtime, CRT and CCCL headers and linkable CUDA runtime libraries.
@@ -71,6 +77,28 @@ The C++ compiler identity, Triton version, and build environment also
 participate in export cache keys. Loading a package does not query the C++
 compiler, so the compiler need not be present solely for this compatibility
 check.
+
+## Exclusive inference execution
+
+PyTorch versions whose AOTInductor loader supports `run_single_threaded` can
+skip the native runner pool's thread synchronization:
+
+```python
+predict = load(artifact, run_single_threaded=True)
+scores = predict(x)
+```
+
+Use this mode for one caller and, on CUDA, one stream per loaded instance.
+Overlapping host calls raise an error. A CUDA instance binds to its first
+call's stream and rejects later calls on another stream. These checks avoid a
+GPU synchronization on each call; outputs retain their normal independent
+lifetime. Load another instance for a different CUDA stream. CPU calls also
+reject overlapping execution.
+
+The default loader preserves the native runner's synchronization behavior.
+An explicit exclusive-mode request on an older loader produces an unsupported
+feature error. This option can matter substantially for tiny CUDA workloads;
+measure it separately from exported computation and package startup.
 
 ## Artifact reuse and storage bounds
 

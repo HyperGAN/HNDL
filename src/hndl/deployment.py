@@ -7,7 +7,7 @@ explicit operations; the resulting packages contain native executable code.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import functools
 import hashlib
@@ -21,6 +21,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import types
 
 from .errors import HNDLError
@@ -215,7 +216,8 @@ def _toolchain(device):
         triton = None
     result = {"cxx": command, "version": version, "triton": triton,
               "environment": {name: os.environ[name] for name in
-                              ("CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CUDA_HOME", "CUDA_PATH",
+                              ("CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CPATH", "C_INCLUDE_PATH",
+                               "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "CUDA_HOME", "CUDA_PATH",
                                "TORCH_CUDA_ARCH_LIST") if name in os.environ}}
     if device.type == "cuda":
         from torch.utils.cpp_extension import CUDA_HOME
@@ -338,6 +340,15 @@ def export(model, example_inputs, directory, *, cache=True, max_entries=8,
         raise HNDLError("E_UNSUPPORTED", "this PyTorch build does not provide AOTInductor packaging")
     if not hasattr(model, "plan") or not hasattr(model, "nodes"):
         raise HNDLError("E_ARGUMENT", "export expects a built HNDL model")
+    from .torch import GraphModule, Network
+    from torch.nn.modules import module as torch_module
+
+    if (type(model) not in (GraphModule, Network)
+            or getattr(model.forward, "__func__", None) not in (GraphModule.forward, Network.forward)):
+        raise HNDLError("E_UNSUPPORTED", "deployment requires the original GraphModule or Network forward; put custom root behavior in a registered operator")
+    if (model._forward_hooks or model._forward_pre_hooks
+            or torch_module._global_forward_hooks or torch_module._global_forward_pre_hooks):
+        raise HNDLError("E_UNSUPPORTED", "deployment cannot preserve root or global forward hooks; put their computation in a registered operator")
     if any(module.training for module in model.modules()):
         raise HNDLError("E_UNSUPPORTED", "call model.eval() before inference deployment export")
     if type(max_entries) is not int or max_entries < 1 or type(max_bytes) is not int or max_bytes < 1:
@@ -416,12 +427,14 @@ def export(model, example_inputs, directory, *, cache=True, max_entries=8,
 class DeploymentModel:
     """A loaded native inference callable with fixed shape/dtype/stride guards."""
 
-    def __init__(self, runner, manifest):
+    def __init__(self, runner, manifest, *, run_single_threaded=False):
         self._runner = runner
         self.manifest = manifest
         self._inputs = tuple({**contract, "shape": list(contract["shape"]), "stride": list(contract["stride"])}
                              for contract in manifest["specification"]["inputs"])
         self._names = tuple(contract["name"] for contract in self._inputs)
+        self._serial_lock = threading.Lock() if run_single_threaded else None
+        self._serial_stream = None
 
     def __call__(self, *inputs, **named):
         import torch
@@ -440,18 +453,54 @@ class DeploymentModel:
                 raise HNDLError("E_RUNTIME", f"deployment input {contract['name']!r} must match {contract}")
             if value.requires_grad:
                 raise HNDLError("E_UNSUPPORTED", "deployment is inference-only; detach the inputs")
-        with torch.no_grad():
-            return self._runner(*bound)
+        if self._serial_lock is None:
+            with torch.no_grad():
+                return self._runner(*bound)
+        if not self._serial_lock.acquire(blocking=False):
+            raise HNDLError("E_RUNTIME", "single-threaded deployment cannot execute overlapping host calls")
+        try:
+            device = bound[0].device
+            # The native serial path also omits its ordinary CUDA device
+            # guard. Preserve explicit cuda:N input semantics when another
+            # device happens to be current on the caller's host thread.
+            guard = (torch.cuda.device(device) if device.type == "cuda"
+                     and torch.cuda.current_device() != device.index else nullcontext())
+            with guard:
+                if device.type == "cuda":
+                    stream = torch.cuda.current_stream(device).cuda_stream
+                    if self._serial_stream is not None and self._serial_stream != stream:
+                        raise HNDLError("E_RUNTIME", "single-threaded deployment is bound to its first CUDA stream; load another instance for another stream")
+                    self._serial_stream = stream
+                with torch.no_grad():
+                    return self._runner(*bound)
+        finally:
+            self._serial_lock.release()
 
 
-def load(artifact, *, check_environment=True):
+def load(artifact, *, check_environment=True, run_single_threaded=False):
     """Load a native package after validating its checksum and runtime ABI.
 
     Set ``check_environment=False`` only when the caller has independently
     established compatibility of the compiler/runtime and target hardware.
+    ``run_single_threaded=True`` skips the native model pool's synchronization
+    on supporting PyTorch versions. Host calls must not overlap, and a CUDA
+    instance is bound to the stream used by its first call. These restrictions
+    are checked without synchronizing the GPU.
     """
     import torch
     import torch._inductor as inductor
+
+    if type(run_single_threaded) is not bool:
+        raise HNDLError("E_ARGUMENT", "run_single_threaded must be a boolean")
+    options = {}
+    if run_single_threaded:
+        try:
+            supported = "run_single_threaded" in inspect.signature(inductor.aoti_load_package).parameters
+        except (AttributeError, TypeError, ValueError):
+            supported = False
+        if not supported:
+            raise HNDLError("E_UNSUPPORTED", "this PyTorch loader does not support run_single_threaded; use the default loader")
+        options["run_single_threaded"] = True
 
     path, _ = _paths(artifact)
     path = path.expanduser().resolve()
@@ -464,6 +513,8 @@ def load(artifact, *, check_environment=True):
             raise HNDLError("E_DEPLOYMENT", "deployment runtime or hardware differs from the compilation environment; rebuild the package")
         if not hasattr(inductor, "aoti_load_package"):
             raise HNDLError("E_UNSUPPORTED", "this PyTorch build does not provide AOTInductor package loading")
-        runner = inductor.aoti_load_package(str(path))
+        device = torch.device(contract["device"])
+        with torch.cuda.device(device) if device.type == "cuda" else nullcontext():
+            runner = inductor.aoti_load_package(str(path), **options)
         os.utime(path.with_suffix(".json"), None)
-    return DeploymentModel(runner, manifest)
+    return DeploymentModel(runner, manifest, run_single_threaded=run_single_threaded)
