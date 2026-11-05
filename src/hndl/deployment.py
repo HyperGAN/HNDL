@@ -48,6 +48,7 @@ _DERIVED_TABLES = {
 _PREPARED_METADATA = frozenset({
     "_hndl_packed_layouts", "_hndl_packing_blocked", "_hndl_attention_masks",
     "_hndl_attention_backend", "_hndl_attention_fallback_reason",
+    "_hndl_packing_owner", "_hndl_packing_module_id",
 })
 
 
