@@ -227,6 +227,7 @@ def test_compiled_preparation_tracks_rebind_and_external_training_mode():
     torch.testing.assert_close(compiled(x), source(x))
     source.eval()
     assert prepared._export_module.training is False
+    assert prepared.training is False
     torch.testing.assert_close(compiled(x), source(x))
 
 
@@ -280,3 +281,79 @@ def test_cuda_graph_serializes_shared_buffers_across_streams():
         prepared.clear_cache()  # Also waits for in-flight replay and output clones.
         torch.testing.assert_close(y1, source(x1))
         torch.testing.assert_close(y2, source(x2))
+
+
+def test_packed_preparation_optimizer_functional_cast_and_deepcopy():
+    from hndl.operators._packing import clear_packed
+
+    source = network("swiglu(32); linear(4)", input_shape=("B", 8),
+                     output_shape=("B", 4), device="cpu")
+    reference = copy.deepcopy(source)
+    before = list(source.parameters())
+    optimizer = torch.optim.SGD(before, lr=0.01)
+    fast = source.prepare(pack=True)
+    assert all(a is b for a, b in zip(before, fast.parameters()))
+    for _ in range(2):
+        x = torch.randn(3, 8, requires_grad=True)
+        xr = x.detach().clone().requires_grad_()
+        actual, expected = fast(x), reference(xr)
+        torch.testing.assert_close(actual, expected)
+        actual.square().sum().backward()
+        expected.square().sum().backward()
+        torch.testing.assert_close(x.grad, xr.grad)
+        for p, pr in zip(source.parameters(), reference.parameters()):
+            torch.testing.assert_close(p.grad, pr.grad)
+        optimizer.step()
+        with torch.no_grad():
+            for parameter in reference.parameters():
+                parameter.add_(parameter.grad, alpha=-0.01)
+        optimizer.zero_grad()
+        reference.zero_grad()
+    replacements = {name: value * 1.1 for name, value in source.named_parameters()}
+    torch.testing.assert_close(torch.func.functional_call(fast, replacements, (x,)),
+                               torch.func.functional_call(reference, replacements, (x,)))
+    fast.double()
+    reference.double()
+    torch.testing.assert_close(fast(x.double()), reference(x.double()))
+    cloned = copy.deepcopy(fast)
+    clear_packed(reference)
+    torch.testing.assert_close(cloned(x.double()), reference(x.double()))
+    assert all(a.data_ptr() != b.data_ptr() for a, b in zip(cloned.parameters(), fast.parameters()))
+
+
+def test_compiled_named_outputs_use_plain_dictionaries():
+    plan = resolve("left = linear(x,4); right = relu(left)", input_shape=("B", 4),
+                   output_shape={"left": ("B", 4), "right": ("B", 4)})
+    graph = build(plan, device="cpu")
+    compiled = torch.compile(graph.prepare(), backend="eager", fullgraph=True)
+    x = torch.randn(2, 4)
+    actual = compiled(x=x)
+    assert type(actual) is dict
+    expected = graph(x=x)
+    for name in expected:
+        torch.testing.assert_close(actual[name], expected[name])
+
+
+def test_root_hooks_keep_original_module_identity_and_execute_once():
+    source = network("linear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    calls = []
+
+    def before(module, inputs):
+        assert module is source
+        calls.append("before")
+        return (inputs[0] + 2,)
+
+    def after(module, inputs, result):
+        assert module is source
+        calls.append("after")
+        return result * 3
+
+    source.register_forward_pre_hook(before)
+    source.register_forward_hook(after)
+    prepared = source.prepare()
+    x = torch.randn(2, 4)
+    expected = source(x)
+    calls.clear()
+    for _ in range(2):
+        torch.testing.assert_close(prepared(x), expected)
+    assert calls == ["before", "after", "before", "after"]

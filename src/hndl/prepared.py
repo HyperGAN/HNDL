@@ -17,6 +17,10 @@ from .errors import HNDLError
 from . import torch as _runtime
 
 
+_CAPTURE_LOCK = threading.RLock()
+_CAPTURE_STREAMS = {}
+
+
 def _one(result, port):
     if type(result) is torch.Tensor:
         return result
@@ -128,12 +132,6 @@ def _clone_output(result):
     return result.clone()
 
 
-def _tensor_bytes(value):
-    if isinstance(value, dict):
-        return sum(_tensor_bytes(v) for v in value.values())
-    return value.numel() * value.element_size()
-
-
 class PreparedNetwork(nn.Module):
     """A generated executor sharing a graph's layers, hooks and optimizer state.
 
@@ -157,12 +155,15 @@ class PreparedNetwork(nn.Module):
             raise ValueError("max_graphs must be a positive integer")
         if type(max_graph_bytes) is not int or max_graph_bytes <= 0:
             raise ValueError("max_graph_bytes must be a positive integer")
+        self._packing_enabled = bool(pack)
         if pack:
             from .operators._packing import prepare_packed
-            prepare_packed(model)
+            model.rebind_state()  # Finish replay before moving parameter storage.
+            prepare_packed(model, trusted=True)
             model.rebind_state()
         if attention_backend != "reference":
             from .operators._attention_backend import prepare_attention
+            model.rebind_state()  # Release captures before resetting cached masks.
             prepare_attention(model, backend=attention_backend)
         # Register the existing node tree at its original path, so checkpoints,
         # optimizers and enclosing PyTorch modules keep ordinary state names.
@@ -190,11 +191,15 @@ class PreparedNetwork(nn.Module):
                 self(*tuple(example_inputs))
 
     def _refresh(self):
+        self.clear_cache()
+        self.training = self.source.training
         self.source._verify_state("build")
+        if self._packing_enabled:
+            from .operators._packing import prepare_packed
+            prepare_packed(self.source, trusted=True)
         object.__setattr__(self, "_export_module", execution_module(self.source))
         self._epoch = getattr(self.source, "_preparation_epoch", 0)
         self._generation = _runtime._watch_generation
-        self.clear_cache()
 
     def clear_cache(self):
         """Release retained replay buffers and forget validated signatures."""
@@ -209,7 +214,7 @@ class PreparedNetwork(nn.Module):
     def __deepcopy__(self, memo):
         result = type(self)(copy.deepcopy(self.source, memo), backend=self.backend,
                             max_graphs=self.max_graphs, max_graph_bytes=self.max_graph_bytes,
-                            clone_outputs=self.clone_outputs)
+                            clone_outputs=self.clone_outputs, pack=self._packing_enabled)
         memo[id(self)] = result
         for name, value in self.__dict__.items():
             if "hook" in name:
@@ -265,12 +270,15 @@ class PreparedNetwork(nn.Module):
         while self._graphs and len(self._graphs) >= self.max_graphs:
             self._evict_graph()
         device = inputs[0].device
-        with torch.cuda.device(device):
+        with _CAPTURE_LOCK, torch.cuda.device(device):
             before = torch.cuda.memory_allocated(device)
             # Preserve strides, including non-contiguous tensor inputs.
             static_inputs = tuple(torch.empty_strided(v.shape, v.stride(), dtype=v.dtype,
                                                       device=v.device).copy_(v) for v in inputs)
-            stream = torch.cuda.Stream(device=device)
+            stream = _CAPTURE_STREAMS.get(device.index)
+            if stream is None:
+                stream = torch.cuda.Stream(device=device)
+                _CAPTURE_STREAMS[device.index] = stream
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
                 for _ in range(3):
@@ -293,7 +301,11 @@ class PreparedNetwork(nn.Module):
             raise HNDLError("E_RESOURCE", f"CUDA graph needs {size} bytes; max_graph_bytes={self.max_graph_bytes}")
         while self._graphs and self._graph_bytes + size > self.max_graph_bytes:
             self._evict_graph()
-        entry = (graph, static_inputs, outputs, size, torch.cuda.Event())
+        # Keep the actual captured storage alive through in-flight replay, even
+        # if a Parameter is replaced or its .data storage is reassigned.
+        captured_state = tuple(value.detach() for value in (
+            *self.source.parameters(), *self.source.buffers()))
+        entry = (graph, static_inputs, outputs, size, torch.cuda.Event(), captured_state)
         self._graphs[key] = entry
         self._graph_bytes += size
         return entry
@@ -322,7 +334,7 @@ class PreparedNetwork(nn.Module):
             raise HNDLError("E_RUNTIME", "CUDA graph preparation requires autocast disabled; cast the model explicitly")
         if not inputs or any(v.device.type != "cuda" or v.device != inputs[0].device for v in inputs):
             raise HNDLError("E_RUNTIME", "CUDA graph execution requires all inputs on one CUDA device")
-        graph, buffers, outputs, _, completed = self._graph(inputs, key)
+        graph, buffers, outputs, _, completed, _ = self._graph(inputs, key)
         current_stream = torch.cuda.current_stream(inputs[0].device)
         current_stream.wait_event(completed)
         for buffer, value in zip(buffers, inputs):
@@ -371,6 +383,11 @@ class PreparedNetwork(nn.Module):
         return checked if checked is not None else self._export_module(*inputs)
 
     def forward(self, *args, cache=None, **named):
+        if self.backend != "cuda_graph" and (self.source._forward_hooks
+                or self.source._forward_pre_hooks or self.source._backward_hooks):
+            # Root hooks belong to the original module; let PyTorch invoke
+            # them with that module and its normal input/output conventions.
+            return self.source(*args, cache=cache, **named)
         inputs = self.source._bind(args, named)
         if _runtime._is_compiling():
             if cache is not None or self.backend == "cuda_graph":
@@ -378,7 +395,7 @@ class PreparedNetwork(nn.Module):
             if self._epoch != self.source._preparation_epoch:
                 raise HNDLError("E_RUNTIME", "prepared executor changed; call source.rebind_state() before compiled execution")
             self._export_module.training = self.source.training
-            return self._format(self._export_module(*inputs), args, named)
+            return self._format(self._export_module(*inputs), args, named, compiling=True)
         if self.backend == "generated" and cache is None:
             if (self._epoch != self.source._preparation_epoch
                     or self._generation != _runtime._watch_generation):
@@ -422,9 +439,9 @@ class PreparedNetwork(nn.Module):
                 result = self._export_module(*inputs)
             return self._format(result, args, named)
 
-    def _format(self, result, args, named):
+    def _format(self, result, args, named, compiling=False):
         if self.source._single_output:
             if self._always_single or (args and not named):
                 return result
-            return _runtime.OutputDict({next(iter(self.source.plan.outputs)): result})
-        return _runtime.OutputDict(result)
+            result = {next(iter(self.source.plan.outputs)): result}
+        return result if compiling else _runtime.OutputDict(result)

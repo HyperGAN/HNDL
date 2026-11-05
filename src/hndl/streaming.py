@@ -47,7 +47,9 @@ def _axes(model):
             stateful = True
         input_shape = node.input_shapes[streaming[0]]
         for port, shape in node.output_shapes.items():
-            if len(shape) != 3 or shape[1] != input_shape[1]:
+            tokenwise_ids = (len(input_shape) == len(shape) == 2
+                             and alias in {"cast", "identity", "dropout"})
+            if (len(shape) != 3 and not tokenwise_ids) or shape[1] != input_shape[1]:
                 raise HNDLError("E_UNSUPPORTED", f"{alias} {node.id!r} must preserve the sequence axis")
             axes[f"node:{node.id}/{port}"] = 1
     if not stateful:

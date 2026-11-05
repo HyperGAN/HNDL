@@ -364,6 +364,8 @@ class GraphModule(nn.Module):
 
     def rebind_state(self):
         """Re-synchronize state snapshot and C-speed stores record after external modifications."""
+        for prepared in tuple(self._prepared_dependents):
+            prepared.clear_cache()
         self._state_program = self._state_snapshot()
         _watch(self._state_program)
         global _watch_generation
@@ -461,6 +463,8 @@ class GraphModule(nn.Module):
             "hndl.torch.build(), or use copy.deepcopy() for an in-memory copy")
 
     def _apply(self, fn, recurse=True):
+        for prepared in tuple(self._prepared_dependents):
+            prepared.clear_cache()
         super()._apply(fn, recurse=recurse)
         # An empty tensor also tracks device moves and dtype casts for
         # parameterless graphs, which hold no state of their own to follow.

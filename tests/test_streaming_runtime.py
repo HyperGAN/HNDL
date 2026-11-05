@@ -95,3 +95,15 @@ def test_cached_graph_error_during_forward_invalidates_session():
             model(torch.randn(2, 1, 16), cache=cache)
         with pytest.raises(HNDLError, match="previous cached call failed"):
             model(torch.randn(2, 1, 16), cache=cache)
+
+
+def test_token_id_cast_can_preserve_rank_two_sequence_axis():
+    model = network("cast('int64'); embedding(32,16); attention(4,causal=True)",
+                    input_shape=("B", 5), input_dtype="int32",
+                    output_shape=("B", 5, 16), device="cpu").eval()
+    x = torch.randint(0, 32, (2, 5), dtype=torch.int32)
+    with torch.no_grad():
+        expected = model(x)
+        cache = InferenceCache(8)
+        actual = torch.cat([model(part, cache=cache) for part in x.split((2, 1, 2), dim=1)], dim=1)
+        torch.testing.assert_close(actual, expected)

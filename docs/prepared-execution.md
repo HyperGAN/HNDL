@@ -16,7 +16,7 @@ loss = fast(x).square().mean()
 loss.backward()
 ```
 
-The first call for an input shape, stride, dtype, device and training mode runs
+The first call for an input shape, dtype, device and training mode runs
 the checked executor. Subsequent calls use generated tensor locals and release
 intermediates after their last consumer. Preparation does not copy or initialize
 weights. The input binding and output conventions match the original model.
@@ -46,12 +46,17 @@ with torch.inference_mode():
     y = fast(x)
 ```
 
-Each distinct input signature gets a separate graph. An LRU cache limits both
+Each distinct input signature, including strides and gradient mode, gets a separate graph. An LRU cache limits both
 the number of graphs and their retained CUDA allocations. A graph larger than
 the byte budget raises `E_RESOURCE`; evicted graphs release their owned buffers.
 `fast.cache_info` reports the retained graph count and byte accounting;
-`fast.clear_cache()` releases all entries. PyTorch's ordinary allocator may
-retain freed memory for later reuse.
+`fast.clear_cache()` releases all entries. The byte budget counts graph-owned
+private pools, including inactive captured intermediates, and persistent input
+buffers. Model weights, caller-owned output clones, shared CUDA library
+workspaces and PyTorch's ordinary allocator cache are outside that budget.
+Capture uses one shared stream per CUDA device; library warmup has a fixed
+framework footprint rather than requiring a new stream for each cache entry.
+PyTorch's ordinary allocator may retain freed memory for later reuse.
 
 Outputs are cloned by default so earlier results remain independent of later
 calls. Set `clone_outputs=False` only when the consumer finishes before the next
