@@ -87,12 +87,12 @@ fast = model.prepare()
 scores = fast(x)
 ```
 
-The [prepared execution guide](docs/prepared-execution.md) covers bounded CUDA
+The [prepared execution guide](https://hypergan.github.io/HNDL/prepared-execution/) covers bounded CUDA
 graph replay, measured backend selection and output ownership. Causal models
-can use [incremental inference caches](docs/incremental-decoding.md) to process
-only new tokens. Optional [packed operators and fused attention](docs/optimized-operators.md)
-and [native deployment packages](docs/deployment.md) provide more execution
-choices. See the [performance measurements](docs/performance.md) for setup,
+can use [incremental inference caches](https://hypergan.github.io/HNDL/incremental-decoding/) to process
+only new tokens. Optional [packed operators and fused attention](https://hypergan.github.io/HNDL/optimized-operators/)
+and [native deployment packages](https://hypergan.github.io/HNDL/deployment/) provide more execution
+choices. See the [performance measurements](https://hypergan.github.io/HNDL/performance/) for setup,
 inference, training and memory results on CPU and CUDA.
 
 ## The same network in native Python
