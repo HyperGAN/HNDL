@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add bounded incremental inference caches for causal attention, transformer blocks, latent attention (including compressed weight absorption), Mamba2, gated delta attention, learned positions and RoPE, with absolute position offsets, reusable KV storage, recurrent/convolution state, and session validation.
 - Add the optional `particlegan` extra for ParticleGAN 0.9.4 and a CPU example that trains a frozen-base, low-rank HNDL graph with the public default recipe and a real particle prior. Document existing routed particle-slider integration and its recipe/version boundaries.
 
 ## 0.10.0 (2026-10-23)
