@@ -1,8 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 (2026-11-04)
 
-- Add the optional `particlegan` extra for ParticleGAN 0.9.4 and a CPU example that trains a frozen-base, low-rank HNDL graph with the public default recipe and a real particle prior. Document existing routed particle-slider integration and its recipe/version boundaries.
+- Add opt-in performance measurements and a hardware-specific report covering prepared setup/inference/training, bounded replay memory, incremental decoding, packed operators, fused attention and native deployment startup/runtime.
+- Add exclusive native deployment execution on supporting PyTorch loaders, with host-call and CUDA-stream guards, and reject root hooks or custom root forwards that cannot preserve export semantics.
+- Use packed QKV projections in prepared self-attention and gated delta attention, and dispatch prepared softcap/sliding-window self-attention to fused FlexAttention without dense window masks, including incremental position offsets.
+- Add prepared graph execution sharing existing parameters, optimizer references and checkpoint names, with generated tensor lifetimes, optional bounded CUDA graph replay, independent or borrowed outputs, and measured inference strategy selection.
+- Keep CUDA replay buffers alive until pending cross-stream work finishes when a prepared executor is garbage-collected, preventing allocator reuse from corrupting unrelated tensors.
+- Validate incremental graphs against tokenwise sequence contracts, unify the public inference cache APIs, and generate cached forward programs after the first checked input signature instead of rechecking every layer on every decoding step.
+- Rebuild checked shape programs after `rebind_state()` so the first call after a layer replacement uses the new layer.
+- Add opt-in packed QKV, cross-attention KV, SwiGLU and expert parameter storage while preserving parameter objects, optimizer references, gradients and checkpoint keys; add bounded selected-route MoE execution with adaptive grouped/padded dispatch and an explicit memory threshold.
+- Add an optional FlexAttention backend for softcap and sliding-window attention with bounded block-mask caching and explicit fallback for unsupported devices, dtypes, dense bias and attention dropout.
+- Add native inference deployment through `hndl.deployment.export` and `load`, with reusable AOTInductor packages, weight/operator/environment fingerprints, exact runtime input guards, checksum verification, atomic package replacement, and bounded artifact storage.
+- Add bounded incremental inference caches for causal attention, transformer blocks, latent attention (including compressed weight absorption), Mamba2, gated delta attention, learned positions and RoPE, with absolute position offsets, reusable KV storage, recurrent/convolution state, and session validation.
+- Guard cached decoding against computational buffer changes, including frozen weight buffers, and reject model state without mutation version counters; reject overlapping graph sessions and active resets, and bind each CUDA session to one stream until reset.
+- Dispatch pretrained shape callbacks with named layer selections correctly, preserving legacy positional output callbacks without binding `layers` twice.
+- Keep ParticleGAN as a separately installed dependency of its optional CPU example and integration tests; document frozen-base low-rank training and routed particle-slider integration while HNDL requires only PyTorch.
+- Label standalone generated Python source with the current HNDL package version.
 
 ## 0.10.0 (2026-10-23)
 

@@ -2,21 +2,21 @@
 
 HNDL builds the network graphs used by a particle GAN or particle LoRA. The
 training application owns attachment to the frozen base, conditioning, particle
-bank, objective, optimizer state, sampling and exports. Install the optional
-integration from this updated checkout (the published HNDL 0.10.0 wheel does
-not yet include this extra):
+bank, objective, optimizer state, sampling and exports. ParticleGAN consumes
+the HNDL models in this example. Install the two packages separately:
 
 ```sh
-python -m pip install '.[particlegan]'
+python -m pip install -e .
+python -m pip install 'particlegan==0.9.4'
 ```
 
-This extra requires `particlegan>=0.9.4,<0.10`; ordinary HNDL installations do
-not acquire a ParticleGAN dependency. ParticleGAN 0.9.4 is the qualified release
-for the example below. A future compatible release still needs its own check.
+HNDL requires PyTorch; ParticleGAN is installed only to run this example and its
+integration tests. ParticleGAN 0.9.4 is the qualified release for the example
+below. A future compatible release still needs its own check.
 
 ## A runnable current-recipe example
 
-From this checkout, with the extra installed:
+From this checkout, with ParticleGAN installed separately:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' python examples/particle_gan_training.py

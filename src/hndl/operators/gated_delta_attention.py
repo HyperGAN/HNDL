@@ -4,6 +4,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..inference import _causal_conv
+from ._packing import clear_packed_cache, project
 from ..operator import Arg, Example, operator
 
 
@@ -276,26 +278,37 @@ class GatedDeltaAttention(nn.Module):
         self.rms_norm_weight = nn.Parameter(torch.ones(self.heads, self.head_dim))
         self.o_proj = nn.Linear(inner_dim, self.D, bias=self.bias)
 
-    def _prepare_inputs(self, x):
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        if getattr(self, "_hndl_packing", False):
+            clear_packed_cache(self)
+        return result
+
+    def _prepare_inputs(self, x, state=None):
         b, t, _ = x.shape
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        if getattr(self, "_hndl_packing", False):
+            q, k, v = project(self, x, ("q_proj", "k_proj", "v_proj"))
+        else:
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
 
         if self.conv_size > 0:
             pad = (self.conv_size - 1, 0)
             inner_dim = self.heads * self.head_dim
             qkv = torch.cat([q, k, v], dim=-1)
-            qkv_pad = F.pad(qkv.transpose(1, 2), pad)
+            qkv_raw = qkv.transpose(1, 2)
             conv_w = torch.cat([self.conv_q.weight, self.conv_k.weight, self.conv_v.weight], dim=0)
             conv_b = (
                 torch.cat([self.conv_q.bias, self.conv_k.bias, self.conv_v.bias], dim=0)
                 if self.conv_q.bias is not None
                 else None
             )
-            qkv_conv = F.silu(
-                F.conv1d(qkv_pad, conv_w, conv_b, groups=3 * inner_dim)[..., :t].transpose(1, 2)
-            )
+            if state is None:
+                convolved = F.conv1d(F.pad(qkv_raw, pad), conv_w, conv_b, groups=3 * inner_dim)[..., :t]
+            else:
+                convolved = _causal_conv(state, "conv", qkv_raw, conv_w, conv_b, 3 * inner_dim)
+            qkv_conv = F.silu(convolved.transpose(1, 2))
             q, k, v = qkv_conv.chunk(3, dim=-1)
 
         q = q.view(b, t, self.heads, self.head_dim).permute(0, 2, 1, 3)
@@ -326,13 +339,20 @@ class GatedDeltaAttention(nn.Module):
         )
         return q, k, v, beta, log_alpha, g
 
-    def forward(self, x):
+    _supports_inference_cache = True
+
+    def forward(self, x, *, cache=None, node_id=None):
+        state = cache._node(self, node_id, x, "gated_delta_attention") if cache is not None else None
         b, t, _ = x.shape
         calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
-        q, k, v, beta, log_alpha, g = self._prepare_inputs(x)
+        q, k, v, beta, log_alpha, g = self._prepare_inputs(x, state=state)
         q_f, k_f, v_f, beta_f = q.to(calc_dtype), k.to(calc_dtype), v.to(calc_dtype), beta.to(calc_dtype)
         out = torch.zeros(b, self.heads, t, self.head_dim, device=x.device, dtype=calc_dtype)
-        S = torch.zeros(b, self.heads, self.head_dim, self.head_dim, device=x.device, dtype=calc_dtype)
+        S = state.tensors.get("recurrent") if state is not None else None
+        if S is None:
+            S = torch.zeros(b, self.heads, self.head_dim, self.head_dim, device=x.device, dtype=calc_dtype)
+            if state is not None:
+                state.tensors["recurrent"] = S
 
         C = self.chunk_size
         N_full = t // C
@@ -435,7 +455,11 @@ class GatedDeltaAttention(nn.Module):
         out = F.rms_norm(out, (self.head_dim,), eps=self.eps) * self.rms_norm_weight.to(calc_dtype)
         out = (out * g.to(calc_dtype)).to(x.dtype)
         out = out.reshape(b, t, self.heads * self.head_dim)
-        return self.o_proj(out)
+        result = self.o_proj(out)
+        if state is not None:
+            state.tensors["recurrent"].copy_(S)
+            state.position += t
+        return result
 
     def extra_repr(self):
         return (f"heads={self.heads}, head_dim={self.head_dim}, "

@@ -1,6 +1,6 @@
 # HNDL v1 technical specification
 
-**Status: the implemented 0.10.0 contract.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records what 0.10.0 ships and what remains for v1. [README.md](README.md) introduces the APIs with examples.
+**Status: the implemented 0.11.0 contract.** This document defines the technical contract for **HNDL — Human-readable Network Definition Language**, pronounced “handle.” [IMPLEMENTATION.md](IMPLEMENTATION.md) records what 0.11.0 ships and what remains for v1. [README.md](README.md) introduces the APIs with examples.
 
 “Must” denotes a requirement of this contract. The public frontends are a declarative subset of Python syntax and a separately invoked trusted Python callable. Both share an implicit current tensor for single-input operations, accept explicit tensors for branches, and use one graph/resolver. Every operation — built-in or custom — is an `nn.Module` carrying one `@operator(...)` declaration that the resolver, the backend, the example harness, and the generated documentation all read. Omitted inferable dimensions replace explicit unknown markers; `name=` alone pins module identity; printing a module shows its resolved shapes. JSON is an internal graph/persistence format, not a third authoring frontend. PyTorch is an ordinary hard dependency of the package. Open interface decisions are listed at the end; implementation must settle those before dependent features or serialized formats ship.
 
@@ -805,6 +805,27 @@ These fields participate in semantic and artifact digests and survive concrete-p
 
 Build and restoration apply the persisted settings before returning the module. Freezing does not detach the layer's output: input gradients still propagate. The resulting module starts in training mode; calling `train()` or `eval()` does not alter trainability. A PyTorch state dictionary contains parameter values and persistent buffers, not these construction declarations or the trainability mask; rebuild the matching plan before loading state. Rebuilding resets values to the declared initializer until a state dictionary is loaded.
 
+### Prepared, incremental and native execution
+
+`model.prepare()` is an opt-in generated executor sharing the registered layer
+parameters and checkpoint names. Preparation fixes the module structure;
+explicit state rebinding and model moves/casts invalidate its execution caches.
+CUDA replay requires evaluation with gradients disabled, and bounds retained
+graph pools, inputs and pinned derived tables separately from shared framework
+workspace. Independent outputs are the default; borrowed outputs have an
+explicit replay lifetime.
+
+`InferenceCache` executes verified tokenwise causal graphs with a variable time
+axis while preserving the other tensor contracts. Cached parameters, buffers,
+ownership and stream identity must remain fixed until reset. Failed graph
+sessions require reset before reuse. Stateful cache mutation is eager-only.
+
+Native AOTInductor artifacts are inference-only and specialized to declared
+input contracts and a compiler/runtime target. Their package identity includes
+the model state and implementation; loaders validate package integrity and
+runtime compatibility. See [the execution guides](docs/prepared-execution.md)
+and [native deployment](docs/deployment.md) for complete API constraints.
+
 ## 12. Persistence and compatibility
 
 Persist the full resolved plan, plus declarative source or trusted callable provenance as applicable. Do not pickle a callable or closure as the architecture. Restoration must never execute the author callable or configuration to reconstruct saved state. Reconstruct from the saved plan, not by applying a newer resolver to old omitted dimension fields. Before state loading, validate the digests, required implementation versions, and state names/shapes/dtypes.
@@ -841,6 +862,7 @@ Failures must expose a stable code, source/node/field location, affected constra
 | `E_DTYPE` | An `int64` token tensor reaches a port declared in the compute dtype |
 | `E_POLICY_CONFLICT` | Literal stride `1` conflicts with the selected doubling policy, or the policy is not declared by that operator |
 | `E_ARGUMENT` | An argument is missing, of the wrong type, out of bounds, or supplied twice |
+| `E_DEPLOYMENT` | A native package is invalid or incompatible with the runtime target |
 | `E_PRETRAINED` | A checkpoint source is unusable, or the optional pretrained extra is not installed |
 | `E_INITIALIZATION` | An initialization constant is invalid or its parameter target is missing or ambiguous |
 | `E_TRAINABILITY` | A trainability flag is not a boolean or conflicts across parameter aliases |

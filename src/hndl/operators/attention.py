@@ -4,6 +4,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..inference import _decode_mask, _kv_append
+from ._attention_backend import clear_attention_cache, specialized_attention
+from ._packing import clear_packed_cache, project
 from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
 from ._equalized import EqualLinear
@@ -418,6 +421,10 @@ class Attention(nn.Module):
         self._rope_cache.clear()
         self._mask_cache.clear()
         self._causal_cache.clear()
+        if getattr(self, "_hndl_packing", False):
+            clear_packed_cache(self)
+        if getattr(self, "_hndl_flex_attention", False):
+            clear_attention_cache(self)
         return res
 
     def position_bias(self):
@@ -455,7 +462,79 @@ class Attention(nn.Module):
         self._rope_cache[key] = cached
         return cached
 
-    def forward(self, x):
+    _supports_inference_cache = True
+
+    def _forward_cached(self, x, cache, node_id):
+        if not self.causal:
+            raise HNDLError("E_UNSUPPORTED", "incremental attention requires causal=True")
+        if self.relative_position_bias or self.spatial_shape != (0, 0):
+            raise HNDLError("E_UNSUPPORTED", "spatial attention cannot use an incremental sequence cache")
+        if self.rope and self.rope_scaling == "yarn":
+            raise HNDLError("E_UNSUPPORTED", "incremental YaRN requires a fixed frequency context; use a length-independent RoPE scaling")
+        state = cache._node(self, node_id, x, "attention")
+        batch, count, _ = x.shape
+        offset, end = state.position, state.position + count
+        if getattr(self, "_hndl_packing", False):
+            qp, kp, vp = project(self, x, ("q_proj", "k_proj", "v_proj"))
+            q = _split_heads(qp, self.heads, self.head_dim)
+            k = _split_heads(kp, self.kv_heads, self.head_dim)
+            v = _split_heads(vp, self.kv_heads, self.head_dim)
+        else:
+            q = _split_heads(self.q_proj(x), self.heads, self.head_dim)
+            k = _split_heads(self.k_proj(x), self.kv_heads, self.head_dim)
+            v = _split_heads(self.v_proj(x), self.kv_heads, self.head_dim)
+        if self.qk_norm == "rms_norm":
+            q, k = self.q_norm(q), self.k_norm(k)
+        elif self.qk_norm == "l2_norm":
+            q = F.normalize(q, p=2, dim=-1, eps=self.eps)
+            k = F.normalize(k, p=2, dim=-1, eps=self.eps)
+        if self.rope:
+            cos, sin = self._get_rope_tables(end, x.device, x.dtype)
+            cos, sin = cos[..., offset:end, :], sin[..., offset:end, :]
+            q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
+        k, v = _kv_append(cache, state, k, v)
+        key_start = max(0, offset - self.window_size + 1) if self.window_size > 0 else 0
+        if key_start:
+            k, v = k[..., key_start:, :], v[..., key_start:, :]
+        query_offset, key_count = offset - key_start, end - key_start
+        if getattr(self, "_hndl_flex_attention", False):
+            fused = specialized_attention(
+                q, k, v, causal=True, window_size=self.window_size,
+                softcap=self.logit_softcap, query_offset=query_offset, owner=self,
+            )
+            if fused is not None:
+                result = self.o_proj(fused.transpose(1, 2).reshape(batch, count, self.heads * self.head_dim))
+                state.position = end
+                return result
+        # SDPA's rectangular is_causal mask is top-left aligned. A decoding
+        # chunk needs absolute, bottom-right alignment instead.
+        mask = None
+        is_causal = query_offset == 0 and count > 1
+        if self.window_size > 0 or (query_offset > 0 and count > 1):
+            mask = _decode_mask(query_offset, count, key_count, x.device, self.window_size)
+            is_causal = False
+        if self.logit_softcap > 0:
+            repeats = self.heads // self.kv_heads
+            qg = q.reshape(batch, self.kv_heads, repeats, count, self.head_dim)
+            scores = qg @ k.unsqueeze(2).transpose(-2, -1) / math.sqrt(self.head_dim)
+            scores = self.logit_softcap * torch.tanh(scores / self.logit_softcap)
+            if mask is None and count > 1:
+                mask = _decode_mask(query_offset, count, key_count, x.device)
+            if mask is not None:
+                scores = scores.masked_fill(~mask, float("-inf"))
+            attended = (scores.softmax(dim=-1) @ v.unsqueeze(2)).reshape(batch, self.heads, count, self.head_dim)
+        else:
+            attended = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, is_causal=is_causal,
+                enable_gqa=self.kv_heads != self.heads,
+            )
+        result = self.o_proj(attended.transpose(1, 2).reshape(batch, count, self.heads * self.head_dim))
+        state.position = end
+        return result
+
+    def forward(self, x, *, cache=None, node_id=None):
+        if cache is not None:
+            return self._forward_cached(x, cache, node_id)
         batch, positions, width = x.shape
         mask = None
         if self.relative_position_bias:
@@ -466,6 +545,36 @@ class Attention(nn.Module):
             mask = self.position_bias().to(dtype=x.dtype)
             if self.causal:
                 mask = mask + self._get_causal_bias(positions, x.device, mask.dtype)
+
+        if getattr(self, "_hndl_packing", False):
+            qp, kp, vp = project(self, x, ("q_proj", "k_proj", "v_proj"))
+            q = _split_heads(qp, self.heads, self.head_dim)
+            k = _split_heads(kp, self.kv_heads, self.head_dim)
+            v = _split_heads(vp, self.kv_heads, self.head_dim)
+        else:
+            q = _split_heads(self.q_proj(x), self.heads, self.head_dim)
+            k = _split_heads(self.k_proj(x), self.kv_heads, self.head_dim)
+            v = _split_heads(self.v_proj(x), self.kv_heads, self.head_dim)
+
+        if self.qk_norm == "rms_norm":
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        elif self.qk_norm == "l2_norm":
+            q = F.normalize(q, p=2, dim=-1, eps=self.eps)
+            k = F.normalize(k, p=2, dim=-1, eps=self.eps)
+
+        if self.rope:
+            cos, sin = self._get_rope_tables(positions, x.device, x.dtype)
+            q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
+
+        if getattr(self, "_hndl_flex_attention", False):
+            fused = specialized_attention(
+                q, k, v, causal=self.causal, window_size=self.window_size,
+                softcap=self.logit_softcap, dropout_p=self.dropout if self.training else 0.0,
+                mask=mask, owner=self,
+            )
+            if fused is not None:
+                return self.o_proj(fused.transpose(1, 2).reshape(batch, positions, self.heads * self.head_dim))
 
         if self.window_size > 0:
             mask_key = (positions, self.window_size, self.causal, str(x.device), x.dtype)
@@ -483,21 +592,6 @@ class Attention(nn.Module):
                 if not torch.compiler.is_compiling():
                     self._mask_cache[mask_key] = w_mask
             mask = w_mask if mask is None else mask + w_mask
-
-        q = _split_heads(self.q_proj(x), self.heads, self.head_dim)
-        k = _split_heads(self.k_proj(x), self.kv_heads, self.head_dim)
-        v = _split_heads(self.v_proj(x), self.kv_heads, self.head_dim)
-
-        if self.qk_norm == "rms_norm":
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-        elif self.qk_norm == "l2_norm":
-            q = F.normalize(q, p=2, dim=-1, eps=self.eps)
-            k = F.normalize(k, p=2, dim=-1, eps=self.eps)
-
-        if self.rope:
-            cos, sin = self._get_rope_tables(positions, x.device, x.dtype)
-            q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
 
         if self.logit_softcap > 0.0:
             if self.kv_heads != self.heads:
