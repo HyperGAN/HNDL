@@ -74,7 +74,17 @@ class PosEmbed(nn.Module):
         self.weight = nn.Parameter(torch.empty(self.max_len, self.dim))
         nn.init.normal_(self.weight, mean=0.0, std=0.02)
 
-    def forward(self, x):
+    _supports_inference_cache = True
+
+    def forward(self, x, *, cache=None, node_id=None):
+        if cache is not None:
+            state = cache._node(self, node_id, x, "pos_embed")
+            end = state.position + x.shape[1]
+            if end > self.max_len:
+                raise HNDLError("E_CONSTRAINT", f"Sequence position {end} exceeds max_len={self.max_len}")
+            result = x + self.weight[state.position:end]
+            state.position = end
+            return result
         if x.shape[1] > self.max_len:
             raise HNDLError("E_CONSTRAINT", f"Sequence length T={x.shape[1]} exceeds max_len={self.max_len}")
         return x + self.weight[:x.shape[1]]

@@ -243,13 +243,16 @@ class TransformerBlock(nn.Module):
             self.register_parameter("gamma1", None)
             self.register_parameter("gamma2", None)
 
-    def forward(self, x):
+    _supports_inference_cache = True
+
+    def forward(self, x, *, cache=None, node_id=None):
+        attention_kwargs = {} if cache is None else {"cache": cache, "node_id": f"{node_id}/attention"}
         if self.post_norm:
-            branch = self.attn(x)
+            branch = self.attn(x, **attention_kwargs)
             x = self.norm1(x + branch if self.gamma1 is None else torch.addcmul(x, branch, self.gamma1))
             branch = self.ffn(x)
             return self.norm2(x + branch if self.gamma2 is None else torch.addcmul(x, branch, self.gamma2))
-        branch = self.attn(self.norm1(x))
+        branch = self.attn(self.norm1(x), **attention_kwargs)
         x = x + branch if self.gamma1 is None else torch.addcmul(x, branch, self.gamma1)
         branch = self.ffn(self.norm2(x))
         return x + branch if self.gamma2 is None else torch.addcmul(x, branch, self.gamma2)

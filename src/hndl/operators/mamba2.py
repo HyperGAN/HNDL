@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..inference import _causal_conv
 from ..operator import Arg, Example, operator
 
 
@@ -201,7 +202,10 @@ class Mamba2(nn.Module):
         self.norm = nn.RMSNorm(self.inner_dim, eps=1e-5)
         self.out_proj = nn.Linear(self.inner_dim, self.d_model, bias=self.bias)
 
-    def forward(self, x):
+    _supports_inference_cache = True
+
+    def forward(self, x, *, cache=None, node_id=None):
+        state = cache._node(self, node_id, x, "mamba2") if cache is not None else None
         b, t, d = x.shape
         inner_dim = self.inner_dim
         bc_dim = self.heads * self.d_state
@@ -224,7 +228,12 @@ class Mamba2(nn.Module):
 
         if self.d_conv > 0 and self.conv1d is not None:
             conv_in = torch.cat([x_ssm, b_proj, c_proj], dim=-1).transpose(1, 2)
-            conv_out = F.silu(self.conv1d(conv_in)[..., :t]).transpose(1, 2)
+            if state is None:
+                convolved = self.conv1d(conv_in)[..., :t]
+            else:
+                convolved = _causal_conv(state, "conv", conv_in, self.conv1d.weight,
+                                         self.conv1d.bias, self.conv1d.groups)
+            conv_out = F.silu(convolved).transpose(1, 2)
             x_conv = conv_out[..., : inner_dim]
             b_conv = conv_out[..., inner_dim : inner_dim + bc_dim]
             c_conv = conv_out[..., inner_dim + bc_dim : inner_dim + 2 * bc_dim]
@@ -242,9 +251,13 @@ class Mamba2(nn.Module):
         # Semi-separable chunked recurrence
         calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
         chunk_size = self.chunk_size
-        H_prev = torch.zeros(
-            b, self.heads, self.head_dim, self.d_state, device=x.device, dtype=calc_dtype
-        )
+        H_prev = state.tensors.get("recurrent") if state is not None else None
+        if H_prev is None:
+            H_prev = torch.zeros(
+                b, self.heads, self.head_dim, self.d_state, device=x.device, dtype=calc_dtype
+            )
+            if state is not None:
+                state.tensors["recurrent"] = H_prev
         D_calc = self.D.to(calc_dtype) if self.D is not None else None
         y_chunks = []
         for start in range(0, t, chunk_size):
@@ -286,6 +299,9 @@ class Mamba2(nn.Module):
         y = torch.cat(y_chunks, dim=1).view(b, t, inner_dim)
         y = self.norm(y) * F.silu(z)
         out = self.out_proj(y)
+        if state is not None:
+            state.tensors["recurrent"].copy_(H_prev)
+            state.position += t
         return out
 
     def extra_repr(self):

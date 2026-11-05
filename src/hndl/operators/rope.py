@@ -4,6 +4,7 @@ import math
 import torch
 from torch import nn
 
+from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
 
 
@@ -293,7 +294,26 @@ class RoPE(nn.Module):
         self._cache[key] = (cos, sin)
         return cos, sin
 
-    def forward(self, x):
+    _supports_inference_cache = True
+
+    def forward(self, x, *, cache=None, node_id=None):
+        if cache is not None:
+            if self.spatial_shape != (0, 0) or self.rope_scaling == "yarn":
+                raise HNDLError("E_UNSUPPORTED", "incremental RoPE requires a length-independent, one-dimensional frequency schedule")
+            axis = 2 if x.ndim == 4 else 1
+            state = cache._node(self, node_id, x, "rope", sequence_axis=axis)
+            end = state.position + x.shape[axis]
+            dh = x.shape[-1] if x.ndim == 4 else x.shape[-1] // self.heads
+            cos, sin = self._tables(end, dh, x.device, x.dtype)
+            cos, sin = cos[:, state.position:end], sin[:, state.position:end]
+            if x.ndim == 4:
+                cos, sin = cos.transpose(1, 2), sin.transpose(1, 2)
+                result = x * cos + _rotate_half(x) * sin
+            else:
+                shaped = x.reshape(x.shape[0], x.shape[1], self.heads, dh)
+                result = (shaped * cos + _rotate_half(shaped) * sin).reshape(x.shape)
+            state.position = end
+            return result
         if x.ndim == 4:
             b, h, t, dh = x.shape
             cos, sin = self._tables(t, dh, x.device, x.dtype)
