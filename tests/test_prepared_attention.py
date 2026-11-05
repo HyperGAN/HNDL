@@ -145,3 +145,21 @@ def test_flex_attention_with_packed_qkv_preserves_training_gradients():
         torch.testing.assert_close(parameter.grad, expected_parameter.grad, rtol=2e-3, atol=2e-4)
     assert layer._hndl_attention_backend == "flex"
     assert not layer._mask_cache
+
+
+@pytest.mark.parametrize("source", [
+    "attention(4, causal=True, rope=True, kv_heads=2)",
+    "gated_delta_attention(4, head_dim=8, chunk_size=4)",
+])
+def test_packed_attention_remains_fullgraph_compilable(source):
+    layer = layer_for(source, "cpu")
+    reference = copy.deepcopy(layer)
+    prepare_packed(layer)
+    compiled = torch.compile(layer, backend="eager", fullgraph=True)
+    x = torch.randn(2, 9, 32, requires_grad=True)
+    xr = x.detach().clone().requires_grad_()
+    actual, expected = compiled(x), reference(xr)
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-5)
+    actual.sum().backward()
+    expected.sum().backward()
+    torch.testing.assert_close(x.grad, xr.grad, rtol=2e-3, atol=2e-4)
