@@ -404,3 +404,18 @@ def test_cuda_replay_reuses_one_capture_for_repeated_parameterized_calls(monkeyp
             torch.testing.assert_close(fast(x + shift), source(x + shift))
         assert len(captures) == 1
         assert fast.cache_info["graphs"] == 1
+
+
+def test_shallow_prepared_copy_shares_weights_and_keeps_execution_state_separate():
+    source = network("linear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    fast = source.prepare()
+    cloned = copy.copy(fast)
+    assert cloned.source is source
+    assert cloned._graphs is not fast._graphs
+    assert cloned._validated is not fast._validated
+    assert list(cloned.parameters()) == list(fast.parameters())
+    x = torch.randn(2, 4)
+    torch.testing.assert_close(cloned(x), fast(x))
+    for name in ("nodes", "source"):
+        with pytest.raises(TypeError, match="architecture is fixed"):
+            setattr(fast, name, nn.Module())

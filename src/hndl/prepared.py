@@ -171,6 +171,16 @@ class PreparedNetwork(nn.Module):
     buffers overwritten by a later replay of the same entry.
     """
 
+    def __setattr__(self, name, value):
+        if name in {"source", "nodes"} and hasattr(self, name):
+            raise TypeError("HNDL architecture is fixed; mutate and rebind the source graph")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if name in {"source", "nodes"}:
+            raise TypeError("HNDL architecture is fixed; mutate and rebind the source graph")
+        super().__delattr__(name)
+
     def __init__(self, model, example_inputs=None, *, backend="generated", max_graphs=4,
                  max_graph_bytes=256 * 1024 * 1024, clone_outputs=True, pack=False,
                  attention_backend="reference"):
@@ -245,6 +255,13 @@ class PreparedNetwork(nn.Module):
         for name, value in self.__dict__.items():
             if "hook" in name:
                 result.__dict__[name] = copy.deepcopy(value, memo)
+        return result
+
+    def __copy__(self):
+        result = type(self)(self.source, backend=self.backend,
+                            max_graphs=self.max_graphs, max_graph_bytes=self.max_graph_bytes,
+                            clone_outputs=self.clone_outputs)
+        result._packing_enabled = self._packing_enabled
         return result
 
     def _evict_graph(self, key=None):
