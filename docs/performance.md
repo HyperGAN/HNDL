@@ -44,10 +44,10 @@ Inference runs inside `torch.inference_mode()`.
 
 | Device | Batch | Eager, µs | Generated, µs | Replay, independent output, µs | Replay, borrowed output, µs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| CPU | 1 | 34.7 | 27.5 | — | — |
-| CPU | 32 | 56.4 | 47.9 | — | — |
-| CUDA | 1 | 82.8 | 71.7 | 47.6 | 34.8 |
-| CUDA | 32 | 92.0 | 80.5 | 51.1 | 47.1 |
+| CPU | 1 | 40.8 | 30.1 | — | — |
+| CPU | 32 | 63.8 | 53.3 | — | — |
+| CUDA | 1 | 100.3 | 89.8 | 53.3 | 41.8 |
+| CUDA | 32 | 109.5 | 96.7 | 63.7 | 47.1 |
 
 Replay timings include the device input copy, runtime guards, stream ordering,
 and the output clone when requested. Borrowed outputs are overwritten by later
@@ -56,13 +56,14 @@ calls, hooks, gradients, and parameter references.
 
 | Device | Batch | Generated setup, ms | Replay setup with clone, ms | Replay setup with borrowed output, ms |
 | --- | ---: | ---: | ---: | ---: |
-| CPU | 1 | 0.84 | — | — |
-| CPU | 32 | 0.22 | — | — |
-| CUDA | 1 | 1.73 | 6.77 | 6.49 |
-| CUDA | 32 | 2.32 | 3.94 | 3.95 |
+| CPU | 1 | 4.85 | — | — |
+| CPU | 32 | 0.23 | — | — |
+| CUDA | 1 | 2.31 | 5.16 | 4.64 |
+| CUDA | 32 | 1.59 | 5.59 | 4.76 |
 
-Setup starts with a built model and warmed device. The generated executor
-class is cached by architecture, so later rows can reuse its Python code.
+Setup starts with a built model and warmed device. The first preparation also
+loads the prepared backend. Its executor class is cached by architecture, so
+later rows can reuse its Python code.
 CUDA setup includes warmup and capture. See [prepared execution](prepared-execution.md)
 for backend selection and output ownership.
 
@@ -74,10 +75,10 @@ do not require gradients; parameters do. There is no optimizer update.
 
 | Device | Batch | Eager, µs | Generated, µs | Generated / eager |
 | --- | ---: | ---: | ---: | ---: |
-| CPU | 1 | 216.2 | 204.8 | 0.95 |
-| CPU | 32 | 270.8 | 258.5 | 0.95 |
-| CUDA | 1 | 494.5 | 470.9 | 0.95 |
-| CUDA | 32 | 512.4 | 496.3 | 0.97 |
+| CPU | 1 | 248.9 | 254.1 | 1.02 |
+| CPU | 32 | 320.1 | 291.2 | 0.91 |
+| CUDA | 1 | 531.7 | 495.3 | 0.93 |
+| CUDA | 32 | 559.3 | 524.9 | 0.94 |
 
 Here most work remains ordinary PyTorch forward/backward execution. CUDA replay
 is an inference path and is not selected for these training calls.
@@ -108,12 +109,12 @@ parameter guards. Both paths use identical weights and match outputs.
 
 | Device | Width | Prefix tokens | Recompute per token, ms | Cached per token, ms | Retained KV state, MiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| CPU | 128 | 256 | 3.386 | 0.554 | 0.53 |
-| CPU | 128 | 1024 | 18.091 | 0.642 | 2.03 |
-| CPU | 512 | 1024 | 138.513 | 2.375 | 8.13 |
-| CUDA | 128 | 256 | 0.678 | 0.935 | 0.53 |
-| CUDA | 128 | 1024 | 0.936 | 0.910 | 2.03 |
-| CUDA | 512 | 1024 | 2.731 | 1.043 | 8.13 |
+| CPU | 128 | 256 | 3.602 | 0.592 | 0.53 |
+| CPU | 128 | 1024 | 19.749 | 0.687 | 2.03 |
+| CPU | 512 | 1024 | 159.127 | 3.410 | 8.13 |
+| CUDA | 128 | 256 | 0.841 | 1.081 | 0.53 |
+| CUDA | 128 | 1024 | 1.077 | 0.966 | 2.03 |
+| CUDA | 512 | 1024 | 2.278 | 1.060 | 8.13 |
 
 The small CUDA decoder is dominated by dispatch and cache-management work;
 caching is slower at the shorter prefix in this setup. The larger decoder
@@ -130,13 +131,13 @@ native compilation. Package loading is measured separately.
 
 | Device | First export, s | Artifact hit, ms | Load, ms | Package, MiB |
 | --- | ---: | ---: | ---: | ---: |
-| CPU | 7.64 | 25.5 | 3.3 | 1.61 |
-| CUDA | 5.42 | 26.8 | 14.9 | 1.70 |
+| CPU | 9.83 | 28.6 | 3.9 | 1.61 |
+| CUDA | 6.48 | 30.3 | 12.0 | 1.70 |
 
 | Device | Eager, µs | Default native runner, µs | Exclusive native runner, µs |
 | --- | ---: | ---: | ---: |
-| CPU | 34.6 | 23.5 | 25.0 |
-| CUDA | 83.9 | 842.5 | 72.7 |
+| CPU | 41.3 | 27.8 | 30.7 |
+| CUDA | 125.9 | 721.3 | 96.9 |
 
 On this tiny CUDA workload, synchronization in the default native runner
 dominates the computation. `load(artifact, run_single_threaded=True)` avoids
