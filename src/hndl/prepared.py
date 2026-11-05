@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping
 import copy
 from functools import lru_cache
 import threading
@@ -59,11 +60,11 @@ def _executor_class(source):
                 {"forward": namespace["forward"], "__module__": __name__})
 
 
-def execution_module(model):
+def execution_module(model, *, cached=False):
     """Generate a straight-line module with the source graph's registered nodes."""
     refs = {f"input:{name}": f"i{index}" for index, name in enumerate(model._input_names)}
     arguments = ", ".join(refs.values())
-    lines = [f"def forward(self, {arguments}):"]
+    lines = [f"def forward(self, {'cache, ' if cached else ''}{arguments}):"]
     output_refs = {entry["ref"] for entry in model.plan.outputs.values()}
     last_use = {}
     for index, node in enumerate(model.plan.nodes):
@@ -75,7 +76,10 @@ def execution_module(model):
         # into executable syntax. Attribute lookup preserves Module hooks.
         layer = f"self._layers[{index}]"
         call = f"{layer}({', '.join(bound)})"
-        if node.id in model.checkpoint_nodes:
+        if cached and getattr(model.nodes["n_" + node.id], "_supports_inference_cache", False):
+            positional = (", ".join(bound) + ", ") if bound else ""
+            call = f"{layer}({positional}cache=cache, node_id={node.id!r})"
+        elif not cached and node.id in model.checkpoint_nodes:
             tuple_args = "(" + ", ".join(bound) + ("," if len(bound) == 1 else "") + ")"
             checkpoint_args = (", " + ", ".join(bound)) if bound else ""
             call = (f"(_checkpoint({layer}{checkpoint_args}, use_reentrant=False) "
@@ -180,7 +184,7 @@ class PreparedNetwork(nn.Module):
         self._refresh()
         model._prepared_dependents.add(self)
         if example_inputs is not None:
-            if isinstance(example_inputs, dict):
+            if isinstance(example_inputs, Mapping):
                 self(**example_inputs)
             else:
                 self(*tuple(example_inputs))
@@ -396,6 +400,8 @@ class PreparedNetwork(nn.Module):
                 self._refresh()
             self._export_module.training = self.source.training
             if cache is not None:
+                if self.backend == "cuda_graph":
+                    raise HNDLError("E_UNSUPPORTED", "stateful decoding uses generated execution, not CUDA replay")
                 return self.source(*args, cache=cache, **named)
             key = (self.source.training, torch.is_grad_enabled(), torch.is_inference_mode_enabled(),
                    _runtime._autocast_enabled(), _signature(inputs))

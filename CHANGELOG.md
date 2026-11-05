@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Validate incremental graphs against tokenwise sequence contracts, unify the public inference cache APIs, and generate cached forward programs after the first checked input signature instead of rechecking every layer on every decoding step.
+
 - Add prepared graph execution sharing existing parameters, optimizer references and checkpoint names, with generated tensor lifetimes, optional bounded CUDA graph replay, independent or borrowed outputs, and measured inference strategy selection.
 - Rebuild checked shape programs after `rebind_state()` so the first call after a layer replacement uses the new layer.
 
