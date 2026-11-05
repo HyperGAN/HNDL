@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-
+- Add opt-in performance measurements and a hardware-specific report covering prepared setup/inference/training, bounded replay memory, incremental decoding, packed operators, fused attention and native deployment startup/runtime.
+- Add exclusive native deployment execution on supporting PyTorch loaders, with host-call and CUDA-stream guards, and reject root hooks or custom root forwards that cannot preserve export semantics.
 - Use packed QKV projections in prepared self-attention and gated delta attention, and dispatch prepared softcap/sliding-window self-attention to fused FlexAttention without dense window masks, including incremental position offsets.
 - Add prepared graph execution sharing existing parameters, optimizer references and checkpoint names, with generated tensor lifetimes, optional bounded CUDA graph replay, independent or borrowed outputs, and measured inference strategy selection.
 - Validate incremental graphs against tokenwise sequence contracts, unify the public inference cache APIs, and generate cached forward programs after the first checked input signature instead of rechecking every layer on every decoding step.

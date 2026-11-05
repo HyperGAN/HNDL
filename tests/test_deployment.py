@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 import types
 
 import pytest
@@ -15,7 +17,7 @@ import torch
 import torch._inductor as inductor
 
 from hndl import HNDLError, Registry
-from hndl.deployment import export, inspect_artifact, load
+from hndl.deployment import DeploymentModel, export, inspect_artifact, load
 from hndl.torch import network
 
 
@@ -169,6 +171,50 @@ def test_eval_inputs_and_cache_limits_are_checked(tmp_path, fake_compiler):
     assert not fake_compiler
 
 
+@pytest.mark.parametrize("hook", ["pre", "post", "global"])
+def test_root_hook_behavior_is_rejected_before_export(tmp_path, fake_compiler, hook):
+    model, x = mlp(), torch.randn(2, 4)
+    if hook == "pre":
+        handle = model.register_forward_pre_hook(lambda module, inputs: (inputs[0] * 2,))
+    elif hook == "post":
+        handle = model.register_forward_hook(lambda module, inputs, output: output + 1)
+    else:
+        from torch.nn.modules import module as torch_module
+        handle = torch_module.register_module_forward_hook(
+            lambda module, inputs, output: output + 1 if module is model else output)
+    try:
+        with pytest.raises(HNDLError, match="root or global forward hooks"):
+            export(model, (x,), tmp_path)
+    finally:
+        handle.remove()
+    assert not fake_compiler
+
+
+@pytest.mark.parametrize("subclass", [False, True])
+def test_custom_root_forward_is_rejected(tmp_path, fake_compiler, subclass):
+    model, x = mlp(), torch.randn(2, 4)
+    if subclass:
+        class Custom(type(model)):
+            def forward(self, *inputs, **named):
+                return super().forward(*inputs, **named) + 1
+        model.__class__ = Custom
+    else:
+        model.forward = lambda x: x[:, :2]
+    with pytest.raises(HNDLError, match="original GraphModule or Network forward"):
+        export(model, (x,), tmp_path)
+    assert not fake_compiler
+
+
+def test_node_hook_math_is_captured_and_invalidates_artifact(tmp_path, fake_compiler):
+    model, x = mlp(), torch.randn(2, 4)
+    first = export(model, (x,), tmp_path)
+    model[0].register_forward_hook(lambda module, inputs, output: output * 2)
+    second = export(model, (x,), tmp_path)
+    assert first.cache_key != second.cache_key
+    with torch.no_grad():
+        torch.testing.assert_close(fake_compiler[-1].module()(x), model(x))
+
+
 def test_manifest_tampering_is_rejected(tmp_path, fake_compiler):
     artifact = export(mlp(), (torch.randn(2, 4),), tmp_path)
     manifest = json.loads(artifact.manifest_path.read_text())
@@ -176,6 +222,40 @@ def test_manifest_tampering_is_rejected(tmp_path, fake_compiler):
     artifact.manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(HNDLError, match="digest"):
         inspect_artifact(artifact)
+
+
+def test_serial_loader_checks_capability_and_option_type(monkeypatch):
+    monkeypatch.setattr(inductor, "aoti_load_package", lambda path: None)
+    with pytest.raises(HNDLError, match="does not support run_single_threaded"):
+        load("unused.pt2", run_single_threaded=True)
+    with pytest.raises(HNDLError, match="must be a boolean"):
+        load("unused.pt2", run_single_threaded=1)
+
+
+def test_serial_deployment_rejects_overlapping_host_calls():
+    entered, release = threading.Event(), threading.Event()
+    output = []
+
+    def runner(x):
+        entered.set()
+        assert release.wait(5)
+        return x * 2
+
+    model = DeploymentModel(runner, {"specification": {"inputs": [
+        {"name": "x", "shape": [2, 4], "stride": [4, 1], "dtype": "torch.float32", "device": "cpu"}
+    ]}}, run_single_threaded=True)
+    x = torch.randn(2, 4)
+    thread = threading.Thread(target=lambda: output.append(model(x)))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(HNDLError, match="overlapping host calls"):
+            model(x)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    torch.testing.assert_close(output[0], x * 2)
 
 
 @pytest.mark.parametrize("named", [False, True])
@@ -214,6 +294,17 @@ def test_native_cpu_compile_load_and_input_guards(tmp_path, monkeypatch, named):
     with pytest.raises(HNDLError, match="expects inputs"):
         deployed()
 
+    if "run_single_threaded" in inspect.signature(inductor.aoti_load_package).parameters:
+        serial = load(artifact, run_single_threaded=True)
+        first = serial(*inputs)
+        snapshot = ({name: value.clone() for name, value in first.items()}
+                    if isinstance(first, dict) else first.clone())
+        other_inputs = tuple(value + 0.1 for value in inputs)
+        second = serial(*other_inputs)
+        torch.testing.assert_close(first, snapshot)
+        with torch.no_grad():
+            torch.testing.assert_close(second, model(*other_inputs), rtol=1e-4, atol=1e-5)
+
     # Re-check compatibility before native loading, rather than invoking an
     # incompatible binary and depending on a compiler/runtime failure.
     import hndl.deployment as deployment
@@ -240,6 +331,17 @@ def test_native_cuda_compile_load_and_cache_reuse(tmp_path):
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
     assert actual.device == x.device
     assert export(model, (x,), tmp_path).cache_hit
+    if "run_single_threaded" in inspect.signature(inductor.aoti_load_package).parameters:
+        serial = load(artifact, run_single_threaded=True)
+        first = serial(x)
+        snapshot = first.clone()
+        second = serial(x + 0.1)
+        torch.testing.assert_close(first, snapshot)
+        with torch.no_grad():
+            torch.testing.assert_close(second, model(x + 0.1), rtol=1e-4, atol=1e-5)
+        with torch.cuda.stream(torch.cuda.Stream(device=device)):
+            with pytest.raises(HNDLError, match="first CUDA stream"):
+                serial(x)
 
 
 def test_native_export_of_packed_model_tracks_parameter_updates(tmp_path):
