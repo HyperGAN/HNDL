@@ -18,8 +18,10 @@ ordinary CI selection. Absolute timings are not pass/fail thresholds. The
 checks cover output and training-gradient parity, cache limits, repeated graph
 eviction, and deployment cache reuse.
 
-These November 2026 measurements used Python 3.14.8, PyTorch 2.14.1+cu130, an AMD Ryzen 9 5900X, one
-intra-op CPU thread, and an NVIDIA RTX A6000. Physical GPU 1 was exposed as
+The prepared, training, replay-memory, incremental, and native-deployment
+measurements were rerun against HNDL 0.11.0 release candidate `2ac936e` in
+November 2026. They used Python 3.14.8, PyTorch 2.14.1+cu130, an AMD Ryzen 9
+5900X, one intra-op CPU thread, and an NVIDIA RTX A6000. Physical GPU 1 was exposed as
 `cuda:0` with `CUDA_VISIBLE_DEVICES=1`. Inputs remained on their compute device;
 host transfers and framework imports are excluded. Cold CUDA compilation used
 CUDA 13.0 runtime/CRT/CCCL headers and libraries, plus CPython 3.14 development
@@ -44,10 +46,10 @@ Inference runs inside `torch.inference_mode()`.
 
 | Device | Batch | Eager, µs | Generated, µs | Replay, independent output, µs | Replay, borrowed output, µs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| CPU | 1 | 40.8 | 30.1 | — | — |
-| CPU | 32 | 63.8 | 53.3 | — | — |
-| CUDA | 1 | 100.3 | 89.8 | 53.3 | 41.8 |
-| CUDA | 32 | 109.5 | 96.7 | 63.7 | 47.1 |
+| CPU | 1 | 39.0 | 29.2 | — | — |
+| CPU | 32 | 107.2 | 53.5 | — | — |
+| CUDA | 1 | 93.5 | 74.5 | 55.0 | 38.8 |
+| CUDA | 32 | 117.4 | 96.4 | 56.9 | 51.4 |
 
 Replay timings include the device input copy, runtime guards, stream ordering,
 and the output clone when requested. Borrowed outputs are overwritten by later
@@ -56,10 +58,10 @@ calls, hooks, gradients, and parameter references.
 
 | Device | Batch | Generated setup, ms | Replay setup with clone, ms | Replay setup with borrowed output, ms |
 | --- | ---: | ---: | ---: | ---: |
-| CPU | 1 | 4.85 | — | — |
-| CPU | 32 | 0.23 | — | — |
-| CUDA | 1 | 2.31 | 5.16 | 4.64 |
-| CUDA | 32 | 1.59 | 5.59 | 4.76 |
+| CPU | 1 | 5.06 | — | — |
+| CPU | 32 | 0.39 | — | — |
+| CUDA | 1 | 2.31 | 6.31 | 3.81 |
+| CUDA | 32 | 2.37 | 4.15 | 5.16 |
 
 Setup starts with a built model and warmed device. The first preparation also
 loads the prepared backend. Its executor class is cached by architecture, so
@@ -75,10 +77,10 @@ do not require gradients; parameters do. There is no optimizer update.
 
 | Device | Batch | Eager, µs | Generated, µs | Generated / eager |
 | --- | ---: | ---: | ---: | ---: |
-| CPU | 1 | 248.9 | 254.1 | 1.02 |
-| CPU | 32 | 320.1 | 291.2 | 0.91 |
-| CUDA | 1 | 531.7 | 495.3 | 0.93 |
-| CUDA | 32 | 559.3 | 524.9 | 0.94 |
+| CPU | 1 | 255.4 | 242.3 | 0.95 |
+| CPU | 32 | 291.2 | 284.5 | 0.98 |
+| CUDA | 1 | 553.9 | 533.8 | 0.96 |
+| CUDA | 32 | 636.6 | 589.4 | 0.93 |
 
 Here most work remains ordinary PyTorch forward/backward execution. CUDA replay
 is an inference path and is not selected for these training calls.
@@ -109,12 +111,12 @@ parameter guards. Both paths use identical weights and match outputs.
 
 | Device | Width | Prefix tokens | Recompute per token, ms | Cached per token, ms | Retained KV state, MiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| CPU | 128 | 256 | 3.602 | 0.592 | 0.53 |
-| CPU | 128 | 1024 | 19.749 | 0.687 | 2.03 |
-| CPU | 512 | 1024 | 159.127 | 3.410 | 8.13 |
-| CUDA | 128 | 256 | 0.841 | 1.081 | 0.53 |
-| CUDA | 128 | 1024 | 1.077 | 0.966 | 2.03 |
-| CUDA | 512 | 1024 | 2.278 | 1.060 | 8.13 |
+| CPU | 128 | 256 | 3.877 | 0.759 | 0.53 |
+| CPU | 128 | 1024 | 20.977 | 0.789 | 2.03 |
+| CPU | 512 | 1024 | 159.702 | 4.141 | 8.13 |
+| CUDA | 128 | 256 | 0.692 | 0.989 | 0.53 |
+| CUDA | 128 | 1024 | 1.287 | 1.091 | 2.03 |
+| CUDA | 512 | 1024 | 3.543 | 1.297 | 8.13 |
 
 The small CUDA decoder is dominated by dispatch and cache-management work;
 caching is slower at the shorter prefix in this setup. The larger decoder
@@ -131,13 +133,13 @@ native compilation. Package loading is measured separately.
 
 | Device | First export, s | Artifact hit, ms | Load, ms | Package, MiB |
 | --- | ---: | ---: | ---: | ---: |
-| CPU | 9.83 | 28.6 | 3.9 | 1.61 |
-| CUDA | 6.48 | 30.3 | 12.0 | 1.70 |
+| CPU | 8.43 | 31.6 | 4.0 | 1.61 |
+| CUDA | 6.00 | 30.4 | 10.2 | 1.70 |
 
 | Device | Eager, µs | Default native runner, µs | Exclusive native runner, µs |
 | --- | ---: | ---: | ---: |
-| CPU | 41.3 | 27.8 | 30.7 |
-| CUDA | 125.9 | 721.3 | 96.9 |
+| CPU | 43.7 | 31.9 | 32.2 |
+| CUDA | 93.3 | 1100.5 | 82.6 |
 
 On this tiny CUDA workload, synchronization in the default native runner
 dominates the computation. `load(artifact, run_single_threaded=True)` avoids
