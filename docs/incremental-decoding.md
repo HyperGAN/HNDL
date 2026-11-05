@@ -53,6 +53,21 @@ work with incremental decoding. Queries in a later chunk attend to their
 absolute positions in the cached prefix. Rotary embeddings use the absolute
 position offset too; they do not restart from zero on each chunk.
 
+The graph runtime permits the sequence axis to vary while keeping batch,
+feature dimensions, dtype and device fixed for a session. It verifies that
+operators preserve per-position semantics: token embeddings, projections,
+feed-forward layers, feature normalizations, residual arithmetic and feature
+splits can surround the stateful operators. Operations that mix sequence
+positions, including time-axis normalization and sequence pooling, are rejected
+rather than treated as chunk-independent. Image contracts remain fixed. A
+custom operator can explicitly declare `_hndl_streaming_safe = True` after its
+per-position semantics have been verified.
+
+The first call for each input signature checks every port against the streaming
+contract; later calls use a generated cached forward program. Parameters and
+session ownership remain guarded. `model.prepare()` supports the same cache
+argument. Stateful execution does not use CUDA graph replay.
+
 `latent_attention` also requires causal attention. Its normal mode stores
 expanded keys and values. Weight absorption on an unbiased module uses
 compressed latent vectors and shared rotary keys instead. Before starting the

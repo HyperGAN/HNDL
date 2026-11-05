@@ -32,17 +32,13 @@ def test_graph_session_rejects_buffer_weight_drift_before_state_advances(device)
     cache = InferenceCache(8)
     x = torch.randn(2, 1, 16, device=device)
     with torch.no_grad():
-        cache._begin_call(model, (x,))
-        model[0](x, cache=cache, node_id="attention")
-        cache._end_call(True)
+        model(x, cache=cache)
         model[0].k_proj.weight.add_(1)
         with pytest.raises(HNDLError, match="buffers"):
-            cache._begin_call(model, (x,))
-        assert cache.position("attention") == 1
+            model(x, cache=cache)
+        assert cache.position("n0") == 1
         cache.reset()
-        cache._begin_call(model, (x,))
-        actual = model[0](x, cache=cache, node_id="attention")
-        cache._end_call(True)
+        actual = model(x, cache=cache)
         torch.testing.assert_close(actual, model[0](x))
 
 
@@ -181,8 +177,10 @@ def test_unversioned_inference_state_is_rejected_clearly_and_unlocks(kind):
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_graph_session_rejects_cuda_stream_changes_before_queued_state_writes():
+@pytest.mark.parametrize("prepared", [False, True])
+def test_graph_session_rejects_cuda_stream_changes_before_queued_state_writes(prepared):
     model = _buffer_weight_model("cuda:0")
+    executor = model.prepare() if prepared else model
     cache = InferenceCache(8)
     x = torch.randn(2, 1, 16, device="cuda:0")
     first = torch.cuda.Stream()
@@ -190,30 +188,24 @@ def test_graph_session_rejects_cuda_stream_changes_before_queued_state_writes():
     first.wait_stream(torch.cuda.current_stream())
     try:
         with torch.no_grad(), torch.cuda.stream(first):
-            cache._begin_call(model, (x,))
             # Queue a delay before the state writes; host completion does not
             # imply that the queued KV/recurrent updates have finished.
             torch.cuda._sleep(50_000_000)
-            initial = model[0](x, cache=cache, node_id="attention")
-            cache._end_call(True)
+            initial = executor(x, cache=cache)
         with torch.no_grad(), torch.cuda.stream(second):
             with pytest.raises(HNDLError, match="CUDA stream changed"):
-                cache._begin_call(model, (x,))
-            assert cache.position("attention") == 1
+                executor(x, cache=cache)
+            assert cache.position("n0") == 1
         # Rejection leaves the original session usable on its stream, even
         # while the work queued above has not been explicitly synchronized.
         with torch.no_grad(), torch.cuda.stream(first):
-            cache._begin_call(model, (x,))
-            following = model[0](x, cache=cache, node_id="attention")
-            cache._end_call(True)
-            expected = model[0](torch.cat((x, x), dim=1))
+            following = executor(x, cache=cache)
+            expected = model(torch.cat((x, x), dim=1))
             torch.testing.assert_close(torch.cat((initial, following), dim=1), expected)
         first.synchronize()
         cache.reset()
         with torch.no_grad(), torch.cuda.stream(second):
-            cache._begin_call(model, (x,))
-            actual = model[0](x, cache=cache, node_id="attention")
-            cache._end_call(True)
+            actual = executor(x, cache=cache)
             torch.testing.assert_close(actual, model[0](x))
     finally:
         first.synchronize()

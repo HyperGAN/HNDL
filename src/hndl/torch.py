@@ -20,6 +20,7 @@ from torch import nn
 from torch.nn.modules import module as _torch_module
 
 from .errors import HNDLError, describe_iterations
+from .inference import InferenceCache
 from .operator import COMPUTE_DTYPES
 from .settings import MATRIX_SCHEMES
 from .types import _is_chain, batch_multiple, contract_header
@@ -63,53 +64,6 @@ _UNCOMPILED = (_UNSET, None, (), (), ())
 _MAX_SIGNATURES = 64
 
 
-class InferenceCache:
-    """Stateful cache container managing key-value and recurrent decoding states."""
-
-    def __init__(self) -> None:
-        self._states: dict[str, Any] = {}
-
-    def get(self, node_id: str, default: Any = None) -> Any:
-        """Get cached state for node_id, or default if not present."""
-        return self._states.get(node_id, default)
-
-    def set(self, node_id: str, state: Any) -> None:
-        """Set cached state for node_id."""
-        self._states[node_id] = state
-
-    def reset(self, node_id: str | None = None) -> None:
-        """Reset and clear cached states (or a specific node_id)."""
-        if node_id is None:
-            self._states.clear()
-        else:
-            self._states.pop(node_id, None)
-
-    def __contains__(self, node_id: str) -> bool:
-        return node_id in self._states
-
-    def __len__(self) -> int:
-        return len(self._states)
-
-    def __getitem__(self, node_id: str) -> Any:
-        return self._states[node_id]
-
-    def __setitem__(self, node_id: str, state: Any) -> None:
-        self._states[node_id] = state
-
-    def __delitem__(self, node_id: str) -> None:
-        del self._states[node_id]
-
-    def keys(self):
-        return self._states.keys()
-
-    def values(self):
-        return self._states.values()
-
-    def items(self):
-        return self._states.items()
-
-    def __repr__(self) -> str:
-        return f"InferenceCache({list(self._states.keys())})"
 
 #: How the note HNDL adds to an exception raised inside a node begins.
 _NOTE_PREFIX = "HNDL:"
@@ -410,6 +364,8 @@ class GraphModule(nn.Module):
 
     def rebind_state(self):
         """Re-synchronize state snapshot and C-speed stores record after external modifications."""
+        for prepared in tuple(self._prepared_dependents):
+            prepared.clear_cache()
         self._state_program = self._state_snapshot()
         _watch(self._state_program)
         global _watch_generation
@@ -507,6 +463,8 @@ class GraphModule(nn.Module):
             "hndl.torch.build(), or use copy.deepcopy() for an in-memory copy")
 
     def _apply(self, fn, recurse=True):
+        for prepared in tuple(self._prepared_dependents):
+            prepared.clear_cache()
         super()._apply(fn, recurse=recurse)
         # An empty tensor also tracks device moves and dtype casts for
         # parameterless graphs, which hold no state of their own to follow.
@@ -951,21 +909,14 @@ class GraphModule(nn.Module):
             raise self._port_error(port, value, dtype, batch,
                                    f"contract entry {expected!r} is not a batch dimension")
         if value.shape != expected or value.ndim == 0 or value.shape[0] <= 0:
-            if (getattr(self, "_active_cache", None) is not None
-                    and value.ndim == len(expected)
-                    and value.ndim >= 2
-                    and value.shape[0] > 0
-                    and value.shape[-1] == expected[-1]):
-                pass
+            if value.ndim == 0:
+                problem = f"expected shape {_contract_text(port[1], batch)}, got a 0-dimensional tensor"
+            elif value.shape[0] <= 0 and value.ndim == len(expected):
+                problem = f"batch size must be positive, got shape {_shape_text(tuple(value.shape))}"
             else:
-                if value.ndim == 0:
-                    problem = f"expected shape {_contract_text(port[1], batch)}, got a 0-dimensional tensor"
-                elif value.shape[0] <= 0 and value.ndim == len(expected):
-                    problem = f"batch size must be positive, got shape {_shape_text(tuple(value.shape))}"
-                else:
-                    problem = (f"expected shape {_contract_text(port[1], batch)}, "
-                               f"got {_shape_text(tuple(value.shape))}")
-                raise self._port_error(port, value, dtype, batch, problem)
+                problem = (f"expected shape {_contract_text(port[1], batch)}, "
+                           f"got {_shape_text(tuple(value.shape))}")
+            raise self._port_error(port, value, dtype, batch, problem)
         if dtype is not None and value.dtype != dtype:
             raise self._port_error(port, value, dtype, batch,
                                    f"expected dtype {_dtype_text(dtype)}, got {_dtype_text(value.dtype)}")
@@ -1078,9 +1029,26 @@ class GraphModule(nn.Module):
             validated[signature] = True
         return outputs
 
+    def _stores_changed(self):
+        """Check the watched stores without retaining replacement tensors."""
+        same, copies, views, store_lens, tensor_ids, shape = self._stores
+        try:
+            if same != copies or any(len(v) != size for v, size in zip(views, store_lens)):
+                return True
+            for tensor, expected_id in zip(_chain(views), tensor_ids):
+                if id(tensor) != expected_id:
+                    dtypes_devices = [(x.dtype, x.device) if x is not None else None for x in _chain(views)]
+                    return [*store_lens, *map(_is, _chain(views), _NONES), *dtypes_devices] != shape
+            return False
+        except Exception:  # A user module's __eq__ may raise.
+            return True
+
     def _execute(self, inputs, single=False, cache=None):
         if type(inputs) is not tuple:
             inputs = tuple(inputs[n] for n in self._input_names)
+        if cache is not None:
+            from .streaming import execute
+            return execute(self, inputs, cache, single=single)
         if _is_compiling():
             # Traced once per guard set, so the full checks cost nothing per
             # call there and dynamo turns them into guards.
@@ -1097,25 +1065,7 @@ class GraphModule(nn.Module):
             signature = self._signature(inputs)
             # _record_stores, compared: submodules and empty stores by identity,
             # the other stores by length and which values are None.
-            same, copies, views, store_lens, tensor_ids, shape = self._stores
-            try:
-                if same != copies:
-                    changed = True
-                else:
-                    changed = False
-                    for v, expected_len in zip(views, store_lens):
-                        if len(v) != expected_len:
-                            changed = True
-                            break
-                    if not changed:
-                        for t, expected_id in zip(_chain(views), tensor_ids):
-                            if id(t) != expected_id:
-                                dtypes_devices = [(x.dtype, x.device) if x is not None else None for x in _chain(views)]
-                                current_shape = [*store_lens, *map(_is, _chain(views), _NONES), *dtypes_devices]
-                                changed = current_shape != shape
-                                break
-            except Exception:  # noqa: BLE001 - a submodule's own __eq__ raised
-                changed = True
+            changed = self._stores_changed()
             if changed or generation != self._state_seen or signature not in self._validated or cache is not None:
                 outputs = self._validate(inputs, signature, generation, changed, cache=cache)
                 if single:

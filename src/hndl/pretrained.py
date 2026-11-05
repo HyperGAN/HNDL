@@ -366,11 +366,33 @@ def _invoke_shape_fn(shape_fn, input_shape, output="features", layer="", readout
         params = list(sig.parameters.values())
         has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
         pos_params = [p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
-        if len(pos_params) >= 2:
-            accepted_kwargs = {k: v for k, v in kwargs.items() if k != "output" and (has_var_keyword or k in sig.parameters)}
-            return shape_fn(input_shape, output, **accepted_kwargs)
-        accepted_kwargs = {k: v for k, v in kwargs.items() if has_var_keyword or k in sig.parameters}
-        return shape_fn(input_shape, **accepted_kwargs)
+        positional = [input_shape]
+        consumed = {pos_params[0].name} if pos_params else set()
+        for index, parameter in enumerate(pos_params[1:], 1):
+            if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+                if parameter.name in kwargs:
+                    value = kwargs[parameter.name]
+                elif index == 1:
+                    value = output
+                    consumed.add("output")
+                elif parameter.default is not inspect.Parameter.empty:
+                    value = parameter.default
+                else:
+                    break
+                positional.append(value)
+                consumed.add(parameter.name)
+            elif index == 1 and parameter.name not in kwargs:
+                # Preserve the legacy (shape, arbitrary_output_name) callback.
+                positional.append(output)
+                consumed.update((parameter.name, "output"))
+            else:
+                break
+        accepted_kwargs = {
+            key: value for key, value in kwargs.items()
+            if key not in consumed and (has_var_keyword or (
+                key in sig.parameters and sig.parameters[key].kind != inspect.Parameter.POSITIONAL_ONLY))
+        }
+        return shape_fn(*positional, **accepted_kwargs)
 
     return shape_fn(input_shape, **kwargs)
 
