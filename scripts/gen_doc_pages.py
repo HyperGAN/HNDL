@@ -122,6 +122,7 @@ nav = [
     "* [Home](index.md)",
     "* Guide",
     "    * [Pretrained networks](pretrained.md)",
+    "    * [Incremental decoding](incremental-decoding.md)",
     "    * [ParticleGAN and particle sliders](particle-sliders.md)",
     "    * [Native inference deployment](deployment.md)",
     "    * [Adding an operator](ADDING_OPERATORS.md)",

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..inference import _decode_mask, _kv_append
 from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
 from .rope import compute_rope_tables
@@ -349,7 +350,63 @@ class LatentAttention(nn.Module):
     def is_weight_absorbed(self):
         return getattr(self, "_weight_absorption", False)
 
-    def forward(self, x):
+    _supports_inference_cache = True
+
+    def _forward_cached(self, x, cache, node_id):
+        if not self.causal:
+            raise HNDLError("E_UNSUPPORTED", "incremental latent_attention requires causal=True")
+        if self.spatial_shape != (0, 0) or (self.qk_rope_head_dim and self.rope_scaling == "yarn"):
+            raise HNDLError("E_UNSUPPORTED", "incremental MLA requires a length-independent, one-dimensional RoPE schedule")
+        absorbed = self.is_weight_absorbed
+        state = cache._node(self, node_id, x, f"latent_attention:{absorbed}")
+        b, t, _ = x.shape
+        offset, end = state.position, state.position + t
+        c_kv = self.kv_norm(self.kv_down(x))
+        q_input = self.q_norm(self.q_down(x)) if self.q_lora_rank > 0 else x
+        q = self.q_up(q_input).view(b, t, self.heads, -1).transpose(1, 2)
+        if self.qk_rope_head_dim > 0:
+            cos, sin = self._tables(end, self.qk_rope_head_dim, x.device, x.dtype)
+            cos, sin = cos[offset:end], sin[offset:end]
+            kr_raw = self.k_rope_proj(x)
+            kr = kr_raw * cos.unsqueeze(0) + _rotate_half(kr_raw) * sin.unsqueeze(0)
+            qr_raw = q[..., self.qk_nope_head_dim:]
+            qr = qr_raw * cos[None, None] + _rotate_half(qr_raw) * sin[None, None]
+        else:
+            kr = x.new_empty(b, t, 0)
+            qr = None
+        mask = _decode_mask(offset, t, end, x.device) if t > 1 else None
+        if absorbed:
+            # Store one latent vector and one shared rotary key per token,
+            # rather than expanded per-head keys and values.
+            latent, rotary = _kv_append(cache, state, c_kv[:, None], kr[:, None])
+            q_abs = torch.einsum("bhtd,hdc->bhtc", q[..., :self.qk_nope_head_dim], self._absorbed_W_uk)
+            scores = q_abs @ latent.transpose(-2, -1)
+            if qr is not None:
+                scores = scores + qr @ rotary.transpose(-2, -1)
+            scores = scores * self.scale
+            if mask is not None:
+                scores = scores.masked_fill(~mask, float("-inf"))
+            attended = scores.softmax(dim=-1) @ latent
+            result = torch.einsum("bhtc,mhc->btm", attended, self._absorbed_W_o)
+            if self.o_proj.bias is not None:
+                result = result + self.o_proj.bias
+        else:
+            kc = self.k_up(c_kv).view(b, t, self.heads, self.qk_nope_head_dim).transpose(1, 2)
+            v = self.v_up(c_kv).view(b, t, self.heads, self.v_head_dim).transpose(1, 2)
+            if qr is not None:
+                k = torch.cat((kc, kr[:, None].expand(b, self.heads, t, self.qk_rope_head_dim)), dim=-1)
+                q = torch.cat((q[..., :self.qk_nope_head_dim], qr), dim=-1)
+            else:
+                k = kc
+            k, v = _kv_append(cache, state, k, v)
+            attended = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=self.scale)
+            result = self.o_proj(attended.transpose(1, 2).reshape(b, t, self.heads * self.v_head_dim))
+        state.position = end
+        return result
+
+    def forward(self, x, *, cache=None, node_id=None):
+        if cache is not None:
+            return self._forward_cached(x, cache, node_id)
         b, t, _ = x.shape
         c_kv = self.kv_norm(self.kv_down(x))
 
