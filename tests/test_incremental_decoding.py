@@ -274,3 +274,29 @@ def test_partial_graph_reset_cannot_silently_lose_context(device):
         cache.reset("a")
         with pytest.raises(HNDLError, match="complete session"):
             cache._begin_call(model, inputs)
+
+
+def test_graph_hot_path_uses_one_guard_and_standalone_keeps_its_guard(device, monkeypatch):
+    import hndl.inference as inference
+    model = network("attention(4, causal=True)", input_shape=("B", 13, 16),
+                    output_shape=("B", 13, 16), device=device).eval()
+    cache = InferenceCache()
+    inputs = (torch.randn(2, 1, 16, device=device),)
+    with torch.no_grad():
+        cache._begin_call(model, inputs)
+        model[0](inputs[0], cache=cache, node_id="a")
+        cache._end_call(True)
+        original = inference._parameter_signature
+        guarded = []
+        def record(module):
+            guarded.append(module)
+            return original(module)
+        monkeypatch.setattr(inference, "_parameter_signature", record)
+        cache._begin_call(model, inputs)
+        model[0](inputs[0], cache=cache, node_id="a")
+        cache._end_call(True)
+        assert guarded == [model]
+        model[0].q_proj.weight.add_(0.1)
+        with pytest.raises(HNDLError, match="parameters"):
+            model[0](inputs[0], cache=cache, node_id="a")
+        assert guarded == [model, model[0]]

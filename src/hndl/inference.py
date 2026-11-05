@@ -172,8 +172,12 @@ class InferenceCache:
             raise HNDLError("E_RUNTIME", "incremental decoding expects a nonempty sequence tensor")
         signature = (tuple(size for i, size in enumerate(x.shape) if i != sequence_axis), x.dtype, x.device,
                      torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type))
-        parameters = _parameter_signature(module)
         state = self._states.get(node_id)
+        # The graph runtime has just checked every parameter in _begin_call.
+        # Repeating subtree walks for existing operator states adds avoidable
+        # Python work to each token. Direct layer calls keep their own guards.
+        parameters = (state.parameters if self._active and isinstance(state, _NodeState)
+                      else _parameter_signature(module))
         if state is None:
             state = _NodeState(weakref.ref(module), kind, signature, parameters)
             self._states[node_id] = state
