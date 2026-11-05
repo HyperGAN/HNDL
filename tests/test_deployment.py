@@ -240,3 +240,19 @@ def test_native_cuda_compile_load_and_cache_reuse(tmp_path):
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
     assert actual.device == x.device
     assert export(model, (x,), tmp_path).cache_hit
+
+
+def test_native_export_of_packed_model_tracks_parameter_updates(tmp_path):
+    packing = pytest.importorskip("hndl.operators._packing")
+    model = network("swiglu(8); linear(2)", input_shape=("B", 4),
+                    output_shape=("B", 2), device="cpu").eval()
+    packing.prepare_packed(model)
+    x = torch.randn(2, 4)
+    first = export(model, (x,), tmp_path)
+    with torch.no_grad():
+        torch.testing.assert_close(load(first)(x), model(x), rtol=1e-4, atol=1e-5)
+        model[0].gate.weight.add_(0.2)
+    second = export(model, (x,), tmp_path)
+    assert first.cache_key != second.cache_key
+    with torch.no_grad():
+        torch.testing.assert_close(load(second)(x), model(x), rtol=1e-4, atol=1e-5)
