@@ -55,9 +55,20 @@ session ownership remain guarded. `model.prepare()` supports the same cache
 argument. Stateful execution does not use CUDA graph replay.
 
 `latent_attention` also requires causal attention. Its normal mode stores
-expanded keys and values. Calling `absorb_weights()` on an unbiased module
-before starting the session uses compressed latent vectors and shared rotary
-keys instead. Changing absorption mode requires a fresh session.
+expanded keys and values. Weight absorption on an unbiased module uses
+compressed latent vectors and shared rotary keys instead. Before starting the
+session, perform absorption inside `model.allow_state_mutation()` and outside
+`torch.inference_mode()`. For a graph containing a node named `mla`:
+
+```python
+cache.reset()
+with torch.no_grad(), model.allow_state_mutation():
+    model["mla"].absorb_weights()
+```
+
+After a checkpoint load or weight update, reset the cache and repeat absorption
+inside the mutation context before starting another session. Changing
+absorption mode also requires a fresh session.
 
 `mamba2` and `gated_delta_attention` retain a recurrent matrix and the raw inputs
 needed by their causal depthwise convolutions. Their state size remains
