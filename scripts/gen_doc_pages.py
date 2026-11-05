@@ -125,6 +125,8 @@ nav = [
     "    * [Incremental decoding](incremental-decoding.md)",
     "    * [ParticleGAN and particle sliders](particle-sliders.md)",
     "    * [Prepared execution](prepared-execution.md)",
+    "    * [Optimized operators](optimized-operators.md)",
+    "    * [Native inference deployment](deployment.md)",
     "    * [Adding an operator](ADDING_OPERATORS.md)",
     "* Operators",
     "    * [Catalog](operators/index.md)",
