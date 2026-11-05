@@ -2,7 +2,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
-from ._packing import project
+from ._packing import clear_packed_cache, project
 from ._relations import non_image
 
 
@@ -77,3 +77,9 @@ class SwiGLU(nn.Module):
             return self.down(F.silu(self.gate(x)) * self.up(x))
         gate, up = project(self, x, ("gate", "up"))
         return self.down(F.silu(gate) * up)
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        if getattr(self, "_hndl_packing", False):
+            clear_packed_cache(self)
+        return result

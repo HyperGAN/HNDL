@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add opt-in packed QKV, cross-attention KV, SwiGLU and expert parameter storage while preserving parameter objects, optimizer references, gradients and checkpoint keys; replace dense expert-by-token MoE padding with bounded selected-route execution.
+- Add opt-in packed QKV, cross-attention KV, SwiGLU and expert parameter storage while preserving parameter objects, optimizer references, gradients and checkpoint keys; add bounded selected-route MoE execution with adaptive grouped/padded dispatch and an explicit memory threshold.
 - Add an optional FlexAttention backend for softcap and sliding-window attention with bounded block-mask caching and explicit fallback for unsupported devices, dtypes, dense bias and attention dropout.
 
 - Add the optional `particlegan` extra for ParticleGAN 0.9.4 and a CPU example that trains a frozen-base, low-rank HNDL graph with the public default recipe and a real particle prior. Document existing routed particle-slider integration and its recipe/version boundaries.

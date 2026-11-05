@@ -22,6 +22,7 @@ def prepare_attention(module, *, backend="auto"):
         child._hndl_flex_attention = backend != "reference"
         child._hndl_attention_requested = backend
         child._hndl_attention_masks = OrderedDict()
+        child._hndl_attention_failures = OrderedDict()
         child._hndl_attention_backend = "reference"
     return module
 
@@ -32,6 +33,9 @@ def clear_attention_cache(module):
         cache = getattr(child, "_hndl_attention_masks", None)
         if cache is not None:
             cache.clear()
+        failures = getattr(child, "_hndl_attention_failures", None)
+        if failures is not None:
+            failures.clear()
 
 
 def _fallback(owner, reason):
@@ -41,6 +45,27 @@ def _fallback(owner, reason):
         if getattr(owner, "_hndl_attention_requested", "auto") == "flex":
             raise RuntimeError(f"FlexAttention is unavailable: {reason}")
     return None
+
+
+def _compiler_unavailable(error):
+    cause = error
+    while cause is not None:
+        if isinstance(cause, torch.OutOfMemoryError):
+            return False
+        cause = getattr(cause, "inner_exception", None) or cause.__cause__
+    return (isinstance(error, (NotImplementedError, ImportError))
+            or type(error).__module__.startswith(("torch._dynamo", "torch._inductor", "triton")))
+
+
+def _failed(owner, failures, key, error):
+    if not _compiler_unavailable(error):
+        raise error
+    reason = str(error)[:512]
+    if failures is not None:
+        failures[key] = reason
+        while len(failures) > _MAX_MASKS:
+            failures.popitem(last=False)
+    return _fallback(owner, reason)
 
 
 def specialized_attention(q, k, v, *, causal=False, window_size=0,
@@ -64,7 +89,7 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
         return _fallback(owner, "attention dropout")
     if q.device.type != "cuda" or q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         return _fallback(owner, "device or dtype")
-    if (q.shape[-1] > 128 or q.shape[-1] % 8 or q.shape[-1] != v.shape[-1]
+    if (q.shape[-1] < 16 or q.shape[-1] > 128 or q.shape[-1] % 8 or q.shape[-1] != v.shape[-1]
             or q.shape[-2] == 0 or k.shape[-2] == 0):
         return _fallback(owner, "head dimensions or empty sequence")
     if torch.cuda.get_device_capability(q.device)[0] < 8:
@@ -73,6 +98,12 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
         api = importlib.import_module("torch.nn.attention.flex_attention")
     except ImportError:
         return _fallback(owner, "PyTorch has no FlexAttention")
+
+    failure_key = (q.shape, k.shape, v.shape, q.dtype, q.device, causal, window_size,
+                   softcap, query_offset, torch.is_grad_enabled(), q.requires_grad, k.requires_grad, v.requires_grad)
+    failures = None if owner is None else owner.__dict__.setdefault("_hndl_attention_failures", OrderedDict())
+    if failures is not None and failure_key in failures:
+        return _fallback(owner, failures[failure_key])
 
     block_mask = None
     if causal or window_size > 0:
@@ -88,8 +119,11 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
             block_mask = cache[key]
             cache.move_to_end(key)
         else:
-            block_mask = api.create_block_mask(allowed, None, None, q.shape[-2], k.shape[-2],
-                                               device=str(q.device), _compile=True)
+            try:
+                block_mask = api.create_block_mask(allowed, None, None, q.shape[-2], k.shape[-2],
+                                                   device=str(q.device), _compile=True)
+            except Exception as error:
+                return _failed(owner, failures, failure_key, error)
             if cache is not None:
                 cache[key] = block_mask
                 while len(cache) > _MAX_MASKS:
@@ -102,13 +136,13 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
         score_mod = cap
 
     global _compiled_flex
-    if _compiled_flex is None:
-        _compiled_flex = torch.compile(api.flex_attention, fullgraph=True, dynamic=False)
     try:
+        if _compiled_flex is None:
+            _compiled_flex = torch.compile(api.flex_attention, fullgraph=True, dynamic=False)
         result = _compiled_flex(q, k, v, score_mod=score_mod, block_mask=block_mask,
                                 enable_gqa=q.shape[1] != k.shape[1])
-    except NotImplementedError as error:
-        return _fallback(owner, str(error))
+    except Exception as error:
+        return _failed(owner, failures, failure_key, error)
     if owner is not None:
         owner._hndl_attention_backend = "flex"
         owner.__dict__.pop("_hndl_attention_fallback_reason", None)

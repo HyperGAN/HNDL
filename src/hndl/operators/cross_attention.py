@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from ._attention_backend import clear_attention_cache, specialized_attention
-from ._packing import project
+from ._packing import clear_packed_cache, project
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, operator
@@ -126,6 +126,7 @@ class CrossAttention(nn.Module):
                  qk_norm="none", logit_softcap=0.0, eps=1e-6):
         super().__init__()
         self.heads = heads
+        self._packed_context_kv = True
         self.kv_heads = kv_heads if kv_heads > 0 else heads
         if self.heads % self.kv_heads != 0:
             raise HNDLError("E_CONSTRAINT", f"heads={heads} must be divisible by kv_heads={self.kv_heads}")
@@ -158,7 +159,10 @@ class CrossAttention(nn.Module):
     def _apply(self, fn, recurse=True):
         res = super()._apply(fn, recurse=recurse)
         self._mask_cache.clear()
-        clear_attention_cache(self)
+        if getattr(self, "_hndl_flex_attention", False):
+            clear_attention_cache(self)
+        if getattr(self, "_hndl_packing", False):
+            clear_packed_cache(self)
         return res
 
     def forward(self, x, context):

@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ._relations import non_image
-from ._packing import expert_parameters
+from ._packing import clear_packed_cache, expert_parameters, guard_expert_input
 from .feed_forward import ACTIVATIONS
 
 
@@ -49,9 +49,15 @@ class _RoutedLinear(torch.autograd.Function):
                     weights[ids].transpose(1, 2), grad.unsqueeze(-1)).squeeze(-1)
             if weight_gradient is not None:
                 products = grad.unsqueeze(-1) * inputs[start:end].unsqueeze(1)
-                weight_gradient = weight_gradient.index_add(0, ids, products)
+                if torch.is_grad_enabled():
+                    weight_gradient = weight_gradient.index_add(0, ids, products)
+                else:
+                    weight_gradient.index_add_(0, ids, products)
             if bias_gradient is not None:
-                bias_gradient = bias_gradient.index_add(0, ids, grad)
+                if torch.is_grad_enabled():
+                    bias_gradient = bias_gradient.index_add(0, ids, grad)
+                else:
+                    bias_gradient.index_add_(0, ids, grad)
         return input_gradient, weight_gradient, None, bias_gradient
 
 
@@ -191,11 +197,28 @@ class MixtureOfExperts(nn.Module):
         self.bias = bool(bias)
         self.scoring = scoring
         self.routed_scaling_factor = float(routed_scaling_factor)
+        self._dispatch = "auto"
+        self._max_padding_bytes = 16 * 1024 * 1024
         self.router = nn.Linear(D, experts, bias=False)
         if expert_kind == "swiglu":
             self.experts = nn.ModuleList(SwiGLUExpert(D, hidden, bias=bias) for _ in range(experts))
         else:
             self.experts = nn.ModuleList(Expert(D, hidden, activation, bias=bias) for _ in range(experts))
+
+    def configure_dispatch(self, mode="auto", *, max_padding_bytes=16 * 1024 * 1024):
+        """Select automatic, strictly sparse, or padded expert dispatch.
+
+        Automatic dispatch prefers supported grouped GEMM. Its portable
+        fallback uses small padded batches below the estimated activation
+        budget, and bounded selected-route execution above it.
+        """
+        if mode not in ("auto", "sparse", "padded"):
+            raise ValueError("expert dispatch must be 'auto', 'sparse', or 'padded'")
+        if type(max_padding_bytes) is not int or max_padding_bytes < 0:
+            raise ValueError("max_padding_bytes must be a nonnegative integer")
+        self._dispatch = mode
+        self._max_padding_bytes = max_padding_bytes
+        return self
 
     def forward(self, x):
         flat = x.reshape(-1, self.d_model)
@@ -212,46 +235,81 @@ class MixtureOfExperts(nn.Module):
         token_ids = torch.arange(flat.shape[0], device=flat.device).repeat_interleave(self.top_k)
         expert_ids = indices.reshape(-1)
         routed_inputs = flat[token_ids]
+
+        # Grouped GEMM is useful where available. Portable dispatch keeps
+        # small dense batches fast, with a bounded-memory sparse alternative.
+        element_size = routed_inputs.element_size()
+        aligned = (self.d_model * element_size) % 16 == 0 and (self.hidden * element_size) % 16 == 0
+        grouped = (self._dispatch == "auto" and getattr(self, "_hndl_grouped_mm", True)
+                   and hasattr(torch, "_grouped_mm")
+                   and aligned and routed_inputs.dtype in (torch.bfloat16, torch.float16, torch.float32)
+                   and (not torch.compiler.is_compiling() or routed_inputs.dtype == torch.bfloat16))
+        estimated_padding = len(self.experts) * flat.shape[0] * (2 * self.d_model + 3 * self.hidden) * element_size
+        padded = (not grouped and (self._dispatch == "padded"
+                  or (self._dispatch == "auto" and estimated_padding <= self._max_padding_bytes)))
+        if flat.device.type == "cpu" and not torch.compiler.is_compiling() and not grouped and not padded:
+            out = torch.zeros_like(flat)
+            route_weights = weights.reshape(-1, 1)
+            for expert_id, expert in enumerate(self.experts):
+                routes = torch.where(expert_ids == expert_id)[0]
+                tokens = token_ids[routes]
+                contribution = expert(flat[tokens]) * route_weights[routes]
+                out = out.index_add(0, tokens, contribution)
+            return (out * self.routed_scaling_factor).reshape(x.shape)
+
         up_w = expert_parameters(self, "up")
         down_w = expert_parameters(self, "down")
         up_b = expert_parameters(self, "up", "bias") if self.bias else None
         down_b = expert_parameters(self, "down", "bias") if self.bias else None
-
-        # Grouped GEMM is useful where available. The portable route below
-        # needs neither E*N padding nor a CPU readback of expert token counts.
-        grouped = (getattr(self, "_hndl_grouped_mm", False)
-                   and routed_inputs.dtype in (torch.bfloat16, torch.float16)
-                   and (not torch.compiler.is_compiling() or routed_inputs.dtype == torch.bfloat16))
-        if grouped:
+        if grouped or padded:
             order = torch.argsort(expert_ids)
             routed_inputs = routed_inputs[order]
             expert_ids = expert_ids[order]
             token_ids = token_ids[order]
             routing_weights = weights.reshape(-1, 1)[order]
             counts = F.one_hot(expert_ids, num_classes=len(self.experts)).sum(dim=0)
-            offsets = counts.cumsum(0).to(torch.int32)
+            if grouped:
+                offsets = counts.cumsum(0).to(torch.int32)
 
-            def linear(inputs, weight, bias):
-                result = torch._grouped_mm(inputs, weight.transpose(1, 2), offsets)
-                return result if bias is None else result + bias[expert_ids]
+                def linear(inputs, weight, bias):
+                    result = torch._grouped_mm(inputs, weight.transpose(1, 2), offsets)
+                    return result if bias is None else result + bias[expert_ids]
+            else:
+                offsets = counts.cumsum(0) - counts
+                rows = torch.arange(expert_ids.shape[0], device=flat.device) - offsets[expert_ids]
+
+                def linear(inputs, weight, bias):
+                    packed = inputs.new_zeros((len(self.experts), flat.shape[0], inputs.shape[-1]))
+                    packed[expert_ids, rows] = inputs
+                    result = torch.bmm(packed, weight.transpose(1, 2))
+                    if bias is not None:
+                        result = result + bias.unsqueeze(1)
+                    return result[expert_ids, rows]
         else:
             routing_weights = weights.reshape(-1, 1)
 
             def linear(inputs, weight, bias):
                 return _RoutedLinear.apply(inputs, weight, expert_ids, bias)
 
-        up = linear(routed_inputs, up_w, up_b)
+        up = linear(guard_expert_input(self, "up", routed_inputs, up_w), up_w, up_b)
         if self.expert_kind == "swiglu":
             gate_w = expert_parameters(self, "gate")
             gate_b = expert_parameters(self, "gate", "bias") if self.bias else None
-            hidden = F.silu(linear(routed_inputs, gate_w, gate_b)) * up
+            gate = linear(guard_expert_input(self, "gate", routed_inputs, gate_w), gate_w, gate_b)
+            hidden = F.silu(gate) * up
         else:
             hidden = self.experts[0].activation(up)
-        expert_out = linear(hidden, down_w, down_b) * routing_weights
+        expert_out = linear(guard_expert_input(self, "down", hidden, down_w), down_w, down_b) * routing_weights
         out = torch.zeros_like(flat).index_add(0, token_ids, expert_out)
         if self.routed_scaling_factor != 1.0:
             out = out * self.routed_scaling_factor
         return out.reshape(x.shape)
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        if getattr(self, "_hndl_packing", False):
+            clear_packed_cache(self)
+        return result
 
     def extra_repr(self):
         opts = f", expert_kind={self.expert_kind!r}" if self.expert_kind != "mlp" else ""

@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from hndl.operators._packing import clear_packed, prepare_packed, project
-from hndl.operators.moe import MixtureOfExperts, _reference
+from hndl.operators.moe import MixtureOfExperts, _RoutedLinear, _reference
 from hndl.operators.swiglu import SwiGLU
 
 
@@ -142,9 +142,30 @@ def test_packing_twice_reuses_storage():
     assert tuple(p.data_ptr() for p in module.parameters()) == pointers
 
 
+def test_untrusted_layout_detects_in_place_stride_change():
+    module = prepare_packed(SwiGLU(8, False, D=8))
+    x = torch.randn(2, 8)
+    module.gate.weight.data = module.gate.weight.data.t()
+    expected = module.down(torch.nn.functional.silu(module.gate(x)) * module.up(x))
+    torch.testing.assert_close(module(x), expected)
+
+
+def test_global_projection_hooks_are_preserved():
+    from torch.nn.modules import module as torch_module
+    module = prepare_packed(Projections())
+    seen = []
+    hook = torch_module.register_module_forward_hook(lambda layer, *args: seen.append(layer))
+    try:
+        module(torch.randn(2, 8))
+    finally:
+        hook.remove()
+    assert module.q_proj in seen and module.k_proj in seen and module.v_proj in seen
+
+
 @pytest.mark.parametrize("packed", [False, True])
 def test_sparse_moe_second_order_gradients(packed):
     module = MixtureOfExperts(3, 4, 2, "silu", D=2, expert_kind="swiglu", bias=False).double()
+    module.configure_dispatch("sparse")
     if packed:
         prepare_packed(module)
     x = torch.randn(2, 2, dtype=torch.float64, requires_grad=True)
@@ -167,6 +188,7 @@ def test_packed_fullgraph_compilation(kind):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_sparse_moe_cuda_training():
     module = MixtureOfExperts(8, 32, 2, "silu", D=16, expert_kind="swiglu").cuda()
+    module.configure_dispatch("sparse")
     reference = copy.deepcopy(module)
     prepare_packed(module)
     x = torch.randn(2, 5, 16, device="cuda", requires_grad=True)
@@ -177,3 +199,114 @@ def test_sparse_moe_cuda_training():
     expected.square().sum().backward()
     for p, q in zip(module.parameters(), reference.parameters()):
         torch.testing.assert_close(p.grad, q.grad, rtol=2e-4, atol=2e-5)
+
+
+@pytest.mark.parametrize("dispatch", ["auto", "sparse", "padded"])
+def test_dispatch_choices_match_reference(dispatch):
+    module = prepare_packed(MixtureOfExperts(5, 12, 2, "silu", D=8, expert_kind="swiglu"))
+    module.configure_dispatch(dispatch, max_padding_bytes=0)
+    x = torch.randn(4, 8)
+    torch.testing.assert_close(module(x), _reference(module)(x), rtol=1e-5, atol=1e-6)
+
+
+def test_dispatch_configuration_validation():
+    module = _module("mlp")
+    with pytest.raises(ValueError, match="dispatch"):
+        module.configure_dispatch("missing")
+    with pytest.raises(ValueError, match="nonnegative"):
+        module.configure_dispatch(max_padding_bytes=-1)
+
+
+def test_trusted_layout_registration_and_rebind_invalidation():
+    from hndl.torch import network
+    model = network("swiglu(12, bias=True)", input_shape=("B", 8), output_shape=("B", 8), device="cpu")
+    prepare_packed(model, trusted=True)
+    layer = model[0]
+    x = torch.randn(2, 8)
+    with torch.no_grad():
+        model(x)
+        layer.gate.weight = nn.Parameter(layer.gate.weight.detach().clone() + 0.2)
+        expected = layer.down(torch.nn.functional.silu(layer.gate(x)) * layer.up(x))
+        torch.testing.assert_close(layer(x), expected)
+        # Direct storage edits require an explicit root rebind in trusted mode.
+        layer.up.weight.data = layer.up.weight.detach().clone() - 0.3
+        model._preparation_epoch = getattr(model, "_preparation_epoch", 0) + 1
+        expected = layer.down(torch.nn.functional.silu(layer.gate(x)) * layer.up(x))
+        torch.testing.assert_close(layer(x), expected)
+    copied = copy.deepcopy(model)
+    with torch.no_grad():
+        copied[0].gate.weight.add_(0.1)
+        expected = copied[0].down(torch.nn.functional.silu(copied[0].gate(x)) * copied[0].up(x))
+        torch.testing.assert_close(copied[0](x), expected)
+
+
+@pytest.mark.parametrize("parameters", [False, True])
+def test_trusted_functional_call_uses_ephemeral_weights_without_rebinding(parameters):
+    from hndl.torch import network
+    module = network("swiglu(4, bias=True)", input_shape=("B", 2), output_shape=("B", 2), device="cpu")
+    prepare_packed(module, trusted=True)
+    x = torch.randn(3, 2)
+    original = module(x)
+    before = {name: parameter.data_ptr() for name, parameter in module.named_parameters()}
+    replacements = {name: parameter.detach().clone() + 0.5 for name, parameter in module.named_parameters()}
+    if parameters:
+        replacements = {name: nn.Parameter(value) for name, value in replacements.items()}
+    replacement_pointers = {name: value.data_ptr() for name, value in replacements.items()}
+    actual = torch.func.functional_call(module, replacements, (x,))
+    prefix = "nodes.n_n0."
+    def linear(input, name):
+        return torch.nn.functional.linear(input, replacements[prefix + name + ".weight"],
+                                          replacements[prefix + name + ".bias"])
+    expected = linear(torch.nn.functional.silu(linear(x, "gate")) * linear(x, "up"), "down")
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(module(x), original)
+    assert {name: parameter.data_ptr() for name, parameter in module.named_parameters()} == before
+    assert {name: value.data_ptr() for name, value in replacements.items()} == replacement_pointers
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_packed_projection_preserves_weight_version_checks(frozen):
+    module = SwiGLU(4, False, D=2).double()
+    for parameter in module.parameters():
+        parameter.requires_grad_(not frozen)
+    prepare_packed(module)
+    x = torch.randn(2, 2, dtype=torch.float64, requires_grad=True)
+    loss = module(x).sum()
+    with torch.no_grad():
+        module.gate.weight.add_(1)
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        loss.backward()
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_packed_experts_check_weights_used_for_input_gradients(frozen):
+    module = MixtureOfExperts(3, 4, 2, "silu", D=2).double().configure_dispatch("padded")
+    for parameter in module.parameters():
+        parameter.requires_grad_(not frozen)
+    prepare_packed(module)
+    x = torch.randn(2, 2, dtype=torch.float64, requires_grad=True)
+    loss = module(x).sum()
+    with torch.no_grad():
+        module.experts[0].up.weight.add_(1)
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        loss.backward()
+
+
+def test_selected_route_function_all_input_gradients_and_second_derivatives():
+    inputs = torch.randn(4, 2, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(3, 4, 2, dtype=torch.float64, requires_grad=True)
+    bias = torch.randn(3, 4, dtype=torch.float64, requires_grad=True)
+    ids = torch.tensor([2, 0, 2, 1])
+    def run(x, w, b):
+        return _RoutedLinear.apply(x, w, ids, b)
+    assert torch.autograd.gradcheck(run, (inputs, weights, bias))
+    assert torch.autograd.gradgradcheck(run, (inputs, weights, bias))
+
+
+def test_functorch_input_grad_uses_differentiable_packing_fallback():
+    module = prepare_packed(SwiGLU(4, True, D=2))
+    reference = clear_packed(copy.deepcopy(module))
+    x = torch.randn(3, 2)
+    actual = torch.func.grad(lambda value: module(value).sum())(x)
+    expected = torch.func.grad(lambda value: reference(value).sum())(x)
+    torch.testing.assert_close(actual, expected)
