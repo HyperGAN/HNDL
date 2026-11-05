@@ -177,3 +177,93 @@ def test_unversioned_inference_state_is_rejected_clearly_and_unlocks(kind):
                        if kind == "parameter" else model.state.clone())
         cache._begin_call(model, (x,))
         cache._end_call(True)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_graph_session_rejects_cuda_stream_changes_before_queued_state_writes():
+    model = _buffer_weight_model("cuda:0")
+    cache = InferenceCache(8)
+    x = torch.randn(2, 1, 16, device="cuda:0")
+    first = torch.cuda.Stream()
+    second = torch.cuda.Stream()
+    first.wait_stream(torch.cuda.current_stream())
+    try:
+        with torch.no_grad(), torch.cuda.stream(first):
+            cache._begin_call(model, (x,))
+            # Queue a delay before the state writes; host completion does not
+            # imply that the queued KV/recurrent updates have finished.
+            torch.cuda._sleep(50_000_000)
+            initial = model[0](x, cache=cache, node_id="attention")
+            cache._end_call(True)
+        with torch.no_grad(), torch.cuda.stream(second):
+            with pytest.raises(HNDLError, match="CUDA stream changed"):
+                cache._begin_call(model, (x,))
+            assert cache.position("attention") == 1
+        # Rejection leaves the original session usable on its stream, even
+        # while the work queued above has not been explicitly synchronized.
+        with torch.no_grad(), torch.cuda.stream(first):
+            cache._begin_call(model, (x,))
+            following = model[0](x, cache=cache, node_id="attention")
+            cache._end_call(True)
+            expected = model[0](torch.cat((x, x), dim=1))
+            torch.testing.assert_close(torch.cat((initial, following), dim=1), expected)
+        first.synchronize()
+        cache.reset()
+        with torch.no_grad(), torch.cuda.stream(second):
+            cache._begin_call(model, (x,))
+            actual = model[0](x, cache=cache, node_id="attention")
+            cache._end_call(True)
+            torch.testing.assert_close(actual, model[0](x))
+    finally:
+        first.synchronize()
+        second.synchronize()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_standalone_session_rejects_cuda_stream_changes_and_partial_reset_rebinds():
+    layer = _buffer_weight_model("cuda:0")[0]
+    cache = InferenceCache(8)
+    x = torch.randn(2, 1, 16, device="cuda:0")
+    first = torch.cuda.Stream()
+    second = torch.cuda.Stream()
+    first.wait_stream(torch.cuda.current_stream())
+    try:
+        with torch.no_grad(), torch.cuda.stream(first):
+            torch.cuda._sleep(50_000_000)
+            initial = layer(x, cache=cache, node_id="attention")
+        with torch.no_grad(), torch.cuda.stream(second):
+            with pytest.raises(HNDLError, match="CUDA stream changed"):
+                layer(x, cache=cache, node_id="attention")
+            # A new node ID must not bypass the cache-wide stream binding.
+            with pytest.raises(HNDLError, match="CUDA stream changed"):
+                layer(x, cache=cache, node_id="other")
+            assert cache.position("attention") == 1 and "other" not in cache
+        with torch.no_grad(), torch.cuda.stream(first):
+            following = layer(x, cache=cache, node_id="attention")
+            expected = layer(torch.cat((x, x), dim=1))
+            torch.testing.assert_close(torch.cat((initial, following), dim=1), expected)
+        first.synchronize()
+        cache.reset("attention")
+        with torch.no_grad(), torch.cuda.stream(second):
+            torch.testing.assert_close(layer(x, cache=cache, node_id="attention"), layer(x))
+    finally:
+        first.synchronize()
+        second.synchronize()
+
+
+def test_cpu_sessions_do_not_query_cuda_streams(monkeypatch):
+    model = _buffer_weight_model("cpu")
+    cache = InferenceCache(8)
+    x = torch.randn(2, 1, 16)
+    def unexpected_stream_query(*args, **kwargs):
+        raise AssertionError("CPU decoding queried a CUDA stream")
+    monkeypatch.setattr(torch.cuda, "current_stream", unexpected_stream_query)
+    with torch.no_grad():
+        cache._begin_call(model, (x,))
+        actual = model[0](x, cache=cache, node_id="attention")
+        cache._end_call(True)
+        torch.testing.assert_close(actual, model[0](x))
+        cache.reset()
+        torch.testing.assert_close(model[0](x, cache=cache, node_id="attention"), model[0](x))

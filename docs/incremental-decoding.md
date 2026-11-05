@@ -33,6 +33,13 @@ must also stay fixed. Each session needs its own cache; concurrent or recursive
 reuse of a cache is unsupported. If a graph call fails after modifying state,
 reset the cache before retrying.
 
+A CUDA session also belongs to one CUDA stream. Use the same current stream
+for every graph or standalone operator call until resetting the cache; calls
+on another stream are rejected before touching cached state. This keeps queued
+KV and recurrent writes ordered without a synchronization event on each step.
+Before moving a reset session to another stream, finish or explicitly order
+the previous stream's work. CPU sessions do not have a stream restriction.
+
 Overlapping graph calls fail immediately, including calls made while another
 call is validating its inputs and model state. Resetting all or part of a cache
 while a graph call is active is rejected. Create model parameters and buffers

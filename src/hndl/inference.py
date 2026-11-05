@@ -40,6 +40,10 @@ def _parameter_signature(module):
                  for t in chain(module.parameters(), module.buffers()))
 
 
+def _stream_id(device):
+    return torch.cuda.current_stream(device).cuda_stream if device.type == "cuda" else None
+
+
 class InferenceCache:
     """KV and recurrent state with a fixed maximum sequence length.
 
@@ -59,6 +63,7 @@ class InferenceCache:
         self._model_parameters = None
         self._model_epoch = None
         self._graph_nodes = None
+        self._cuda_stream = None
         self._active = False
         self._active_thread = None
         self._session_lock = threading.Lock()
@@ -85,6 +90,7 @@ class InferenceCache:
                 self._model_parameters = None
                 self._model_epoch = None
                 self._graph_nodes = None
+                self._cuda_stream = None
                 self._invalid = False
                 self._active = False
                 self._active_thread = None
@@ -94,6 +100,8 @@ class InferenceCache:
                 for key in tuple(self._states):
                     if key.startswith(node_id + "/"):
                         del self._states[key]
+                if self._model is None and not any(isinstance(state, _NodeState) for state in self._states.values()):
+                    self._cuda_stream = None
         finally:
             self._session_lock.release()
 
@@ -158,9 +166,12 @@ class InferenceCache:
         values = tuple(inputs.values()) if isinstance(inputs, dict) else tuple(inputs)
         if not values or any(not isinstance(x, torch.Tensor) or x.ndim not in (2, 3) for x in values):
             raise HNDLError("E_RUNTIME", "cached graph inputs must be rank-2 token IDs or rank-3 sequences")
+        streams = tuple(_stream_id(x.device) for x in values)
+        binding = self._check_cuda_stream({(x.device, stream) for x, stream in zip(values, streams)
+                                           if stream is not None})
         signature = tuple((tuple(x.shape[:1]) + tuple(x.shape[2:]), x.dtype, x.device,
-                           torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type))
-                          for x in values)
+                           torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type), stream)
+                          for x, stream in zip(values, streams))
         parameters = _parameter_signature(model)
         epoch = getattr(model, "_preparation_epoch", None)
         if self._model is not None and (self._model() is not model or signature != self._input_signature
@@ -175,7 +186,17 @@ class InferenceCache:
         self._input_signature = signature
         self._model_parameters = parameters
         self._model_epoch = epoch
+        if binding is not None:
+            self._cuda_stream = binding
         self._active = True
+
+    def _check_cuda_stream(self, streams):
+        if len(streams) > 1:
+            raise HNDLError("E_RUNTIME", "an InferenceCache session requires one CUDA device and stream")
+        binding = next(iter(streams), None)
+        if binding is not None and self._cuda_stream is not None and binding != self._cuda_stream:
+            raise HNDLError("E_RUNTIME", "cache CUDA stream changed; reset() before using a different stream")
+        return binding
 
     def _end_call(self, success):
         if not self._active or self._active_thread != threading.get_ident():
@@ -218,8 +239,10 @@ class InferenceCache:
             raise HNDLError("E_RUNTIME", "cached operator calls require a nonempty node_id")
         if x.ndim not in (3, 4) or x.shape[0] < 1 or x.shape[sequence_axis] < 1:
             raise HNDLError("E_RUNTIME", "incremental decoding expects a nonempty sequence tensor")
+        stream = _stream_id(x.device)
+        binding = self._check_cuda_stream({(x.device, stream)} if stream is not None else set())
         signature = (tuple(size for i, size in enumerate(x.shape) if i != sequence_axis), x.dtype, x.device,
-                     torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type))
+                     torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type), stream)
         state = self._states.get(node_id)
         # The graph runtime has just checked every parameter in _begin_call.
         # Repeating subtree walks for existing operator states adds avoidable
@@ -235,6 +258,8 @@ class InferenceCache:
             raise HNDLError("E_RUNTIME", f"cache state for {node_id!r} has a different owner, parameters/buffers, batch, width, dtype or device; reset it first")
         if state.position + x.shape[sequence_axis] > self.max_seq_len:
             raise HNDLError("E_RUNTIME", f"cache capacity {self.max_seq_len} exceeded at {node_id!r}; reset or create a larger cache")
+        if binding is not None:
+            self._cuda_stream = binding
         return state
 
 
