@@ -8,6 +8,7 @@ import copy
 from functools import lru_cache
 import threading
 import time
+import weakref
 
 import torch
 from torch import nn
@@ -19,6 +20,13 @@ from . import torch as _runtime
 
 _CAPTURE_LOCK = threading.RLock()
 _CAPTURE_STREAMS = {}
+
+
+def _release_graphs(graphs):
+    """Keep replay storage alive until queued graph work and copies finish."""
+    for entry in graphs.values():
+        entry[4].synchronize()
+    graphs.clear()
 
 
 def _one(result, port):
@@ -212,6 +220,10 @@ class PreparedNetwork(nn.Module):
         self.max_graph_bytes = max_graph_bytes
         self.clone_outputs = clone_outputs
         self._graphs = OrderedDict()
+        # The callback retains the buffers, never this wrapper. In particular,
+        # side-stream replay must finish before normal GC releases input or
+        # captured-state storage back to its original allocation stream.
+        self._graph_finalizer = weakref.finalize(self, _release_graphs, self._graphs)
         self._graph_bytes = 0
         self._validated = OrderedDict()
         self._choices = OrderedDict()
