@@ -123,6 +123,7 @@ nav = [
     "* Guide",
     "    * [Pretrained networks](pretrained.md)",
     "    * [ParticleGAN and particle sliders](particle-sliders.md)",
+    "    * [Prepared execution](prepared-execution.md)",
     "    * [Adding an operator](ADDING_OPERATORS.md)",
     "* Operators",
     "    * [Catalog](operators/index.md)",
