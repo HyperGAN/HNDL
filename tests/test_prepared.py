@@ -1,6 +1,8 @@
 """Prepared execution preserves PyTorch behavior and bounds replay ownership."""
 
 import copy
+import gc
+import weakref
 
 import pytest
 import torch
@@ -419,3 +421,82 @@ def test_shallow_prepared_copy_shares_weights_and_keeps_execution_state_separate
     for name in ("nodes", "source"):
         with pytest.raises(TypeError, match="architecture is fixed"):
             setattr(fast, name, nn.Module())
+
+
+def test_generated_copies_finalize_their_own_empty_caches_without_cuda(monkeypatch):
+    import hndl.prepared as module
+
+    released = []
+    release = module._release_graphs
+
+    def record(graphs):
+        released.append(id(graphs))
+        release(graphs)
+
+    monkeypatch.setattr(module, "_release_graphs", record)
+    cuda_initialized = torch.cuda.is_initialized()
+    source = network("linear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    prepared = source.prepare()
+    shallow = copy.copy(prepared)
+    deep = copy.deepcopy(prepared)
+    keys = (id(prepared._graphs), id(shallow._graphs), id(deep._graphs))
+    assert len(set(keys)) == 3
+    original_ref = weakref.ref(prepared)
+    shallow_ref = weakref.ref(shallow)
+    deep_ref = weakref.ref(deep)
+    del prepared
+    gc.collect()
+    assert original_ref() is None
+    assert released == [keys[0]]
+    assert shallow_ref() is shallow and deep_ref() is deep
+    del shallow
+    gc.collect()
+    assert shallow_ref() is None
+    assert released == list(keys[:2])
+    del deep
+    gc.collect()
+    assert deep_ref() is None
+    assert released == list(keys)
+    assert torch.cuda.is_initialized() == cuda_initialized
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_temporary_cuda_executor_keeps_cross_stream_buffers_until_replay_finishes():
+    source = network("linear(64); relu(); linear(16)", input_shape=("B", 64),
+                     output_shape=("B", 16), device="cuda:0").eval()
+    x = torch.randn(512, 64, device="cuda:0")
+    # CUDA lazy module loading can synchronize the GPU and hide the race.
+    # Load the allocation-pressure fill kernel before delaying the side stream.
+    warm = torch.empty_like(x)
+    warm.fill_(12345.0)
+    torch.cuda.synchronize()
+    del warm
+    side = torch.cuda.Stream()
+    with torch.no_grad():
+        prepared = source.prepare(backend="cuda_graph")
+        prepared(x)
+        expected = source(x)
+        torch.cuda.synchronize()
+        pointer = next(iter(prepared._graphs.values()))[1][0].data_ptr()
+        reference = weakref.ref(prepared)
+        with torch.cuda.stream(side):
+            torch.cuda._sleep(3_000_000_000)
+            actual = prepared(x)
+        del prepared
+        gc.collect()
+        completed_at_gc = side.query()
+        pressure = []
+        try:
+            for _ in range(32):
+                value = torch.empty_like(x)
+                value.fill_(12345.0)
+                pressure.append(value)
+                if value.data_ptr() == pointer:
+                    break
+        finally:
+            torch.cuda.synchronize()
+        assert reference() is None  # The finalizer must not retain the wrapper.
+        assert completed_at_gc, "GC released replay storage while side-stream work was pending"
+        torch.testing.assert_close(actual, expected)
+        for value in pressure:
+            torch.testing.assert_close(value, torch.full_like(value, 12345.0), rtol=0, atol=0)
