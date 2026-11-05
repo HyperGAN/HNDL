@@ -25,8 +25,8 @@ addresses change. In-place optimizer updates and checkpoint loads immediately
 update the packed views. Packed execution supports ordinary backpropagation and
 higher-order input gradients.
 
-Self-attention can combine Q/K/V projections into one matrix multiplication;
-cross-attention combines the context's K/V projections, and SwiGLU combines its
+Self-attention and gated delta attention can combine Q/K/V projections into
+one matrix multiplication; cross-attention combines the context's K/V projections, and SwiGLU combines its
 gate/up projections. Different grouped-query projection widths are supported.
 Individual projection hooks retain their normal calls. Tied parameters and
 distinct parameters that already share storage retain their original layout.
@@ -84,6 +84,11 @@ value width. `attention_backend="reference"` disables the optional backend;
 `"flex"` requests it explicitly and reports unsupported specialized calls.
 Enclosing `torch.compile` or export tracing uses the existing traceable tensor
 operations; it does not invoke the eager FlexAttention dispatcher.
+
+Self-attention uses this dispatcher before constructing any dense window mask,
+including during incremental decoding. Cached queries keep their absolute
+position offsets; causal window reads trim the irrelevant prefix before kernel
+dispatch. The cache retains its fixed sequence capacity.
 
 Each attention module retains at most sixteen block masks. Casting or moving a
 module clears these masks. The module's `_hndl_attention_backend` attribute
