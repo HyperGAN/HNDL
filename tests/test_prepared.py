@@ -210,3 +210,73 @@ def test_auto_cuda_tuning_fallback_and_gradient_mode_changes():
         fallback = model.prepare(backend="auto", max_graph_bytes=1)
         torch.testing.assert_close(fallback(x.detach()), model(x.detach()))
         assert fallback.cache_info["graphs"] == 0
+
+
+def test_compiled_preparation_tracks_rebind_and_external_training_mode():
+    source = network("linear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    prepared = source.prepare()
+    compiled = torch.compile(prepared, backend="eager", fullgraph=True)
+    x = torch.randn(2, 4)
+    compiled(x)
+    replacement = nn.Linear(4, 4)
+    with torch.no_grad():
+        replacement.weight.zero_()
+        replacement.bias.fill_(3)
+    source.nodes._modules["n_n0"] = replacement
+    source.rebind_state()
+    torch.testing.assert_close(compiled(x), source(x))
+    source.eval()
+    assert prepared._export_module.training is False
+    torch.testing.assert_close(compiled(x), source(x))
+
+
+def test_deepcopy_preparation_has_independent_parameters_and_no_rng_draw():
+    model = network("linear(4)", input_shape=("B", 4), output_shape=("B", 4), device="cpu")
+    prepared = model.prepare()
+    state = torch.random.get_rng_state().clone()
+    cloned = copy.deepcopy(prepared)
+    assert torch.equal(state, torch.random.get_rng_state())
+    assert cloned.plan is prepared.plan
+    assert len(model._prepared_dependents) == 1
+    assert len(cloned.source._prepared_dependents) == 1
+    x = torch.randn(2, 4)
+    torch.testing.assert_close(cloned(x), prepared(x))
+    with torch.no_grad():
+        cloned[0].weight.zero_()
+    assert cloned[0].weight.data_ptr() != prepared[0].weight.data_ptr()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_graph_accounts_for_reserved_intermediate_workspace():
+    source = network("linear(16384); gelu(); linear(1)", input_shape=("B", 64),
+                     output_shape=("B", 1), device="cuda:0").eval()
+    x = torch.randn(1024, 64, device="cuda:0")
+    with torch.inference_mode():
+        constrained = source.prepare(backend="cuda_graph", max_graph_bytes=16 * 1024**2)
+        with pytest.raises(HNDLError, match="max_graph_bytes"):
+            constrained(x)
+        assert constrained.cache_info["graphs"] == 0
+        ample = source.prepare(backend="cuda_graph", max_graph_bytes=256 * 1024**2)
+        torch.testing.assert_close(ample(x), source(x))
+        assert ample.cache_info["bytes"] >= 64 * 1024**2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_graph_serializes_shared_buffers_across_streams():
+    source = network("linear(32); silu(); linear(4)", input_shape=("B", 8),
+                     output_shape=("B", 4), device="cuda:0").eval()
+    x1 = torch.randn(16, 8, device="cuda:0")
+    x2 = torch.randn_like(x1)
+    with torch.inference_mode():
+        prepared = source.prepare((x1,), backend="cuda_graph")
+        first, second = torch.cuda.Stream(), torch.cuda.Stream()
+        first.wait_stream(torch.cuda.current_stream())
+        second.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(first):
+            torch.cuda._sleep(3_000_000)
+            y1 = prepared(x1)
+        with torch.cuda.stream(second):
+            y2 = prepared(x2)
+        prepared.clear_cache()  # Also waits for in-flight replay and output clones.
+        torch.testing.assert_close(y1, source(x1))
+        torch.testing.assert_close(y2, source(x2))

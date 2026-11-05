@@ -319,6 +319,7 @@ class GraphModule(nn.Module):
         super().__init__()
         self.plan = plan
         self._preparation_epoch = 0
+        self._prepared_dependents = weakref.WeakSet()
         self.nodes = _NodeModules(modules)
         self._runtime_device = device
         self.checkpoint_nodes = frozenset(checkpoint_nodes or ())
@@ -418,6 +419,19 @@ class GraphModule(nn.Module):
         self._compiled = _UNCOMPILED
         self._validated.clear()
         self._preparation_epoch += 1
+        self._notify_prepared()
+
+    def _notify_prepared(self):
+        for prepared in tuple(self._prepared_dependents):
+            prepared._refresh()
+
+    def train(self, mode=True):
+        changed = self.training != mode
+        super().train(mode)
+        if changed and hasattr(self, "_prepared_dependents"):
+            self._preparation_epoch += 1
+            self._notify_prepared()
+        return self
 
     def prepare(self, example_inputs=None, *, backend="generated", max_graphs=4,
                 max_graph_bytes=256 * 1024 * 1024, clone_outputs=True, pack=False,
@@ -463,7 +477,7 @@ class GraphModule(nn.Module):
         result = type(self).__new__(type(self))
         memo[id(self)] = result
         for name, value in self.__dict__.items():
-            if name == "_stores":
+            if name in {"_stores", "_prepared_dependents"}:
                 continue  # rebuilt below from the copy's own modules
             # The architecture lock guards attribute writes; this rebuilds the
             # instance dictionary directly, exactly as unpickling would.
@@ -475,6 +489,7 @@ class GraphModule(nn.Module):
         object.__setattr__(result, "_compiled", _UNCOMPILED)
         object.__setattr__(result, "_fast", result._build_fast_program())
         object.__setattr__(result, "_validated", {})
+        object.__setattr__(result, "_prepared_dependents", weakref.WeakSet())
         object.__setattr__(result, "_stores", result._record_stores())
         _watch(result._state_program)
         return result
@@ -508,6 +523,7 @@ class GraphModule(nn.Module):
         self._validated = {}
         self._state_seen = None
         self._preparation_epoch += 1
+        self._notify_prepared()
         return self
 
     def _effective_dtype(self, dtype, is_compute=True):
