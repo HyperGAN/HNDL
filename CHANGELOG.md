@@ -4,7 +4,7 @@
 
 - Add prepared graph execution sharing existing parameters, optimizer references and checkpoint names, with generated tensor lifetimes, optional bounded CUDA graph replay, independent or borrowed outputs, and measured inference strategy selection.
 - Rebuild checked shape programs after `rebind_state()` so the first call after a layer replacement uses the new layer.
-
+- Add native inference deployment through `hndl.deployment.export` and `load`, with reusable AOTInductor packages, weight/operator/environment fingerprints, exact runtime input guards, checksum verification, atomic package replacement, and bounded artifact storage.
 - Add bounded incremental inference caches for causal attention, transformer blocks, latent attention (including compressed weight absorption), Mamba2, gated delta attention, learned positions and RoPE, with absolute position offsets, reusable KV storage, recurrent/convolution state, and session validation.
 - Add the optional `particlegan` extra for ParticleGAN 0.9.4 and a CPU example that trains a frozen-base, low-rank HNDL graph with the public default recipe and a real particle prior. Document existing routed particle-slider integration and its recipe/version boundaries.
 
