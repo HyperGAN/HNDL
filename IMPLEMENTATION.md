@@ -1,4 +1,4 @@
-# Implementation notes: 0.10.0
+# Implementation notes: 0.11.0
 
 This release implements the contract in [SPEC.md](SPEC.md). [README.md](README.md)
 introduces the APIs with examples; the [operator catalog](docs/operators/index.md)
@@ -6,6 +6,14 @@ and the [authored networks](docs/networks.md) are generated from the code.
 
 ## Available
 
+- Prepared generated execution sharing model parameters, bounded CUDA graph
+  replay with explicit output ownership, optional packed projections and fused
+  attention, incremental causal decoding, and cached native deployment. See
+  [prepared execution](docs/prepared-execution.md),
+  [incremental decoding](docs/incremental-decoding.md),
+  [optimized operators](docs/optimized-operators.md),
+  [native deployment](docs/deployment.md), and
+  [performance measurements](docs/performance.md).
 - Declarative source and bounded UTF-8 file loading: `resolve`, `resolve_file`,
   `network`, and `network_file`.
 - Trusted Python authoring: `ops`, `resolve_callable`, and
