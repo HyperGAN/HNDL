@@ -37,7 +37,7 @@ trainer = GANTrainer(recipe, generator, critic, seed=23)
 metrics = trainer.step(real_batch())
 ```
 
-At [ParticleGAN 0.9.4](https://github.com/255BITS/ParticleGAN/releases/tag/v0.9.4),
+At [ParticleGAN 0.9.4](https://github.com/HyperGAN/ParticleGAN/releases/tag/v0.9.4),
 the selected default is `bispf_optimized`: non-saturating logistic losses, the
 Born–Infeld critic penalty, SBNP prior regularization, zero-momentum DualNorm
 and constant effective learning rates. `GANTrainer` constructs a real learned
