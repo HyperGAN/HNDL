@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Publish an unpublished package version to PyPI after it merges to `master` and passes the distribution checks.
+
 ## 0.11.0 (2026-11-04)
 
 - Add opt-in performance measurements and a hardware-specific report covering prepared setup/inference/training, bounded replay memory, incremental decoding, packed operators, fused attention and native deployment startup/runtime.
