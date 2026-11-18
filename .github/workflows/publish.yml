@@ -1,6 +1,7 @@
 name: Publish to PyPI
 
-# A merge to master publishes an unpublished version from pyproject.toml.
+# A merge to master publishes an unpublished version to PyPI and mirrors the
+# same tested files to GitHub Releases.
 # A published GitHub release can also run the workflow using a matching tag.
 #
 # Authentication, in order of preference:
@@ -79,6 +80,11 @@ jobs:
             echo "::error::Release tag $RELEASE_TAG does not match package version v$VERSION"
             exit 1
           fi
+      - name: Inspect GitHub release state
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/mirror_github_release.py inspect
 
   distribution:
     name: Build and test distributions
@@ -156,3 +162,31 @@ jobs:
           attestations: ${{ secrets.PYPI_API_TOKEN == '' }}
           skip-existing: true
           print-hash: true
+
+  github-release:
+    name: Mirror tested distributions to GitHub
+    if: github.repository == 'HyperGAN/HNDL' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: hndl-github-release-${{ needs.plan.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-distributions
+          path: dist
+      - name: Mirror the tested files after verifying PyPI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/mirror_github_release.py mirror
