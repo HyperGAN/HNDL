@@ -71,6 +71,7 @@ def test_mirror_creates_draft_and_checks_files_before_publishing(distributions):
     assert upload[:3] == ("release", "upload", f"v{VERSION}")
     assert set(upload[5:]) == {str(directory / name) for name in complete}
     assert publish[:3] == ("api", "--method", "PATCH") and "draft=false" in publish
+    assert f"tag_name=v{VERSION}" in publish and f"target_commitish={SOURCE}" in publish
 
 
 def test_exact_draft_retry_uploads_only_missing_assets(distributions):
