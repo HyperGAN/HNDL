@@ -120,10 +120,15 @@ def mirror(version, source, dist):
     if tag_commit(tag) not in (None, source):
         raise RuntimeError(f"{tag} changed while staging release files")
 
+    release_id = record["id"]
     latest = [] if prerelease else ["-f", "make_latest=legacy"]
-    gh("api", "--method", "PATCH", f"repos/{REPOSITORY}/releases/{record['id']}", "-F", "draft=false", *latest)
+    gh(
+        "api", "--method", "PATCH", f"repos/{REPOSITORY}/releases/{release_id}",
+        "-f", f"tag_name={tag}", "-f", f"target_commitish={source}", "-F", "draft=false", *latest,
+    )
     record = release_record(tag)
-    if record["draft"] or tag_commit(tag) != source or asset_names(record, expected) != expected.keys():
+    if (not record or record["id"] != release_id or record["draft"] or record["prerelease"] != prerelease
+            or tag_commit(tag) != source or asset_names(record, expected) != expected.keys()):
         raise RuntimeError(f"GitHub did not publish the tested revision and files for {tag}")
     return record["html_url"]
 

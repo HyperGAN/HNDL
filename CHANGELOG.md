@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve the tested source tag when publishing a GitHub release draft.
 - Releases from `master` mirror the same tested wheel and source archive to GitHub after PyPI verifies their hashes.
 - Publish an unpublished package version to PyPI after it merges to `master` and passes the distribution checks.
 
