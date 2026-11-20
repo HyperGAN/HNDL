@@ -7,14 +7,14 @@ the HNDL models in this example. Install the two packages separately:
 
 ```sh
 python -m pip install -e .
-python -m pip install 'particlegan==0.9.4'
+python -m pip install 'particlegan==0.11.0'
 ```
 
 HNDL requires PyTorch; ParticleGAN is installed only to run this example and its
-integration tests. ParticleGAN 0.9.4 is the qualified release for the example
+integration tests. ParticleGAN 0.11.0 is the qualified release for the example
 below. A future compatible release still needs its own check.
 
-## A runnable current-recipe example
+## Run the BiSPF compatibility example
 
 From this checkout, with ParticleGAN installed separately:
 
@@ -32,13 +32,14 @@ update; the example changes only the synthetic dimensions and update budget:
 ```python
 from particlegan import GANTrainer, get_recipe
 
-recipe = get_recipe(num_particles=32, z_dim=4, batch_size=8, total_steps=3)
+recipe = get_recipe("bispf_optimized", num_particles=32, z_dim=4, batch_size=8, total_steps=3,
+                    ema_decay=0.0, serve_average=0.0)
 trainer = GANTrainer(recipe, generator, critic, seed=23)
 metrics = trainer.step(real_batch())
 ```
 
-At [ParticleGAN 0.9.4](https://github.com/HyperGAN/ParticleGAN/releases/tag/v0.9.4),
-the selected default is `bispf_optimized`: non-saturating logistic losses, the
+At [ParticleGAN 0.11.0](https://github.com/HyperGAN/ParticleGAN/releases/tag/v0.11.0),
+the example explicitly selects `bispf_optimized`. It uses non-saturating logistic losses, the
 Born–Infeld critic penalty, SBNP prior regularization, zero-momentum DualNorm
 and constant effective learning rates. `GANTrainer` constructs a real learned
 particle prior, separate from the low-rank network weights. The regression
@@ -87,14 +88,14 @@ the pretrained backbone, native projection names, media sampling and controls.
 
 ## Version, recipe and trained weights are separate
 
-Installing ParticleGAN 0.9.4 does not make every existing experiment use its
+Installing ParticleGAN 0.11.0 does not make every existing experiment use its
 current default. The existing P-H3 HyperGAN cohort explicitly selects `ka2`,
 with relativistic loss, VICReg and a cosine schedule. Its routed/gmix network
 can run under that cohort without becoming a `bispf_optimized` result. Earlier
 published particle-slider collections likewise include historical gmix and
 ordinary LoRA objectives. Keep their recorded recipe and checkpoint lineage.
 
-Use the current-recipe example above to check HNDL/ParticleGAN compatibility.
+Use the BiSPF example above to check HNDL/ParticleGAN compatibility.
 Use the product's own native tests and evaluation to qualify a real media
 control. A CPU gradient or checkpoint test establishes neither pretrained
 quality nor a newly trained or published slider.
