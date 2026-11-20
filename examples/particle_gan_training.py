@@ -1,6 +1,6 @@
-"""Exercise HNDL networks with the public ParticleGAN 0.9.4 trainer on CPU.
+"""Exercise HNDL networks with the public ParticleGAN 0.11.0 trainer on CPU.
 
-Install HNDL from this checkout and separately install ``particlegan==0.9.4``.
+Install HNDL from this checkout and separately install ``particlegan==0.11.0``.
 The generator is a frozen linear base plus a zero-initialized rank-2 update.
 This small synthetic GAN checks interoperability, not pretrained slider quality.
 """
@@ -13,10 +13,11 @@ from hndl.torch import network
 
 
 def make_trainer():
-    """Use the released default objective; override only fixture sizes/budget."""
+    """Preserve the BiSPF objective with synthetic fixture sizes and budget."""
     from particlegan import GANTrainer, get_recipe
 
-    recipe = get_recipe(num_particles=32, z_dim=4, batch_size=8, total_steps=3)
+    recipe = get_recipe("bispf_optimized", num_particles=32, z_dim=4, batch_size=8, total_steps=3,
+                        ema_decay=0.0, serve_average=0.0)
     generator = network(
         '''
         base = linear(value, 4, bias=False, name="base", trainable=False)
