@@ -342,6 +342,9 @@ class GraphModule(nn.Module):
         self._spec_out = {node.id: {port: _compile_shape(shape) for port, shape in node.output_shapes.items()}
                           for node in plan.nodes}
         self._compiled = _UNCOMPILED
+        # Dynamo in PyTorch 2.6 cannot traverse the plan's frozen mappings.
+        # Bake its module/port tuples here and bind the live batch while tracing.
+        self._trace_program = self._resolve_shapes(None, cache=False)
         self._fast = self._build_fast_program()
         # Input signatures whose calls passed every check, and the watch
         # generation and store contents at which the registered state last
@@ -374,6 +377,7 @@ class GraphModule(nn.Module):
         self._stores = self._record_stores()
         self._fast = self._build_fast_program()
         self._compiled = _UNCOMPILED
+        self._trace_program = self._resolve_shapes(None, cache=False)
         self._validated.clear()
         self._preparation_epoch += 1
         self._notify_prepared()
@@ -434,7 +438,7 @@ class GraphModule(nn.Module):
         result = type(self).__new__(type(self))
         memo[id(self)] = result
         for name, value in self.__dict__.items():
-            if name in {"_stores", "_prepared_dependents"}:
+            if name in {"_stores", "_prepared_dependents", "_trace_program"}:
                 continue  # rebuilt below from the copy's own modules
             # The architecture lock guards attribute writes; this rebuilds the
             # instance dictionary directly, exactly as unpickling would.
@@ -444,6 +448,7 @@ class GraphModule(nn.Module):
         # modules rather than trusting a structure copied mid-flight, validates
         # its first call afresh, and watches its own modules for registrations.
         object.__setattr__(result, "_compiled", _UNCOMPILED)
+        object.__setattr__(result, "_trace_program", result._resolve_shapes(None, cache=False))
         object.__setattr__(result, "_fast", result._build_fast_program())
         object.__setattr__(result, "_validated", {})
         object.__setattr__(result, "_prepared_dependents", weakref.WeakSet())
@@ -473,8 +478,9 @@ class GraphModule(nn.Module):
         self._runtime_device = probe.device
         # ``.double()``, ``.half()`` and ``.to(dtype=...)`` cast floating state
         # only; a probe that came back integral means no compute-dtype change.
-        if probe.is_floating_point() or probe.is_complex():
+        if (probe.is_floating_point() or probe.is_complex()) and self._runtime_dtype != probe.dtype:
             self._runtime_dtype = probe.dtype
+            self._trace_program = self._resolve_shapes(None, cache=False)
         # Every validated signature named the old device and dtype. A move is
         # also a natural point to re-check registered state in full, which
         # catches the edits no registration hook reports (see _state_seen).
@@ -928,6 +934,7 @@ class GraphModule(nn.Module):
     def _check_traced(self, value, expected, dtype, port, batch):
         # Static predicates become Dynamo guards. Symbolic batch constraints
         # remain traceable without formatting SymInts in an exception.
+        expected = self._resolve(port[1], batch)
         label = "E_RUNTIME: " + port[0]
         torch._assert(isinstance(value, torch.Tensor), label + " expected a tensor")
         torch._assert(value.ndim > 0 and value.shape == expected, label + " shape mismatch")
@@ -961,11 +968,15 @@ class GraphModule(nn.Module):
         # The resolved expectations depend on the batch and on the dtype casts
         # ``_apply`` records; the device is read live by ``_check`` instead, so
         # ``.to(device)`` needs no invalidation.
-        compiled = self._compiled
-        if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
-            compiled = self._resolve_shapes(batch, cache=not compiling)
+        if compiling and not _compiling_simulated:
+            compiled = self._trace_program
+            check = self._check_traced
+        else:
+            compiled = self._compiled
+            if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
+                compiled = self._resolve_shapes(batch, cache=not compiling)
+            check = self._check
         _, _, input_program, node_program, output_program = compiled
-        check = self._check_traced if compiling and not _compiling_simulated else self._check
         values = {}
         for (name, key, expected, dtype, port), value in zip(input_program, inputs):
             check(value, expected, dtype, port, batch)
