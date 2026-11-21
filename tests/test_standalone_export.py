@@ -10,10 +10,14 @@ from tests._network_examples import load, names, random_inputs
 def test_standalone_shipped_recipe(name):
     source, _, kwargs = load(name)
     plan = resolve(source, **kwargs)
-    reference = build(plan, device="cpu").eval()
     namespace = {}
     exec(plan.to_python_source(), namespace)
-    generated = namespace["Model"]().eval()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(7)
+        reference = build(plan, device="cpu").eval()
+        torch.manual_seed(7)
+        generated = namespace["Model"]().eval()
+    torch.testing.assert_close(generated.state_dict(), reference.state_dict(), rtol=0, atol=0)
     assert [p.requires_grad for p in generated.parameters()] == [p.requires_grad for p in reference.parameters()]
     generated.load_state_dict(reference.state_dict())
     inputs = random_inputs(plan, batch_size=1)
