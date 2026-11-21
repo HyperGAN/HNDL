@@ -300,3 +300,66 @@ def test_graph_hot_path_uses_one_guard_and_standalone_keeps_its_guard(device, mo
         with pytest.raises(HNDLError, match="parameters"):
             model[0](inputs[0], cache=cache, node_id="a")
         assert guarded == [model, model[0]]
+
+
+@pytest.mark.parametrize("source", [
+    "rope(2)",
+    "attention(2, causal=True, rope=True, window_size=4)",
+    "latent_attention(2, kv_lora_rank=8, qk_nope_head_dim=4, qk_rope_head_dim=4, v_head_dim=4)",
+])
+def test_rotary_tables_allow_training_after_inference_and_preserve_yarn_context(source, device):
+    import copy
+
+    def with_yarn(source):
+        return source[:-1] + ", rope_scaling='yarn', rope_scale=4.0)"
+
+    layer = make_layer(with_yarn(source), device)
+    reference = copy.deepcopy(layer)
+    long = torch.randn(2, 128, 16, device=device)
+    short = torch.randn(2, 32, 16, device=device, requires_grad=True)
+    with torch.inference_mode():
+        initial = layer(long)
+    layer.train()
+    reference.train()
+    for sample in (long.requires_grad_(), short):
+        actual, expected = layer(sample), copy.deepcopy(reference)(sample)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(torch.autograd.grad(actual.sum(), sample)[0],
+                                   torch.autograd.grad(expected.sum(), sample)[0])
+    with torch.inference_mode():
+        torch.testing.assert_close(layer.eval()(long), initial)
+
+
+@pytest.mark.parametrize("parts", [(7, 2, 4, 1, 3), (1,) * 17, (2, 2, 4, 9)])
+@pytest.mark.parametrize("window", [1, 4])
+def test_window_ring_matches_full_across_wraparound_and_reuses_storage(parts, window, device):
+    layer = make_layer(f"attention(4, kv_heads=2, causal=True, rope=True, window_size={window})", device)
+    x = torch.randn(2, 17, 16, device=device)
+    cache = InferenceCache(4096)
+    with torch.inference_mode():
+        expected = layer(x)
+        offset = 0
+        for chunk in x.split(parts, dim=1):
+            actual = layer(chunk, cache=cache, node_id="a")
+            torch.testing.assert_close(actual, expected[:, offset:offset + chunk.shape[1]], rtol=1e-4, atol=1e-5)
+            current = tuple(t.data_ptr() for t in cache["a"].tensors.values())
+            if offset == 0:
+                pointers = current
+            assert current == pointers
+            offset += chunk.shape[1]
+            assert cache.position("a") == offset
+            assert cache.allocated_bytes == 2 * 2 * 2 * window * 4 * x.element_size()
+
+
+def test_decode_rotary_table_growth_is_bounded_and_amortized():
+    layer = make_layer("rope(4)", "cpu")
+    cache = InferenceCache(33)
+    x = torch.randn(1, 1, 16)
+    sizes = set()
+    with torch.inference_mode():
+        for _ in range(33):
+            layer(x, cache=cache, node_id="r")
+            tables, = layer._cache.values()
+            sizes.add(tables[0].shape[-2])
+    assert max(sizes) == 33
+    assert len(sizes) <= 3

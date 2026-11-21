@@ -120,8 +120,9 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
             cache.move_to_end(key)
         else:
             try:
-                block_mask = api.create_block_mask(allowed, None, None, q.shape[-2], k.shape[-2],
-                                                   device=str(q.device), _compile=True)
+                with torch.inference_mode(False), torch.no_grad():
+                    block_mask = api.create_block_mask(allowed, None, None, q.shape[-2], k.shape[-2],
+                                                       device=str(q.device), _compile=True)
             except Exception as error:
                 return _failed(owner, failures, failure_key, error)
             if cache is not None:

@@ -89,6 +89,30 @@ def compute_rope_tables(
     return duplicated.cos().to(dtype)[None, None, :, :], duplicated.sin().to(dtype)[None, None, :, :]
 
 
+def _cached_rope_tables(cache, end, head_dim, device, dtype, theta, scaling, scale, spatial_shape,
+                        *, start=0, capacity=None):
+    """Return rotary rows [start:end], retaining one table per frequency configuration."""
+    if torch.compiler.is_compiling():
+        return compute_rope_tables(end, head_dim, device, dtype, theta, scaling, scale, spatial_shape)
+
+    key = (head_dim, device, dtype, theta, scaling, scale, spatial_shape)
+    tables = cache.get(key)
+    length = tables[0].shape[-2] if tables is not None else -1
+    if length < end or (scaling == "yarn" and length != end):
+        # YaRN's frequencies depend on end. Incremental callers use only
+        # length-independent schedules and can amortize growth across tokens.
+        length = end if capacity is None or scaling == "yarn" else min(capacity, max(16, 2 * end))
+        # Table storage outlives the caller's inference context. Later
+        # training forwards must be able to save these constants for backward.
+        with torch.inference_mode(False), torch.no_grad():
+            tables = compute_rope_tables(length, head_dim, device, dtype, theta, scaling, scale, spatial_shape)
+        cache[key] = tables
+    if start == 0 and length == end:
+        return tables
+    cos, sin = tables
+    return cos[..., start:end, :], sin[..., start:end, :]
+
+
 def _relation(s):
     shape = s.shape("x") or s.shape("out")
     heads = s.args.get("heads", 1)
@@ -272,27 +296,11 @@ class RoPE(nn.Module):
         self._cache.clear()
         return res
 
-    def _tables(self, positions, head_dim, device, dtype):
-        if torch.compiler.is_compiling():
-            c, s = compute_rope_tables(
-                positions, head_dim, device, dtype,
-                theta=self.theta, rope_scaling=self.rope_scaling,
-                rope_scale=self.rope_scale, spatial_shape=self.spatial_shape,
-            )
-            return c.transpose(1, 2), s.transpose(1, 2)
-        key = (head_dim, str(device), dtype)
-        hit = self._cache.get(key)
-        if hit is not None and hit[0].shape[1] >= positions:
-            return hit[0][:, :positions, :, :], hit[1][:, :positions, :, :]
-        cos, sin = compute_rope_tables(
-            positions, head_dim, device, dtype,
-            theta=self.theta, rope_scaling=self.rope_scaling,
-            rope_scale=self.rope_scale, spatial_shape=self.spatial_shape,
-        )
-        cos = cos.transpose(1, 2)
-        sin = sin.transpose(1, 2)
-        self._cache[key] = (cos, sin)
-        return cos, sin
+    def _tables(self, end, head_dim, device, dtype, *, start=0, capacity=None):
+        cos, sin = _cached_rope_tables(self._cache, end, head_dim, device, dtype,
+                                       self.theta, self.rope_scaling, self.rope_scale, self.spatial_shape,
+                                       start=start, capacity=capacity)
+        return cos.transpose(1, 2), sin.transpose(1, 2)
 
     _supports_inference_cache = True
 
@@ -304,8 +312,7 @@ class RoPE(nn.Module):
             state = cache._node(self, node_id, x, "rope", sequence_axis=axis)
             end = state.position + x.shape[axis]
             dh = x.shape[-1] if x.ndim == 4 else x.shape[-1] // self.heads
-            cos, sin = self._tables(end, dh, x.device, x.dtype)
-            cos, sin = cos[:, state.position:end], sin[:, state.position:end]
+            cos, sin = self._tables(end, dh, x.device, x.dtype, start=state.position, capacity=cache.max_seq_len)
             if x.ndim == 4:
                 cos, sin = cos.transpose(1, 2), sin.transpose(1, 2)
                 result = x * cos + _rotate_half(x) * sin

@@ -11,7 +11,7 @@ from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
 from ._equalized import EqualLinear
 from .rms_norm import RMSNorm
-from .rope import compute_rope_tables
+from .rope import _cached_rope_tables, compute_rope_tables
 
 ROPE_BASE = 10000.0
 
@@ -109,6 +109,13 @@ def _relative_position_index(height, width):
     row_offset = rows[:, None] - rows[None, :] + (height - 1)
     column_offset = columns[:, None] - columns[None, :] + (width - 1)
     return row_offset * (2 * width - 1) + column_offset
+
+
+def _window_bias(positions, device, dtype, window_size, causal):
+    indices = torch.arange(positions, device=device)
+    diff = indices[:, None] - indices[None, :]
+    blocked = ((diff < 0) | (diff >= window_size)) if causal else diff.abs() >= window_size
+    return torch.zeros((positions, positions), device=device, dtype=dtype).masked_fill_(blocked, float("-inf"))
 
 
 def _causal_bias(positions, device, dtype):
@@ -442,25 +449,11 @@ class Attention(nn.Module):
         self._causal_cache[key] = cached
         return cached
 
-    def _get_rope_tables(self, positions, device, dtype):
-        sp = (0, 0) if self.relative_position_bias else (self.spatial_shape if self.rope else (0, 0))
-        if torch.compiler.is_compiling():
-            return _rope_tables(
-                positions, self.head_dim, device, dtype,
-                theta=self.rope_theta, rope_scaling=self.rope_scaling,
-                rope_scale=self.rope_scale, spatial_shape=sp,
-            )
-        key = (str(device), dtype, self.rope_theta, self.rope_scaling, self.rope_scale, sp)
-        cached = self._rope_cache.get(key)
-        if cached is not None and cached[0].shape[2] >= positions:
-            return cached[0][:, :, :positions, :], cached[1][:, :, :positions, :]
-        cached = _rope_tables(
-            positions, self.head_dim, device, dtype,
-            theta=self.rope_theta, rope_scaling=self.rope_scaling,
-            rope_scale=self.rope_scale, spatial_shape=sp,
-        )
-        self._rope_cache[key] = cached
-        return cached
+    def _get_rope_tables(self, end, device, dtype, *, start=0, capacity=None):
+        spatial_shape = (0, 0) if self.relative_position_bias else self.spatial_shape
+        return _cached_rope_tables(self._rope_cache, end, self.head_dim, device, dtype, self.rope_theta,
+                                   self.rope_scaling, self.rope_scale, spatial_shape,
+                                   start=start, capacity=capacity)
 
     _supports_inference_cache = True
 
@@ -471,7 +464,7 @@ class Attention(nn.Module):
             raise HNDLError("E_UNSUPPORTED", "spatial attention cannot use an incremental sequence cache")
         if self.rope and self.rope_scaling == "yarn":
             raise HNDLError("E_UNSUPPORTED", "incremental YaRN requires a fixed frequency context; use a length-independent RoPE scaling")
-        state = cache._node(self, node_id, x, "attention")
+        state = cache._node(self, node_id, x, f"attention:{self.window_size}")
         batch, count, _ = x.shape
         offset, end = state.position, state.position + count
         if getattr(self, "_hndl_packing", False):
@@ -489,14 +482,11 @@ class Attention(nn.Module):
             q = F.normalize(q, p=2, dim=-1, eps=self.eps)
             k = F.normalize(k, p=2, dim=-1, eps=self.eps)
         if self.rope:
-            cos, sin = self._get_rope_tables(end, x.device, x.dtype)
-            cos, sin = cos[..., offset:end, :], sin[..., offset:end, :]
+            cos, sin = self._get_rope_tables(end, x.device, x.dtype, start=offset, capacity=cache.max_seq_len)
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
-        k, v = _kv_append(cache, state, k, v)
-        key_start = max(0, offset - self.window_size + 1) if self.window_size > 0 else 0
-        if key_start:
-            k, v = k[..., key_start:, :], v[..., key_start:, :]
-        query_offset, key_count = offset - key_start, end - key_start
+        k, v = _kv_append(cache, state, k, v, self.window_size)
+        key_count = k.shape[-2]
+        query_offset = key_count - count
         if getattr(self, "_hndl_flex_attention", False):
             fused = specialized_attention(
                 q, k, v, causal=True, window_size=self.window_size,
@@ -510,7 +500,7 @@ class Attention(nn.Module):
         # chunk needs absolute, bottom-right alignment instead.
         mask = None
         is_causal = query_offset == 0 and count > 1
-        if self.window_size > 0 or (query_offset > 0 and count > 1):
+        if count > 1 and (self.window_size > 0 or query_offset > 0):
             mask = _decode_mask(query_offset, count, key_count, x.device, self.window_size)
             is_causal = False
         if self.logit_softcap > 0:
@@ -578,18 +568,13 @@ class Attention(nn.Module):
 
         if self.window_size > 0:
             mask_key = (positions, self.window_size, self.causal, str(x.device), x.dtype)
-            if not torch.compiler.is_compiling() and mask_key in self._mask_cache:
-                w_mask = self._mask_cache[mask_key]
+            if torch.compiler.is_compiling():
+                w_mask = _window_bias(positions, x.device, x.dtype, self.window_size, self.causal)
             else:
-                i = torch.arange(positions, device=x.device)[:, None]
-                j = torch.arange(positions, device=x.device)[None, :]
-                diff = i - j
-                if self.causal:
-                    blocked = (diff < 0) | (diff >= self.window_size)
-                else:
-                    blocked = diff.abs() >= self.window_size
-                w_mask = torch.zeros((positions, positions), device=x.device, dtype=x.dtype).masked_fill(blocked, float("-inf"))
-                if not torch.compiler.is_compiling():
+                w_mask = self._mask_cache.get(mask_key)
+                if w_mask is None:
+                    with torch.inference_mode(False), torch.no_grad():
+                        w_mask = _window_bias(positions, x.device, x.dtype, self.window_size, self.causal)
                     self._mask_cache[mask_key] = w_mask
             mask = w_mask if mask is None else mask + w_mask
 

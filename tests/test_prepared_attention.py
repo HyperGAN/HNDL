@@ -136,6 +136,9 @@ def test_flex_attention_with_packed_qkv_preserves_training_gradients():
     prepare_attention(layer, backend="flex")
     x = torch.randn(2, 17, 32, device="cuda:0", requires_grad=True)
     xr = x.detach().clone().requires_grad_()
+    with torch.inference_mode():
+        layer.eval()(x)
+    layer.train()
     actual, expected = layer(x), reference(xr)
     torch.testing.assert_close(actual, expected, rtol=5e-4, atol=5e-5)
     actual.square().sum().backward()

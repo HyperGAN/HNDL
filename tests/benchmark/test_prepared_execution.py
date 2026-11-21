@@ -186,6 +186,11 @@ def test_incremental_steps_vs_full_prefix(device, prefix, width):
         expected = full(tokens)[:, prefix:]
 
         def prefill():
+            # The full-sequence oracle and prior bursts populate rotary tables.
+            # Include their construction in this fresh session's prefill.
+            for layer in model.modules():
+                if hasattr(layer, "_rope_cache"):
+                    layer._rope_cache.clear()
             cache.reset()
             model(tokens[:, :prefix], cache=cache)
 
@@ -204,11 +209,12 @@ def test_incremental_steps_vs_full_prefix(device, prefix, width):
         prefill()
         torch.testing.assert_close(decode(), expected, **tolerances)
         torch.testing.assert_close(recompute(), expected, **tolerances)
-        cached, baseline = [], []
+        cached, baseline, prefills = [], [], []
         for iteration in range(3):
             # A finite session keeps the public cache capacity and position
             # semantics intact. Prefill is outside the timed token burst.
-            prefill()
+            duration, _ = _elapsed(prefill, device)
+            prefills.append(duration * 1e3)
             if iteration % 2 == 0:
                 duration, actual = _elapsed(decode, device)
                 cached.append(duration / steps * 1e6)
@@ -221,6 +227,7 @@ def test_incremental_steps_vs_full_prefix(device, prefix, width):
                 cached.append(duration / steps * 1e6)
             torch.testing.assert_close(actual, reference, **tolerances)
         _emit("incremental", device=str(device), batch=1, prefix=prefix, width=width, steps=steps,
+              prefill_ms=round(statistics.median(prefills), 3),
               cached_step_us=round(statistics.median(cached), 3),
               recompute_step_us=round(statistics.median(baseline), 3),
               cache_bytes=cache.allocated_bytes, max_seq_len=cache.max_seq_len)
