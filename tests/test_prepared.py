@@ -388,6 +388,34 @@ def test_cuda_replay_pins_rotary_tables_after_cache_growth_and_eviction():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_replay_pins_flex_score_cap_after_eviction():
+    from hndl.operators._attention_backend import clear_attention_cache
+
+    source = network("attention(4, head_dim=16, logit_softcap=0.25)", input_shape=("B", 17, 64),
+                     output_shape=("B", 17, 64), device="cuda:0").eval()
+    x = torch.randn(2, 17, 64, device="cuda:0")
+    with torch.inference_mode():
+        expected = source(x)
+        fast = source.prepare(backend="cuda_graph", attention_backend="flex")
+        # The constant can be created on a different stream before capture.
+        producer = torch.cuda.Stream(device=x.device)
+        producer.wait_stream(torch.cuda.current_stream(x.device))
+        with torch.cuda.stream(producer):
+            source(x)
+        torch.testing.assert_close(fast(x), expected, rtol=5e-4, atol=5e-5)
+        pointer = source[0]._hndl_attention_softcap[1].data_ptr()
+        clear_attention_cache(source[0])
+        assert not hasattr(source[0], "_hndl_attention_softcap")
+        entry = next(iter(fast._graphs.values()))
+        assert pointer in {t.data_ptr() for t in entry[5]}
+        with torch.cuda.stream(producer):
+            scratch = [torch.full((), 100., device=x.device) for _ in range(24)]
+        torch.testing.assert_close(fast(x), expected, rtol=5e-4, atol=5e-5)
+        producer.synchronize()
+        assert all(t.data_ptr() != pointer for t in scratch)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_cuda_replay_reuses_one_capture_for_repeated_parameterized_calls(monkeypatch):
     source = network("linear(16); silu(); linear(4)", input_shape=("B", 8),
                      output_shape=("B", 4), device="cuda:0").eval()

@@ -49,7 +49,7 @@ _DERIVED_TABLES = {
 }
 _PREPARED_METADATA = frozenset({
     "_hndl_packed_layouts", "_hndl_packing_blocked", "_hndl_attention_masks", "_hndl_attention_failures",
-    "_hndl_attention_backend", "_hndl_attention_fallback_reason",
+    "_hndl_attention_backend", "_hndl_attention_fallback_reason", "_hndl_attention_softcap",
     "_hndl_packing_owner", "_hndl_packing_module_id",
 })
 
@@ -109,6 +109,10 @@ def _semantic(value, seen=None):
 
     if value is None or type(value) in (str, int, bool):
         return value
+    if value is Ellipsis:
+        return {"singleton": "Ellipsis"}
+    if isinstance(value, slice):
+        return {"slice": _semantic((value.start, value.stop, value.step), seen)}
     if type(value) is float:
         # repr also handles NaN/Inf settings without non-standard JSON.
         return {"float": repr(value)}

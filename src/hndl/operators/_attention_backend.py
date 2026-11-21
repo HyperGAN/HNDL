@@ -11,12 +11,21 @@ import torch
 _MAX_MASKS = 16
 
 
-@lru_cache(maxsize=16)
-def _capped_score(softcap, device):
+def _capped_score(owner, softcap, device):
     # A captured Python float becomes a symbolic scalar under dynamic=True,
     # which FlexAttention cannot lower inside a differentiable score modifier.
-    with torch.inference_mode(False):
-        cap = torch.tensor(softcap, device=device, dtype=torch.float32)
+    cached = getattr(owner, "_hndl_attention_softcap", None)
+    if cached is not None and cached[0] == softcap and cached[1].device == device:
+        cap = cached[1]
+    else:
+        with torch.inference_mode(False):
+            # Finish this one-time copy before publishing the constant to
+            # other streams, including a prepared executor's capture stream.
+            host = torch.tensor(softcap, device="cpu", dtype=torch.float32)
+            cap = host.to(device, non_blocking=False)
+        if owner is not None:
+            owner._hndl_attention_softcap = (softcap, cap)
+    cap.record_stream(torch.cuda.current_stream(device))
 
     def score_mod(score, batch, head, query, key):
         return cap * torch.tanh(score / cap)
@@ -63,13 +72,15 @@ def prepare_attention(module, *, backend="auto"):
         child._hndl_attention_requested = backend
         child._hndl_attention_masks = OrderedDict()
         child._hndl_attention_failures = OrderedDict()
+        child.__dict__.pop("_hndl_attention_softcap", None)
         child._hndl_attention_backend = "reference"
     return module
 
 
 def clear_attention_cache(module):
-    """Release retained block mask tensors, for example before a device move."""
+    """Release derived mask and softcap tensors, for example before a move."""
     for child in module.modules():
+        child.__dict__.pop("_hndl_attention_softcap", None)
         cache = getattr(child, "_hndl_attention_masks", None)
         if cache is not None:
             cache.clear()
@@ -170,7 +181,7 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
                 while len(cache) > _MAX_MASKS:
                     cache.popitem(last=False)
 
-    score_mod = _capped_score(softcap, q.device) if softcap > 0.0 else None
+    score_mod = _capped_score(owner, softcap, q.device) if softcap > 0.0 else None
 
     try:
         result = _compiled_flex(q, k, v, score_mod=score_mod, block_mask=block_mask,

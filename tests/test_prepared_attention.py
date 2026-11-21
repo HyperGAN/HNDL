@@ -125,6 +125,7 @@ def test_flex_attention_full_and_cached_positions_avoid_dense_window_mask():
     assert len(layer._hndl_attention_masks) <= 16
     layer.cpu()
     assert not layer._hndl_attention_masks
+    assert not hasattr(layer, "_hndl_attention_softcap")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
