@@ -69,6 +69,21 @@ def test_cuda_flex_matches_reference_and_backward(causal, window_size, softcap, 
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_explicit_flex_supports_many_sequence_lengths_and_softcaps():
+    owner = backend.prepare_attention(nn.Identity(), backend="flex")
+    # More shapes than Dynamo's default eight static graph specializations.
+    with torch.inference_mode():
+        for length in range(17, 29):
+            q, k, v = (torch.randn(1, 2, length, 16, device="cuda") for _ in range(3))
+            cap = 0.5 if length % 2 else 3.0
+            result = backend.specialized_attention(q, k, v, softcap=cap, owner=owner)
+            expected = _reference(q, k, v, causal=False, window_size=0, softcap=cap)
+            torch.testing.assert_close(result, expected, rtol=3e-4, atol=3e-5)
+            assert owner._hndl_attention_backend == "flex"
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fallback_preserves_dropout_and_dense_bias():
     owner = backend.prepare_attention(nn.Identity())
     q = torch.randn(1, 2, 4, 16, device="cuda")

@@ -1,13 +1,53 @@
 """Optional fused softcap/window attention, with bounded per-module metadata."""
 
 from collections import OrderedDict
+from functools import lru_cache
 import importlib
+import inspect
 
 import torch
 
 
 _MAX_MASKS = 16
-_compiled_flex = None
+
+
+@lru_cache(maxsize=16)
+def _capped_score(softcap, device):
+    # A captured Python float becomes a symbolic scalar under dynamic=True,
+    # which FlexAttention cannot lower inside a differentiable score modifier.
+    with torch.inference_mode(False):
+        cap = torch.tensor(softcap, device=device, dtype=torch.float32)
+
+    def score_mod(score, batch, head, query, key):
+        return cap * torch.tanh(score / cap)
+
+    return score_mod
+
+
+@lru_cache(maxsize=32)
+def _flex_kernel(configuration):
+    from torch.nn.attention.flex_attention import flex_attention
+
+    options = dict(fullgraph=True, dynamic=True)
+    if "isolate_recompiles" in inspect.signature(torch.compile).parameters:
+        return torch.compile(flex_attention, isolate_recompiles=True, **options)
+
+    # Older PyTorch tracks the recompile budget by Python code object. Give
+    # each configuration its own entry point while keeping the same kernels.
+    def run(*args, **kwargs):
+        return flex_attention(*args, **kwargs)
+
+    run.__code__ = run.__code__.replace()
+    return torch.compile(run, **options)
+
+
+def _compiled_flex(q, k, v, *, score_mod, block_mask, enable_gqa):
+    # Flex kernels specialize on head layout and execution mode. Sequence
+    # lengths stay dynamic within each configuration (e.g. chunked decoding).
+    kernel = _flex_kernel((q.device, q.dtype, q.shape[1], k.shape[1], q.shape[-1],
+                           torch.is_grad_enabled(), torch.is_inference_mode_enabled(),
+                           score_mod is not None, block_mask is not None))
+    return kernel(q, k, v, score_mod=score_mod, block_mask=block_mask, enable_gqa=enable_gqa)
 
 
 def prepare_attention(module, *, backend="auto"):
@@ -130,16 +170,9 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
                 while len(cache) > _MAX_MASKS:
                     cache.popitem(last=False)
 
-    score_mod = None
-    if softcap > 0.0:
-        def cap(score, batch, head, query, key):
-            return softcap * torch.tanh(score / softcap)
-        score_mod = cap
+    score_mod = _capped_score(softcap, q.device) if softcap > 0.0 else None
 
-    global _compiled_flex
     try:
-        if _compiled_flex is None:
-            _compiled_flex = torch.compile(api.flex_attention, fullgraph=True, dynamic=False)
         result = _compiled_flex(q, k, v, score_mod=score_mod, block_mask=block_mask,
                                 enable_gqa=q.shape[1] != k.shape[1])
     except Exception as error:
