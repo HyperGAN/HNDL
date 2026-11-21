@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add a [correctness and optimization review](reports/optimization-2026-11-20.md) with execution parity findings, CPU latency measurements, and CUDA memory comparisons.
+
 ## 0.11.0 (2026-11-04)
 
 - Add opt-in performance measurements and a hardware-specific report covering prepared setup/inference/training, bounded replay memory, incremental decoding, packed operators, fused attention and native deployment startup/runtime.
