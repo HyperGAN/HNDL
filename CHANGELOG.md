@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Enforce shape, dtype, device and batch contracts under compiled prepared execution, including intermediate custom operator outputs.
+- Honor non-reentrant activation checkpointing for first-layer trainable weights with ordinary input tensors, and reduce dispatch overhead in eager and prepared execution.
+- Accept named tensor inputs called `cache` alongside the positional-input convention for incremental sessions.
+- Include resolved parameter ties in plan digests and structural diffs, and migrate saved tied plans after verifying their original checksums.
+
 - Add a [correctness and optimization review](reports/optimization-2026-11-20.md) with execution parity findings, CPU latency measurements, and CUDA memory comparisons.
 
 ## 0.11.0 (2026-11-04)

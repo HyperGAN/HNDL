@@ -500,3 +500,66 @@ def test_temporary_cuda_executor_keeps_cross_stream_buffers_until_replay_finishe
         torch.testing.assert_close(actual, expected)
         for value in pressure:
             torch.testing.assert_close(value, torch.full_like(value, 12345.0), rtol=0, atol=0)
+
+
+def test_compiled_preparation_enforces_contracts_for_new_signatures_and_custom_nodes():
+    model = network("relu()", input_shape=("B", 8), output_shape=("B", 8), device="cpu")
+    compiled = torch.compile(model.prepare(), backend="eager", fullgraph=True)
+    x = torch.ones(2, 8)
+    torch.testing.assert_close(compiled(x), x)
+    for invalid in (x[:, :-1], x.long(), x[:0]):
+        with pytest.raises((AssertionError, RuntimeError), match="E_RUNTIME"):
+            compiled(invalid)
+    torch.testing.assert_close(compiled(x[:1]), x[:1])
+
+    registry = Registry.builtins()
+
+    @registry.operator("truncate", shape="x[B, D] -> out[B, D]", summary="Drop a feature.")
+    class Truncate(nn.Module):
+        def forward(self, x):
+            return x[:, :-1]
+
+    custom = network("truncate(); relu()", input_shape=("B", 8), output_shape=("B", 8),
+                     device="cpu", registry=registry)
+    with pytest.raises((AssertionError, RuntimeError), match="shape mismatch"):
+        torch.compile(custom.prepare(), backend="eager", fullgraph=True)(x)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_checkpoint_on_first_block_reduces_saved_tensors_with_detached_inputs(prepared):
+    source = network("attention(4, causal=True)", input_shape=("B", 8, 16),
+                     output_shape=("B", 8, 16), device="cpu", checkpoint=True)
+    baseline = copy.deepcopy(source[0])
+    model = source.prepare() if prepared else source
+    x = torch.randn(2, 8, 16)
+    model(x)  # Exercise the validated path as well as the cold call.
+    def step(module):
+        saved = []
+        with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append(t.numel()) or t, lambda t: t):
+            output = module(x)
+        output.sum().backward()
+        return output, sum(saved)
+    expected, baseline_saved = step(baseline)
+    actual, checkpoint_saved = step(model)
+    torch.testing.assert_close(actual, expected)
+    assert checkpoint_saved < baseline_saved
+    for parameter, reference in zip(model.parameters(), baseline.parameters(), strict=True):
+        torch.testing.assert_close(parameter.grad, reference.grad)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_cache_port_accepts_keyword_and_positional_decoding(prepared):
+    from hndl.inference import InferenceCache
+
+    model = network("attention(cache, 2, causal=True)", input_shape={"cache": ("B", 4, 8)},
+                    output_shape=("B", 4, 8), device="cpu").eval()
+    model = model.prepare() if prepared else model
+    x = torch.randn(1, 4, 8)
+    with torch.no_grad():
+        expected = model(cache=x)
+        torch.testing.assert_close(model(x), expected)
+        session = InferenceCache(4)
+        actual = torch.cat([model(v, cache=session) for v in x.split(2, dim=1)], dim=1)
+        torch.testing.assert_close(actual, expected)
+        with pytest.raises(HNDLError, match="positionally"):
+            model(cache=session)

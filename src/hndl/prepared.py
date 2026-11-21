@@ -92,10 +92,9 @@ def execution_module(model, *, cached=False):
             positional = (", ".join(bound) + ", ") if bound else ""
             call = f"{layer}({positional}cache=cache, node_id={node.id!r})"
         elif not cached and node.id in model.checkpoint_nodes:
-            tuple_args = "(" + ", ".join(bound) + ("," if len(bound) == 1 else "") + ")"
             checkpoint_args = (", " + ", ".join(bound)) if bound else ""
             call = (f"(_checkpoint({layer}{checkpoint_args}, use_reentrant=False) "
-                    f"if self.training and any(v.requires_grad for v in {tuple_args}) else {call})")
+                    f"if self.training and torch.is_grad_enabled() else {call})")
         variables = []
         for port_index, port in enumerate(node.outputs):
             variable = f"v{index}_{port_index}"
@@ -453,20 +452,25 @@ class PreparedNetwork(nn.Module):
             # Root hooks belong to the original module; let PyTorch invoke
             # them with that module and its normal input/output conventions.
             return self.source(*args, cache=cache, **named)
+        if cache is not None and "cache" in self.source._input_set:
+            cache = self.source._bind_cache_port(args, named, cache)
         inputs = self.source._bind(args, named)
         if _runtime._is_compiling():
             if cache is not None or self.backend == "cuda_graph":
                 raise HNDLError("E_UNSUPPORTED", "Compile the generated executor without a stateful cache or CUDA graph wrapper")
             if self._epoch != self.source._preparation_epoch:
                 raise HNDLError("E_RUNTIME", "prepared executor changed; call source.rebind_state() before compiled execution")
-            self._export_module.training = self.source.training
-            return self._format(self._export_module(*inputs), args, named, compiling=True)
+            # Dynamo specializes these port checks as guards during tracing.
+            # The raw export module remains available for unchecked tensor programs.
+            outputs = self.source._run_checked(inputs, compiling=True)
+            if self.source._single_output:
+                return self._format(next(iter(outputs.values())), args, named, compiling=True)
+            return outputs
         if self.backend == "generated" and cache is None:
             if (self._epoch != self.source._preparation_epoch
                     or self._generation != _runtime._watch_generation):
                 with self._lock:
                     self._refresh()
-            self._export_module.training = self.source.training
             key = self.source._signature(inputs)
             if key not in self._validated:
                 result = self.source._execute(inputs, single=self.source._single_output)
@@ -480,7 +484,6 @@ class PreparedNetwork(nn.Module):
             if (self._epoch != getattr(self.source, "_preparation_epoch", 0)
                     or self._generation != _runtime._watch_generation):
                 self._refresh()
-            self._export_module.training = self.source.training
             if cache is not None:
                 if self.backend == "cuda_graph":
                     raise HNDLError("E_UNSUPPORTED", "stateful decoding uses generated execution, not CUDA replay")
