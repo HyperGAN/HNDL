@@ -4,7 +4,7 @@
 
 - Preserve hooks and custom expert projections across MoE dispatch modes and compute group boundaries from sorted routes to reduce runtime and temporary allocations.
 - Reuse length-independent rotary tables during decoding, preserve YaRN length and inference-to-training semantics, bound local-attention KV storage by its window, and reduce per-token state-guard traversal.
-- Isolate FlexAttention compilation across execution modes and head layouts, and retain its softcap storage across CUDA graph replay. Native deployment fingerprints now support attention code that indexes tensors with slices and ellipses.
+- Isolate FlexAttention compilation across execution modes and head layouts, and retain its softcap storage across CUDA graph replay. On PyTorch 2.6, automatic attention uses the reference implementation for gradient-carrying calls and explicit Flex training reports the upstream gradient issue. Native deployment fingerprints support attention code that indexes tensors with slices and ellipses.
 - Load standalone native packages from read-only directories with checksum and environment verification. Managed caches still coordinate readers and writers.
 - Move local branch and worktree housekeeping to an explicit maintainer check and recognize an optional packaging tool correctly in checkouts with a local `build/` directory.
 - Enforce shape, dtype, device and batch contracts under compiled prepared execution, including intermediate custom operator outputs and cold full-graph calls on PyTorch 2.6.
