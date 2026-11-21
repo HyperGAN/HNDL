@@ -28,7 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(scope="session")
 def built_sdist_archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Build the source distribution archive once per test session."""
-    pytest.importorskip("build")
+    # A wheel build can leave a local build/ namespace even without PyPA build.
+    pytest.importorskip("build.__main__")
     if not (REPO_ROOT / ".git").exists():
         pytest.skip("Not running inside a repository checkout")
     outdir = tmp_path_factory.mktemp("sdist_build")
