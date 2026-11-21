@@ -152,7 +152,9 @@ def test_sdist_unpack_and_run_saved_plan_compat(built_sdist_archive: Path, tmp_p
         f"pytest tests/test_saved_plan_compat.py failed in unpacked sdist:\n"
         f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     )
-    assert "13 passed" in proc.stdout, f"Expected 13 tests to pass, got output:\n{proc.stdout}"
+    for fixture in expected_fixtures:
+        name = Path(fixture).stem
+        assert f"test_saved_0_6_0_plan_loads_and_builds[{name}] PASSED" in proc.stdout
 
 
 def test_sdist_saved_plan_compat_mutation_oracle(built_sdist_archive: Path, tmp_path: Path) -> None:
@@ -356,68 +358,6 @@ def test_all_repository_markdown_links_rewrite_to_valid_files() -> None:
                     f"In {md_path.relative_to(REPO_ROOT)}, link {target} rewrote to {rewritten}, "
                     f"but target file {clean_target} does not exist in site docs or repo root"
                 )
-
-
-# ---------------------------------------------------------------------------
-# Repository & Git Hygiene Stress Tests (L-10)
-# ---------------------------------------------------------------------------
-
-def test_git_worktrees_zero_stale_entries() -> None:
-    """Verify git worktree list contains 0 stale/linked worktrees (only main repository)."""
-    if not (REPO_ROOT / ".git").exists():
-        pytest.skip("Not running inside a git repository checkout")
-    proc = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    worktree_lines = [line for line in proc.stdout.splitlines() if line.startswith("worktree ")]
-    assert len(worktree_lines) == 1, (
-        f"Expected exactly 1 active worktree (main checkout), found {len(worktree_lines)}:\n"
-        f"{proc.stdout}"
-    )
-
-
-def test_claude_worktrees_directory_is_strictly_empty() -> None:
-    """Verify that .claude/worktrees/ directory has 0 stale nested checkouts."""
-    claude_worktrees = REPO_ROOT / ".claude" / "worktrees"
-    if claude_worktrees.exists():
-        entries = list(claude_worktrees.iterdir())
-        assert len(entries) == 0, f"Found {len(entries)} stale items in {claude_worktrees}: {entries}"
-
-
-def test_git_merged_branches_are_pruned() -> None:
-    """Verify that all branches fully merged into develop have been pruned."""
-    if not (REPO_ROOT / ".git").exists():
-        pytest.skip("Not running inside a git repository checkout")
-    has_develop = subprocess.run(
-        ["git", "rev-parse", "--verify", "refs/heads/develop"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    if has_develop.returncode != 0:
-        pytest.skip("Local develop branch ref not present (e.g. shallow CI checkout)")
-    proc = subprocess.run(
-        ["git", "branch", "--merged", "develop"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    merged_branches = [
-        line.strip().lstrip("* ").strip()
-        for line in proc.stdout.splitlines()
-        if line.strip()
-    ]
-    # develop and master are the only persistent branches allowed to be merged
-    for branch in merged_branches:
-        assert branch in ("develop", "master") or branch.startswith("("), (
-            f"Stale merged branch '{branch}' found in local git branches! "
-            f"Expected only develop and master to be merged into develop."
-        )
 
 
 # ---------------------------------------------------------------------------

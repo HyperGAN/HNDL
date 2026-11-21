@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from ..errors import HNDLError
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ._relations import non_image
-from ._packing import clear_packed_cache, expert_parameters, guard_expert_input
+from ._packing import _global_call_hooks, _has_call_hooks, clear_packed_cache, expert_parameters, guard_expert_input
 from .feed_forward import ACTIVATIONS
 
 
@@ -220,6 +220,21 @@ class MixtureOfExperts(nn.Module):
         self._max_padding_bytes = max_padding_bytes
         return self
 
+    def _can_batch_experts(self):
+        if _global_call_hooks():
+            return False
+        expected = SwiGLUExpert if self.expert_kind == "swiglu" else Expert
+        for expert in self.experts:
+            if type(expert) is not expected or "forward" in expert.__dict__ or _has_call_hooks(expert):
+                return False
+            if expected is Expert and expert.activation is not ACTIVATIONS[self.activation]:
+                return False
+            for projection in expert._modules.values():
+                if (type(projection) is not nn.Linear or "forward" in projection.__dict__
+                        or _has_call_hooks(projection)):
+                    return False
+        return True
+
     def forward(self, x):
         flat = x.reshape(-1, self.d_model)
         logits = self.router(flat)
@@ -247,7 +262,8 @@ class MixtureOfExperts(nn.Module):
         estimated_padding = len(self.experts) * flat.shape[0] * (2 * self.d_model + 3 * self.hidden) * element_size
         padded = (not grouped and (self._dispatch == "padded"
                   or (self._dispatch == "auto" and estimated_padding <= self._max_padding_bytes)))
-        if flat.device.type == "cpu" and not torch.compiler.is_compiling() and not grouped and not padded:
+        if (flat.device.type == "cpu" and not torch.compiler.is_compiling() and not grouped and not padded
+                or not self._can_batch_experts()):
             out = torch.zeros_like(flat)
             route_weights = weights.reshape(-1, 1)
             for expert_id, expert in enumerate(self.experts):
@@ -267,15 +283,15 @@ class MixtureOfExperts(nn.Module):
             expert_ids = expert_ids[order]
             token_ids = token_ids[order]
             routing_weights = weights.reshape(-1, 1)[order]
-            counts = F.one_hot(expert_ids, num_classes=len(self.experts)).sum(dim=0)
+            experts = torch.arange(len(self.experts), device=expert_ids.device)
             if grouped:
-                offsets = counts.cumsum(0).to(torch.int32)
+                offsets = torch.searchsorted(expert_ids, experts, right=True, out_int32=True)
 
                 def linear(inputs, weight, bias):
                     result = torch._grouped_mm(inputs, weight.transpose(1, 2), offsets)
                     return result if bias is None else result + bias[expert_ids]
             else:
-                offsets = counts.cumsum(0) - counts
+                offsets = torch.searchsorted(expert_ids, experts)
                 rows = torch.arange(expert_ids.shape[0], device=flat.device) - offsets[expert_ids]
 
                 def linear(inputs, weight, bias):

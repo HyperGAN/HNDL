@@ -48,7 +48,9 @@ the original packed storage intact.
 Mixture-of-experts execution prefers supported grouped matrix multiplication.
 Its portable fallback balances latency against temporary memory: small padded
 batches remain available, while an estimated padding cost above 16 MiB selects
-sparse execution. On CPU that path runs only the tokens assigned to each expert;
+sparse execution. When an expert or projection has custom behavior or hooks, HNDL calls each
+expert with its assigned tokens. Batched kernels use the boundaries of the sorted
+route IDs. On CPU the sparse path runs only the tokens assigned to each expert;
 CUDA and compiler tracing use bounded tiles of selected matrices. Backward
 gathers selected weights again, so it does not retain a separate matrix for
 every route. Temporary matrix gathers target at most 1,048,576 elements per
@@ -88,7 +90,8 @@ operations; it does not invoke the eager FlexAttention dispatcher.
 Self-attention uses this dispatcher before constructing any dense window mask,
 including during incremental decoding. Cached queries keep their absolute
 position offsets; causal window reads trim the irrelevant prefix before kernel
-dispatch. The cache retains its fixed sequence capacity.
+dispatch. The local-attention KV buffers hold at most one window of history;
+the session capacity still limits the total number of decoded positions.
 
 Each attention module retains at most sixteen block masks. Casting or moving a
 module clears these masks. The module's `_hndl_attention_backend` attribute

@@ -310,3 +310,20 @@ def test_functorch_input_grad_uses_differentiable_packing_fallback():
     actual = torch.func.grad(lambda value: module(value).sum())(x)
     expected = torch.func.grad(lambda value: reference(value).sum())(x)
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("dispatch", ["sparse", "padded", "auto"])
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else []))
+def test_expert_dispatch_respects_output_and_backward_hooks(dispatch, device):
+    module = prepare_packed(MixtureOfExperts(4, 16, 4, "silu", D=8).to(device))
+    module.configure_dispatch(dispatch)
+    calls = []
+    x = torch.randn(3, 8, device=device, requires_grad=True)
+    for index, expert in enumerate(module.experts):
+        expert.down.register_forward_hook(lambda m, args, result: result * 0)
+        expert.register_full_backward_hook(lambda *args, index=index: calls.append(index))
+    result = module(x)
+    torch.testing.assert_close(result, torch.zeros_like(result))
+    result.sum().backward()
+    assert sorted(calls) == list(range(4))
+    torch.testing.assert_close(x.grad, torch.zeros_like(x))

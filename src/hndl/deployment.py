@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+import errno
 import functools
 import hashlib
 from importlib import metadata
@@ -286,11 +287,11 @@ def inspect_artifact(artifact):
 
 
 @contextmanager
-def _locked(directory):
+def _locked(directory, *, reader=False):
     import fcntl
 
-    with (directory / ".hndl-deployment.lock").open("a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with (directory / ".hndl-deployment.lock").open("rb" if reader else "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH if reader else fcntl.LOCK_EX)
         try:
             yield
         finally:
@@ -504,9 +505,11 @@ def load(artifact, *, check_environment=True, run_single_threaded=False):
 
     path, _ = _paths(artifact)
     path = path.expanduser().resolve()
-    cache_root = (path.parent.parent if len(path.parent.name) == 64
-                  and all(c in "0123456789abcdef" for c in path.parent.name) else path.parent)
-    with _locked(cache_root):
+    cache_root = path.parent.parent
+    managed = (len(path.parent.name) == 64
+               and all(c in "0123456789abcdef" for c in path.parent.name)
+               and (cache_root / ".hndl-deployment.lock").is_file())
+    with _locked(cache_root, reader=True) if managed else nullcontext():
         manifest = _checked_manifest(path)
         contract = manifest["specification"]["inputs"][0]
         if check_environment and _environment(torch.device(contract["device"])) != manifest["specification"]["environment"]:
@@ -516,5 +519,10 @@ def load(artifact, *, check_environment=True, run_single_threaded=False):
         device = torch.device(contract["device"])
         with torch.cuda.device(device) if device.type == "cuda" else nullcontext():
             runner = inductor.aoti_load_package(str(path), **options)
-        os.utime(path.with_suffix(".json"), None)
+        if managed:
+            try:
+                os.utime(path.with_suffix(".json"), None)
+            except OSError as error:
+                if error.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+                    raise
     return DeploymentModel(runner, manifest, run_single_threaded=run_single_threaded)

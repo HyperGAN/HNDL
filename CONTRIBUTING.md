@@ -24,6 +24,9 @@ on Python 3.14. Keep the explicit activation and implicit
 current-tensor behavior consistent between declarative configurations and
 trusted Python callables. Configuration input must never be executed as Python.
 
+Release maintainers can check local branch and worktree housekeeping with
+`python -m pytest -q scripts/check_checkout.py`.
+
 Build release candidates with:
 
 ```sh

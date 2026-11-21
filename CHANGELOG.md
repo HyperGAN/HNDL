@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Preserve hooks and custom expert projections across MoE dispatch modes and compute group boundaries from sorted routes to reduce runtime and temporary allocations.
+- Reuse length-independent rotary tables during decoding, preserve YaRN length and inference-to-training semantics, bound local-attention KV storage by its window, and reduce per-token state-guard traversal.
+
+- Load standalone native packages from read-only directories with checksum and environment verification. Managed caches still coordinate readers and writers.
+- Move local branch and worktree housekeeping to an explicit maintainer check so local branches do not fail the product test suite.
+
 - Enforce shape, dtype, device and batch contracts under compiled prepared execution, including intermediate custom operator outputs.
 - Honor non-reentrant activation checkpointing for first-layer trainable weights with ordinary input tensors, and reduce dispatch overhead in eager and prepared execution.
 - Accept named tensor inputs called `cache` alongside the positional-input convention for incremental sessions.
