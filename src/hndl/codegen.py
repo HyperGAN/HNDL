@@ -136,17 +136,17 @@ def _model_source(plan, class_name, bundle, submodels, is_submodule):
             f"        self.to(dtype=torch.{plan.dtype})",
         ])
 
-    # Weight tying assignments in __init__
-    ties_present = False
     for node in plan.nodes:
-        if node.source and "tie" in node.source:
-            if not ties_present:
-                output_lines.append("")
-                output_lines.append("        # Declarative weight tying")
-                ties_present = True
-            for target_p, source_ref in node.source["tie"].items():
-                source_node_id, source_p = source_ref.split(".", 1)
-                output_lines.append(f"        self.nodes['n_{node.id}'].{target_p} = self.nodes['n_{source_node_id}'].{source_p}")
+        for target, ref in node.parameter_ties.items():
+            source_node, source = ref.split(".", 1)
+            if all(p.isidentifier() and not keyword.iskeyword(p) for p in (target, source)):
+                output_lines.append(f"        self.nodes['n_{node.id}'].{target} = self.nodes['n_{source_node}'].{source}")
+            else:
+                # ModuleList and ParameterList register numeric attribute names.
+                target_module, _, target_name = f"nodes.n_{node.id}.{target}".rpartition(".")
+                source_module, _, source_name = f"nodes.n_{source_node}.{source}".rpartition(".")
+                output_lines.append(f"        setattr(self.get_submodule({target_module!r}), {target_name!r}, "
+                                    f"getattr(self.get_submodule({source_module!r}), {source_name!r}))")
 
     output_lines.append("")
 

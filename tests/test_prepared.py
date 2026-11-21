@@ -563,3 +563,23 @@ def test_cache_port_accepts_keyword_and_positional_decoding(prepared):
         torch.testing.assert_close(actual, expected)
         with pytest.raises(HNDLError, match="positionally"):
             model(cache=session)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_compiled_first_block_checkpoints_detached_inputs(prepared):
+    model = network("attention(2, causal=True)", input_shape=("B", 4, 8),
+                    output_shape=("B", 4, 8), device="cpu", checkpoint=True)
+    reference = copy.deepcopy(model[0])
+    targets = []
+
+    def backend(graph, inputs):
+        targets.extend(str(node.target) for node in graph.graph.nodes)
+        return graph.forward
+
+    x = torch.randn(2, 4, 8)
+    result = torch.compile(model.prepare() if prepared else model, backend=backend, fullgraph=True)(x)
+    result.sum().backward()
+    reference(x).sum().backward()
+    assert any("tag_activation_checkpoint" in target for target in targets)
+    for p, q in zip(model.parameters(), reference.parameters(), strict=True):
+        torch.testing.assert_close(p.grad, q.grad)

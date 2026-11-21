@@ -4,15 +4,14 @@
 
 - Preserve hooks and custom expert projections across MoE dispatch modes and compute group boundaries from sorted routes to reduce runtime and temporary allocations.
 - Reuse length-independent rotary tables during decoding, preserve YaRN length and inference-to-training semantics, bound local-attention KV storage by its window, and reduce per-token state-guard traversal.
-
 - Load standalone native packages from read-only directories with checksum and environment verification. Managed caches still coordinate readers and writers.
 - Move local branch and worktree housekeeping to an explicit maintainer check so local branches do not fail the product test suite.
-
-- Enforce shape, dtype, device and batch contracts under compiled prepared execution, including intermediate custom operator outputs.
+- Enforce shape, dtype, device and batch contracts under compiled prepared execution, including intermediate custom operator outputs and cold full-graph calls on PyTorch 2.6.
 - Honor non-reentrant activation checkpointing for first-layer trainable weights with ordinary input tensors, and reduce dispatch overhead in eager and prepared execution.
 - Accept named tensor inputs called `cache` alongside the positional-input convention for incremental sessions.
-- Include resolved parameter ties in plan digests and structural diffs, and migrate saved tied plans after verifying their original checksums.
-
+- Include parameter ties in plan digests and diffs, count shared storage once in build receipts and resource limits, and migrate saved tied plans after verifying their original checksums.
+- Report activation bytes by port dtype, respect non-affine normalization, and expose decoder cache capacity and latent-attention absorption when estimating persistent storage.
+- Export all bundled recipes as standalone PyTorch models with their helper functions, initialization, trainability and nested parameter ties. Unsupported custom dependencies now identify the affected node during export.
 - Add a [correctness and optimization review](reports/optimization-2026-11-20.md) with execution parity findings, CPU latency measurements, and CUDA memory comparisons.
 
 ## 0.11.0 (2026-11-04)

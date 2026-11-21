@@ -32,6 +32,21 @@ def test_standalone_settings_apply_before_loading_weights():
     torch.testing.assert_close(layer.bias, torch.full_like(layer.bias, 2))
 
 
+def test_standalone_parameter_ties_inside_expert_lists():
+    plan = resolve('moe(experts=4, hidden=8, name="first"); '
+                   'moe(experts=4, hidden=8, tie={"experts.0.up.weight": "first.experts.1.up.weight"})',
+                   input_shape=("B", 8), output_shape=("B", 8))
+    namespace = {}
+    exec(plan.to_python_source(), namespace)
+    generated = namespace["Model"]()
+    first, second = generated.nodes.values()
+    assert first.experts[1].up.weight is second.experts[0].up.weight
+    reference = build(plan, device="cpu")
+    generated.load_state_dict(reference.state_dict())
+    x = torch.randn(4, 8)
+    torch.testing.assert_close(generated(x), reference(x))
+
+
 def test_standalone_reports_custom_runtime_dependency():
     registry = Registry.builtins()
     gain = object()
