@@ -14,7 +14,7 @@
 - Report activation bytes by port dtype, respect non-affine normalization, and expose decoder cache capacity and latent-attention absorption when estimating persistent storage.
 - Export all bundled recipes as standalone PyTorch models with their helper functions, initialization, trainability and nested parameter ties. Unsupported custom dependencies now identify the affected node during export.
 - Load operator contracts on demand for CLI inspection, diagrams and recipe checks. Static inspection now warns about the deprecated `--device` option and rejects unrecognized device names.
-- Add a [correctness and optimization review](reports/optimization-2026-11-20.md) with execution parity findings, CPU latency measurements, and CUDA memory comparisons.
+- Add a [correctness and optimization review](https://github.com/HyperGAN/HNDL/blob/v0.12.0/reports/optimization-2026-11-20.md#implementation-and-verification-results) with execution parity findings, CPU latency measurements, and CUDA memory comparisons.
 - The CPU ParticleGAN example and integration tests use ParticleGAN 0.11.0 with the explicit BiSPF recipe.
 - Preserve the tested source tag when publishing a GitHub release draft.
 - Releases from `master` mirror the same tested wheel and source archive to GitHub after PyPI verifies their hashes.
