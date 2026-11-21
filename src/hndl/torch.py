@@ -1399,20 +1399,30 @@ def parameter_counts(
     plan: ResolvedPlan,
     *,
     registry: Registry | None = None,
+    unique: bool = False,
 ) -> dict[str, int | None]:
-    """Per-node parameter counts from an allocation-free meta-device construction."""
+    """Count parameters per node using allocation-free meta-device construction.
+
+    With ``unique=True``, charge a tied parameter only to its first owner so
+    the counts sum to the model total. An unavailable meta probe returns None.
+    """
     from .registry import Registry
     registry = registry if registry is not None else plan.registry or Registry.builtins()
     counts: dict[str, int | None] = {}
+    sources = {ref.split(".", 1)[0] for node in plan.nodes for ref in node.parameter_ties.values()}
+    layers = {}
     with registry.activated():
         for node in plan.nodes:
             spec = registry.by_identity(node.op)
             try:
                 layer = construct(spec, node, "meta", DTYPES[plan.dtype])
+                tied = _tie_parameters(layer, node, layers, compute_dtype=DTYPES[plan.dtype])
             except Exception:
                 counts[node.id] = None
                 continue
-            counts[node.id] = sum(p.numel() for p in layer.parameters())
+            if node.id in sources:
+                layers[f"n_{node.id}"] = layer
+            counts[node.id] = sum(p.numel() for p in layer.parameters() if not unique or p not in tied)
     return counts
 
 

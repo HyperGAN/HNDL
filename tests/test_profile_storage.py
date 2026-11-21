@@ -5,7 +5,7 @@ import torch
 
 from hndl import HNDLError, resolve
 from hndl.inference import InferenceCache
-from hndl.torch import build
+from hndl.torch import build, parameter_counts
 
 
 def test_profile_respects_affine_and_mixed_dtype_liveness():
@@ -35,6 +35,11 @@ def test_profile_counts_unique_nested_and_transitive_parameters():
     actual = sum(p.numel() for p in build(tied, device="cpu").parameters())
     assert actual == profile.total_parameters == profile.active_parameters
     assert sum(node.total_parameters for node in profile.nodes) == plain.profile().total_parameters
+    logical = parameter_counts(tied)
+    unique = parameter_counts(tied, unique=True)
+    assert sum(unique.values()) == actual
+    assert logical == {node.id: node.total_parameters for node in profile.nodes}
+    assert unique == {"a": logical["a"], "b": logical["b"] - 64, "c": logical["c"] - 64}
     assert plain.diff(tied).param_delta == -128
 
 

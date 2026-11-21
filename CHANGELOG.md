@@ -9,9 +9,10 @@
 - Enforce shape, dtype, device and batch contracts under compiled prepared execution, including intermediate custom operator outputs and cold full-graph calls on PyTorch 2.6.
 - Honor non-reentrant activation checkpointing for first-layer trainable weights with ordinary input tensors, and reduce dispatch overhead in eager and prepared execution.
 - Accept named tensor inputs called `cache` alongside the positional-input convention for incremental sessions.
-- Include parameter ties in plan digests and diffs, count shared storage once in build receipts and resource limits, and migrate saved tied plans after verifying their original checksums.
+- Include parameter ties in plan digests and diffs, count shared storage once in build receipts and resource limits, and migrate saved tied plans after verifying their original checksums. `parameter_counts(plan, unique=True)` attributes shared weights to their first owner for model totals.
 - Report activation bytes by port dtype, respect non-affine normalization, and expose decoder cache capacity and latent-attention absorption when estimating persistent storage.
 - Export all bundled recipes as standalone PyTorch models with their helper functions, initialization, trainability and nested parameter ties. Unsupported custom dependencies now identify the affected node during export.
+- Load operator contracts on demand for CLI inspection, diagrams and recipe checks. Static inspection now warns about the deprecated `--device` option and rejects unrecognized device names.
 - Add a [correctness and optimization review](reports/optimization-2026-11-20.md) with execution parity findings, CPU latency measurements, and CUDA memory comparisons.
 
 ## 0.11.0 (2026-11-04)
