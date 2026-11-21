@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 (2026-11-20)
 
 - Preserve hooks and custom expert projections across MoE dispatch modes and compute group boundaries from sorted routes to reduce runtime and temporary allocations.
 - Reuse length-independent rotary tables during decoding, preserve YaRN length and inference-to-training semantics, bound local-attention KV storage by its window, and reduce per-token state-guard traversal.
