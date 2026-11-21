@@ -153,7 +153,8 @@ relation that never settles) rather than budgeting ordinary networks. Pass a
 explicitly; keys are `max_nodes`, `max_edges`, `max_dimension`,
 `max_elements`, `max_state_bytes`, and `max_iterations`. Storage is measured
 by constructing every module on PyTorch's allocation-free `meta` device before
-real construction; `build_receipt["state_bytes"]` records the total. These
+real construction. The builder counts tied storage once in both the limit
+and `build_receipt["state_bytes"]`. These
 bounds do not estimate peak training memory or bound arbitrary native Python
 authoring code.
 

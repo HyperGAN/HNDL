@@ -1363,7 +1363,7 @@ def construct(spec, node, device, dtype, initialization_seed=None):
     return layer.to(device=device_obj, dtype=dtype)
 
 
-def _state_bytes(module, compute_dtype=None):
+def _state_bytes(module, compute_dtype=None, *, tied_tensors=()):
     """Unique registered parameter/buffer storage, including nonpersistent buffers.
 
     With ``compute_dtype`` the count assumes floating tensors will be cast to
@@ -1371,6 +1371,8 @@ def _state_bytes(module, compute_dtype=None):
     """
     storages = {}
     for value in (*module.parameters(), *module.buffers()):
+        if value in tied_tensors:
+            continue
         storage = value.untyped_storage()
         key = (value.device, storage._cdata) if value.device.type == "meta" else (value.device, storage.data_ptr())
         if compute_dtype is not None and value.is_floating_point():
@@ -1536,7 +1538,7 @@ def _set_parameter_or_buffer(module: nn.Module, name: str, tensor: torch.Tensor)
     setattr(curr, parts[-1], tensor)
 
 
-def _tie_parameters(layer, node, modules):
+def _tie_parameters(layer, node, modules, *, compute_dtype=None):
     """Bind declared ties to earlier layers on the build or meta device."""
     tied_tensors = set()
     for target_p, source_ref in node.parameter_ties.items():
@@ -1557,7 +1559,10 @@ def _tie_parameters(layer, node, modules):
             raise HNDLError("E_SCHEMA", f"Tied parameter target {target_p} does not exist on {node.id}", node=node.id)
         if source_tensor.shape != target_tensor.shape:
             raise HNDLError("E_SCHEMA", f"Tied parameter shape mismatch: {source_ref} shape {list(source_tensor.shape)} != {target_p} shape {list(target_tensor.shape)}", node=node.id)
-        if source_tensor.dtype != target_tensor.dtype:
+        # A probe retains any explicit constructor dtype. Real modules have
+        # already been converted to their plan compute dtype before tying.
+        both_cast = compute_dtype is not None and source_tensor.is_floating_point() and target_tensor.is_floating_point()
+        if source_tensor.dtype != target_tensor.dtype and not both_cast:
             raise HNDLError("E_SCHEMA", f"Tied parameter dtype mismatch: {source_ref} dtype {source_tensor.dtype} != {target_p} dtype {target_tensor.dtype}", node=node.id)
         _set_parameter_or_buffer(layer, target_p, source_tensor)
         tied_tensors.add(source_tensor)
@@ -1732,17 +1737,28 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
 
     # Bound registered storage with an allocation-free meta construction first.
     total = 0
-    unbounded = []
+    unbounded = set()
+    tie_sources = {ref.split(".", 1)[0] for node in plan.nodes for ref in node.parameter_ties.values()}
+    probes = {}
     with registry.activated():
         for node in plan.nodes:
+            # If an earlier source cannot be probed, size this node after
+            # binding the real tensors. This also handles transitive ties.
+            if any(ref.split(".", 1)[0] in unbounded for ref in node.parameter_ties.values()):
+                unbounded.add(node.id)
+                continue
             try:
                 probe = construct(specs[node.id], node, "meta", dtype)
             except Exception:
-                unbounded.append(node.id)
+                unbounded.add(node.id)
                 continue
-            total += _state_bytes(probe, dtype)
+            tied = _tie_parameters(probe, node, probes, compute_dtype=dtype) if node.parameter_ties else ()
+            total += _state_bytes(probe, dtype, tied_tensors=tied)
             if total > bounds["max_state_bytes"]:
                 raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes before allocation", node=node.id)
+            if node.id in tie_sources:
+                probes[f"n_{node.id}"] = probe
+    probes.clear()
 
     modules = OrderedDict()
     module_owners, tensor_owners, storage_owners = {}, {}, {}
@@ -1768,7 +1784,7 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
             tied_tensors = _tie_parameters(layer, node, modules)
             check_ownership(layer, node.id, tied_tensors=tied_tensors)
             if node.id in unbounded:
-                total += _state_bytes(layer)
+                total += _state_bytes(layer, tied_tensors=tied_tensors)
                 if total > bounds["max_state_bytes"]:
                     raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes", node=node.id)
             modules[f"n_{node.id}"] = layer

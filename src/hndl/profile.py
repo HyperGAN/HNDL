@@ -737,7 +737,7 @@ def _tied_parameter_counts(plan, registry, specs):
                 continue
             spec = specs[node.id]
             layer = construct(spec, node, "meta", DTYPES[plan.dtype])
-            _tie_parameters(layer, node, layers)
+            _tie_parameters(layer, node, layers, compute_dtype=DTYPES[plan.dtype])
             layers["n_" + node.id] = layer
             parameters = dict(layer.named_parameters())
             counts[node.id] = sum(p.numel() for p in parameters.values())

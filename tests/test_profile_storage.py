@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from hndl import resolve
+from hndl import HNDLError, resolve
 from hndl.inference import InferenceCache
 from hndl.torch import build
 
@@ -36,6 +36,28 @@ def test_profile_counts_unique_nested_and_transitive_parameters():
     assert actual == profile.total_parameters == profile.active_parameters
     assert sum(node.total_parameters for node in profile.nodes) == plain.profile().total_parameters
     assert plain.diff(tied).param_delta == -128
+
+
+@pytest.mark.parametrize("meta_source_available", [True, False])
+def test_build_budget_counts_shared_storage_once(monkeypatch, meta_source_available):
+    import hndl.torch as backend
+
+    construct = backend.construct
+    if not meta_source_available:
+        def require_real_source(spec, node, device, *args, **kwargs):
+            if device == "meta" and node.id == "a":
+                raise RuntimeError("source requires real storage")
+            return construct(spec, node, device, *args, **kwargs)
+
+        monkeypatch.setattr(backend, "construct", require_real_source)
+    plan = resolve('linear(8, name="a"); linear(8, name="b", tie={"weight": "a.weight"}); '
+                   'linear(8, tie={"weight": "b.weight"})',
+                   input_shape=("B", 8), output_shape=("B", 8))
+    expected = (64 + 3 * 8) * 4
+    model = build(plan, device="cpu", limits={"max_state_bytes": expected})
+    assert model.build_receipt["state_bytes"] == sum(p.nbytes for p in model.parameters()) == expected
+    with pytest.raises(HNDLError, match="max_state_bytes"):
+        build(plan, device="cpu", limits={"max_state_bytes": expected - 1})
 
 
 @pytest.mark.parametrize(("source", "dtype", "absorbed"), [
