@@ -13,6 +13,7 @@ import torch
 
 from hndl import Arg, HNDLError, ResolvedPlan, resolve
 from hndl.torch import build
+from hndl.types import digest
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "plans_0_6_0"
 CASES = sorted(path.stem for path in FIXTURES.glob("*.json"))
@@ -70,6 +71,33 @@ def test_added_argument_is_kept_only_when_it_differs_from_its_default():
     assert restored.semantic_digest == used.semantic_digest
     assert build(restored, device="cpu")["n0"].equalized is True
     assert build(ResolvedPlan.from_json(omitted.to_json()), device="cpu")["n0"].equalized is False
+
+
+def test_ties_participate_in_identity_and_migrate_from_legacy_digest():
+    shape = {"input_shape": ("B", 8), "output_shape": ("B", 8)}
+    source = 'first = linear(8, name="a")\nlinear(8, name="b"{tie})'
+    untied = resolve(source.format(tie=""), **shape)
+    tied = resolve(source.format(tie=', tie={"weight": "first.weight"}'), **shape)
+    explicit = resolve(source.format(tie=', tie={"weight": "a.weight"}'), **shape)
+    assert explicit.semantic_digest == tied.semantic_digest != untied.semantic_digest
+    assert untied.diff(tied).modified_nodes["b"]["tie"] == ({}, {"weight": "a.weight"})
+    assert ResolvedPlan.from_json(tied.to_json()).to_json() == tied.to_json()
+
+    legacy = json.loads(tied.to_json())
+    legacy.pop("artifact_digest")
+    legacy["semantic_digest"] = untied.semantic_digest
+    legacy["artifact_digest"] = digest(legacy)
+    with pytest.warns(UserWarning, match="digest to include parameter ties"):
+        restored = ResolvedPlan.from_json(json.dumps(legacy))
+    assert restored.semantic_digest == tied.semantic_digest
+    model = build(restored, device="cpu")
+    assert model["a"].weight is model["b"].weight
+
+    legacy.pop("artifact_digest")
+    legacy["semantic_digest"] = "0" * 64
+    legacy["artifact_digest"] = digest(legacy)
+    with pytest.raises(HNDLError, match="semantic_digest"):
+        ResolvedPlan.from_json(json.dumps(legacy))
 
 
 def test_since_requires_a_release_and_a_default():

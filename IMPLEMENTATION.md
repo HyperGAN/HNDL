@@ -207,9 +207,9 @@ changed.
 
 Schema 1 uses sorted JSON object keys, compact separators, UTF-8 without ASCII
 escaping, arrays for tuples, finite numbers, and SHA-256 digests. Node order,
-identities, arguments, shapes, dtypes, initialization, and trainability
-participate in the semantic digest. Source/frontend metadata and argument
-provenance affect the artifact digest but not the semantic digest. The
+identities, arguments, shapes, dtypes, initialization, trainability, and
+resolved parameter ties participate in the semantic digest. The artifact
+digest also covers source locations, frontend metadata and argument provenance. The
 digests detect corruption and hand edits. Restoring re-resolves the saved
 arguments and fails with a per-node list of mismatches; a plan missing only an
 operator default or a dimension-bound argument loads completed, with a warning

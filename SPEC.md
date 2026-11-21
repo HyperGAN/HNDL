@@ -24,7 +24,7 @@ The deliverable includes declarative Python configuration and trusted callable c
 
 HNDL owns tensor contracts, architecture resolution, construction, operator registration, plan persistence, and diagnostics. The host owns data semantics, losses, metrics, regularizers, optimizers, training schedules, runtime random streams, devices, and complete checkpoint recovery. Researchers can vary architecture specifications while keeping their metric evaluation loop unchanged; HNDL does not optimize a metric or search architectures automatically.
 
-Topology search, dynamic image sizes, runtime control flow, weight tying between graph nodes, distributed training, export backends, a visual editor, and full StyleGAN recipes are outside v1. HNDL has no dependency on, or knowledge of, any particular host application.
+Topology search, dynamic image sizes, runtime control flow, distributed training, export backends, a visual editor, and full StyleGAN recipes are outside v1. HNDL has no dependency on, or knowledge of, any particular host application.
 
 ## 2. Core invariants
 
@@ -123,7 +123,7 @@ The following conceptual internal JSON encoding describes a two-layer perceptron
 
 Validation must reject duplicate IDs, missing references, undeclared ports, missing required bindings, cycles, nodes that cannot reach any selected output, and declared inputs that nothing reads. Unused output ports of an otherwise reachable node are allowed. Two public outputs may select the same reference, and a public output may select an external input directly. Graph values are tensors; an operator returning a Python tuple or dictionary must map it onto its declared tensor ports.
 
-Each node owns an independent module instance and executes once per forward. Fan-out reuses a computed tensor. It does not clone the source module, repeat its invocation, or tie parameters between nodes. Explicit weight tying between graph nodes is deferred and must fail if requested. External reuse of built modules through sequence slices is supported as described in §7.
+Each node owns an independent module instance and executes once per forward. Fan-out reuses a computed tensor. Explicit `tie={"weight": "encoder.weight"}` shares the named parameter or buffer with an earlier node. The builder checks shape and dtype before sharing storage. External reuse of built modules through sequence slices is supported as described in §7.
 
 Both frontends lower to the declared external inputs and public outputs. With a single unnamed output, declarative configuration selects its final `out` binding when present and otherwise selects current, and a native callable may explicitly return a symbol or select current by returning `None`/falling through. With named outputs there is no default selection: configuration binds each declared name as a local and a callable returns a mapping of every declared name to one symbol (§7). Current initially refers to the first declared external input; its transitions are defined in §7. Every operator call creates one node in capture order. Explicit `name=` selects its stable node ID. Otherwise the ID is `n0`, `n1`, and so on, using the zero-based ordinal of that call among all operator calls, including explicitly named calls. Nested calls create their nodes in Python argument evaluation order. Duplicate explicit/generated IDs fail. Comments, local variable names, and assignment statements without new calls do not affect IDs. Inserting an operator call can change subsequent generated IDs; stable names are recommended for persisted models. Local variables refer to tensors and never infer node names.
 
@@ -736,7 +736,9 @@ A node record carries no state-size or state-version field: storage is bounded a
 
 Serialization uses canonical JSON with sorted object keys, compact separators, UTF-8 without ASCII escaping, arrays for tuples, finite numbers only, and SHA-256 digests. Reading rejects duplicate JSON fields, unexpected or missing plan fields, non-finite constants, and nodes missing any canonical field (`E_SCHEMA`), then verifies both digests (`E_INTEGRITY`) and revalidates the concrete equations against the supplied registry without re-running source, a callable, or a policy choice. The digests detect corruption and hand edits, and their error says so; they are checksums, not signatures. Exact encoding and digest test vectors must be published before the format is frozen.
 
-The **semantic digest** covers the concrete graph: schema and resolution versions, node identities and order, operator identities, arguments, port contracts, initialization, trainability, the graph contracts, and both dtypes. It excludes frontend provenance, source locations, and inference explanations. Policy effects are expanded before hashing, so equivalent concrete numerical plans have identical semantic identity regardless of authoring syntax or derivation.
+The **semantic digest** covers the concrete graph: schema and resolution versions, node identities and order, operator identities, arguments, port contracts, initialization, trainability, resolved parameter ties, the graph contracts, and both dtypes. It excludes frontend provenance, source locations, and inference explanations. Policy effects are expanded before hashing, so equivalent concrete numerical plans have identical semantic identity regardless of authoring syntax or derivation.
+
+Through 0.11.0, schema 1 recorded parameter ties in the artifact but omitted them from the semantic digest. Loading such a plan verifies its original checksums and emits a migration warning. Saving it records the tie-aware semantic digest. Untied plans retain their original encoding.
 
 The **artifact digest** covers the complete saved plan except its own digest field. It includes provenance and frontend information that can differ between numerically equivalent plans. Parameter counts, where statically available, are not estimates of peak training memory.
 
@@ -935,6 +937,5 @@ The baseline deliberately leaves these details visible:
 - Complete full derivation chains and source provenance for every inferred value; today each argument records its origin but not the contributing relation.
 - Define opaque **asserted** contracts for modules that cannot supply relations, including the runtime checks that must accompany them and how backward inference is reported as unavailable.
 - Qualify the supported platform, PyTorch version, and device/dtype matrix with numerical tolerances.
-- Decide whether explicit weight tying between graph nodes enters a later version, and what identity/persistence rules it would require.
 
 These are implementation interface decisions. They do not permit relaxing literal constraints, hiding architecture choices, or treating unresolved shapes as a successful plan.
