@@ -134,11 +134,13 @@ def test_flex_attention_with_packed_qkv_preserves_training_gradients():
                       "cuda:0", length=17)
     reference = copy.deepcopy(layer)
     prepare_packed(layer)
-    prepare_attention(layer, backend="flex")
+    native_backward = not torch.__version__.startswith("2.6.")
+    prepare_attention(layer, backend="flex" if native_backward else "auto")
     x = torch.randn(2, 17, 32, device="cuda:0", requires_grad=True)
     xr = x.detach().clone().requires_grad_()
     with torch.inference_mode():
         layer.eval()(x)
+        assert layer._hndl_attention_backend == "flex"
     layer.train()
     actual, expected = layer(x), reference(xr)
     torch.testing.assert_close(actual, expected, rtol=5e-4, atol=5e-5)
@@ -147,8 +149,12 @@ def test_flex_attention_with_packed_qkv_preserves_training_gradients():
     torch.testing.assert_close(x.grad, xr.grad, rtol=2e-3, atol=2e-4)
     for parameter, expected_parameter in zip(layer.parameters(), reference.parameters()):
         torch.testing.assert_close(parameter.grad, expected_parameter.grad, rtol=2e-3, atol=2e-4)
-    assert layer._hndl_attention_backend == "flex"
-    assert not layer._mask_cache
+    if native_backward:
+        assert layer._hndl_attention_backend == "flex"
+        assert not layer._mask_cache
+    else:
+        assert layer._hndl_attention_backend == "reference"
+        assert "incorrect key/value gradients" in layer._hndl_attention_fallback_reason
 
 
 @pytest.mark.parametrize("source", [

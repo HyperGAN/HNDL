@@ -9,6 +9,10 @@ import torch
 
 
 _MAX_MASKS = 16
+# Older compiler APIs specialize on concrete sizes. PyTorch 2.6 needs them
+# when selecting backward tiles and ordering packed Q/K/V strides.
+_ISOLATED_FLEX = "isolate_recompiles" in inspect.signature(torch.compile).parameters
+_UNSAFE_FLEX_BACKWARD = torch.__version__.startswith("2.6.")
 
 
 def _capped_score(owner, softcap, device):
@@ -37,9 +41,8 @@ def _capped_score(owner, softcap, device):
 def _flex_kernel(configuration):
     from torch.nn.attention.flex_attention import flex_attention
 
-    options = dict(fullgraph=True, dynamic=True)
-    if "isolate_recompiles" in inspect.signature(torch.compile).parameters:
-        return torch.compile(flex_attention, isolate_recompiles=True, **options)
+    if _ISOLATED_FLEX:
+        return torch.compile(flex_attention, isolate_recompiles=True, dynamic=True, fullgraph=True)
 
     # Older PyTorch tracks the recompile budget by Python code object. Give
     # each configuration its own entry point while keeping the same kernels.
@@ -47,13 +50,14 @@ def _flex_kernel(configuration):
         return flex_attention(*args, **kwargs)
 
     run.__code__ = run.__code__.replace()
-    return torch.compile(run, **options)
+    return torch.compile(run, dynamic=False, fullgraph=True)
 
 
-def _compiled_flex(q, k, v, *, score_mod, block_mask, enable_gqa):
+def _compiled_flex(q, k, v, *, score_mod, block_mask, enable_gqa, fixed_mask=()):
     # Flex kernels specialize on head layout and execution mode. Sequence
     # lengths stay dynamic within each configuration (e.g. chunked decoding).
-    kernel = _flex_kernel((q.device, q.dtype, q.shape[1], k.shape[1], q.shape[-1],
+    fixed_shapes = () if _ISOLATED_FLEX else (q.shape, k.shape, fixed_mask)
+    kernel = _flex_kernel((q.device, q.dtype, q.shape[1], k.shape[1], q.shape[-1], fixed_shapes,
                            torch.is_grad_enabled(), torch.is_inference_mode_enabled(),
                            score_mod is not None, block_mask is not None))
     return kernel(q, k, v, score_mod=score_mod, block_mask=block_mask, enable_gqa=enable_gqa)
@@ -143,6 +147,8 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
     if (q.shape[-1] < 16 or q.shape[-1] > 128 or q.shape[-1] % 8 or q.shape[-1] != v.shape[-1]
             or q.shape[-2] == 0 or k.shape[-2] == 0):
         return _fallback(owner, "head dimensions or empty sequence")
+    if _UNSAFE_FLEX_BACKWARD and torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v)):
+        return _fallback(owner, "PyTorch 2.6 FlexAttention backward can return incorrect key/value gradients")
     if torch.cuda.get_device_capability(q.device)[0] < 8:
         return _fallback(owner, "CUDA capability below SM80")
     try:
@@ -184,8 +190,9 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
     score_mod = _capped_score(owner, softcap, q.device) if softcap > 0.0 else None
 
     try:
+        fixed_mask = () if _ISOLATED_FLEX else (causal, window_size, query_offset)
         result = _compiled_flex(q, k, v, score_mod=score_mod, block_mask=block_mask,
-                                enable_gqa=q.shape[1] != k.shape[1])
+                                enable_gqa=q.shape[1] != k.shape[1], fixed_mask=fixed_mask)
     except Exception as error:
         return _failed(owner, failures, failure_key, error)
     if owner is not None:

@@ -54,17 +54,51 @@ def test_cuda_flex_matches_reference_and_backward(causal, window_size, softcap, 
     k = torch.randn(1, 2, klen, 16, device="cuda", requires_grad=True)
     v = torch.randn(1, 2, klen, 16, device="cuda", requires_grad=True)
     options = dict(causal=causal, window_size=window_size, softcap=softcap, query_offset=query_offset)
-    actual = backend.specialized_attention(q, k, v, owner=owner, **options)
+    native_backward = not torch.__version__.startswith("2.6.")
+    with torch.set_grad_enabled(native_backward):
+        actual = backend.specialized_attention(q, k, v, owner=owner, **options)
     expected = _reference(q, k, v, **options)
     torch.testing.assert_close(actual, expected, rtol=3e-4, atol=3e-5)
-    gradients = torch.autograd.grad(actual.square().sum(), (q, k, v))
-    reference_gradients = torch.autograd.grad(expected.square().sum(), (q, k, v))
-    for a, b in zip(gradients, reference_gradients):
-        torch.testing.assert_close(a, b, rtol=5e-4, atol=5e-5)
     assert owner._hndl_attention_backend == "flex"
+    if native_backward:
+        gradients = torch.autograd.grad(actual.square().sum(), (q, k, v))
+        reference_gradients = torch.autograd.grad(expected.square().sum(), (q, k, v))
+        for a, b in zip(gradients, reference_gradients):
+            torch.testing.assert_close(a, b, rtol=5e-4, atol=5e-5)
+    else:
+        with pytest.raises(RuntimeError, match="PyTorch 2.6 FlexAttention backward"):
+            backend.specialized_attention(q, k, v, owner=owner, **options)
     assert len(owner._hndl_attention_masks) == 1
     backend.clear_attention_cache(owner)
     assert not owner._hndl_attention_masks
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_legacy_auto_rectangular_attention_preserves_qkv_gradients(monkeypatch):
+    from hndl.operators.cross_attention import CrossAttention
+
+    monkeypatch.setattr(backend, "_UNSAFE_FLEX_BACKWARD", True)
+    layer = CrossAttention(4, True, 0.0, D=64, D_ctx=32, kv_heads=2, head_dim=16,
+                           logit_softcap=2.0).cuda()
+    backend.prepare_attention(layer, backend="auto")
+    x = torch.randn(4, 8, 64, device="cuda")
+    context = torch.randn(4, 34, 32, device="cuda")
+    projections = []
+    for projection in (layer.q_proj, layer.k_proj, layer.v_proj):
+        projection.register_forward_hook(lambda m, args, out: projections.append(out))
+    actual = layer(x, context)
+    q, k, v = [p.reshape(4, p.shape[1], -1, 16).transpose(1, 2) for p in projections]
+    reference = _reference(q, k, v, causal=False, window_size=0, softcap=2.0)
+    expected = layer.o_proj(reference.transpose(1, 2).reshape(4, 8, 64))
+    torch.testing.assert_close(actual, expected, rtol=3e-4, atol=3e-5)
+    for a, b in zip(torch.autograd.grad(actual.square().sum(), projections),
+                    torch.autograd.grad(expected.square().sum(), projections)):
+        torch.testing.assert_close(a, b, rtol=5e-4, atol=5e-5)
+    assert layer._hndl_attention_backend == "reference"
+    backend.prepare_attention(layer, backend="flex")
+    with pytest.raises(RuntimeError, match="PyTorch 2.6 FlexAttention backward"):
+        layer(x, context)
 
 
 @pytest.mark.cuda

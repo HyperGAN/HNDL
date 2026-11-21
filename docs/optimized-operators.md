@@ -99,3 +99,10 @@ records `"flex"` or `"reference"` after execution, and
 `_hndl_attention_fallback_reason` describes an automatic fallback. The first
 fused invocation compiles kernels, so measure warmed latency separately from
 startup and retained memory.
+
+On PyTorch 2.6, automatic selection uses the reference path whenever gradients
+can flow into the queries, keys, or values. The native FlexAttention backward
+kernel can produce incorrect key and value gradients on rectangular inputs.
+Explicit `"flex"` reports this limitation. Inference still uses the fused
+kernel. Compiler versions with isolated regions share kernels across sequence
+lengths. Older versions compile fixed shapes with a bounded cache.
