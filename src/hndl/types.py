@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
@@ -513,10 +513,14 @@ class ResolvedPlan(Immutable):
         self,
         batch_size: int = 1,
         sequence_lengths: Mapping[str, int] | None = None,
+        *,
+        cache_capacity: int | None = None,
+        absorbed_mla: bool | Collection[str] = False,
     ) -> Any:
         """Evaluate parameter counts, FLOPs, peak memory, and KV state memory statically."""
         from .profile import profile_plan
-        return profile_plan(self, batch_size=batch_size, sequence_lengths=sequence_lengths)
+        return profile_plan(self, batch_size=batch_size, sequence_lengths=sequence_lengths,
+                            cache_capacity=cache_capacity, absorbed_mla=absorbed_mla)
 
     def to_mermaid(self) -> str:
         """Render this plan as a shape-annotated Mermaid flowchart diagram."""
