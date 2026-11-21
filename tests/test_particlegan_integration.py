@@ -10,11 +10,11 @@ from examples.particle_gan_training import make_trainer, real_batch
 try:
     pg_version = version("particlegan")
 except PackageNotFoundError:
-    pytest.skip("optional particlegan==0.9.4 integration", allow_module_level=True)
-if pg_version != "0.9.4":
-    pytest.skip("integration qualifies particlegan==0.9.4", allow_module_level=True)
+    pytest.skip("optional particlegan==0.11.0 integration", allow_module_level=True)
+if pg_version != "0.11.0":
+    pytest.skip("integration qualifies particlegan==0.11.0", allow_module_level=True)
 
-def test_released_default_updates_hndl_networks_and_real_particle_prior(monkeypatch):
+def test_bispf_updates_hndl_networks_and_real_particle_prior(monkeypatch):
     def no_cuda(*args, **kwargs):
         pytest.fail("CPU fixture attempted CUDA initialization")
 

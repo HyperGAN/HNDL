@@ -85,6 +85,12 @@ To rehearse without publishing, run the workflow manually from the Actions tab
 (`workflow_dispatch`). The manual run builds and tests the distributions and
 uploads them as artifacts; the publish job is skipped.
 
-To release: update the version in `pyproject.toml` and `src/hndl/_version.py`,
-record the release in `CHANGELOG.md`, merge, then create a GitHub release with
-tag `v<version>` on `master`. Publishing the release triggers the workflow.
+To release, update the version in `pyproject.toml` and `src/hndl/_version.py`
+and record the release in `CHANGELOG.md`. Merge to `master`. After the tests
+and PyPI upload succeed, the workflow compares the registry's file hashes with
+the tested files from that run. It publishes those files and `SHA256SUMS` in
+GitHub Releases under `v<version>`.
+
+If mirroring fails after the PyPI upload, rerun the GitHub mirror job in the
+original run so it can use the same tested files. A manually published GitHub
+release with a matching version tag still triggers the existing PyPI workflow.
