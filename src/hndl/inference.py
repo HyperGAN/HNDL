@@ -14,6 +14,9 @@ from torch.nn import functional as F
 from .errors import HNDLError
 
 
+_MISSING = object()
+
+
 @dataclass
 class _NodeState:
     owner: weakref.ReferenceType
@@ -35,9 +38,25 @@ def _state_version(tensor):
 
 
 def _parameter_signature(module):
-    # Frozen and quantized weights may be buffers rather than Parameters.
-    return tuple((id(t), _state_version(t), t.data_ptr(), tuple(t.shape), t.stride(), t.dtype, t.device)
-                 for t in chain(module.parameters(), module.buffers()))
+    from .torch import GraphModule
+
+    if isinstance(module, GraphModule):
+        # Build and rebind already record the module traversal. Read each
+        # module's *current* dictionaries so replacing a Parameter, buffer or
+        # a whole registration dictionary cannot reuse an old signature.
+        tensors = []
+        for row in module._state_program:
+            owner, children = row[0], row[3]
+            if len(owner._modules) != len(children) or any(
+                owner._modules.get(name, _MISSING) is not child for name, child in children
+            ):
+                raise HNDLError("E_RUNTIME", "cache model structure changed; rebind_state() and reset() first")
+            tensors.extend(owner._parameters.values())
+            tensors.extend(owner._buffers.values())
+    else:
+        tensors = chain(module.parameters(), module.buffers())
+    return tuple((id(t), _state_version(t), t.data_ptr(), t.shape, t.stride(), t.dtype, t.device)
+                 for t in tensors if t is not None)
 
 
 def _stream_id(device):
@@ -278,13 +297,55 @@ def _causal_conv(state: _NodeState, name: str, x, weight, bias, groups):
     return result
 
 
-def _kv_append(cache: InferenceCache, state: _NodeState, key, value):
-    """Append head-major keys and values without copying the existing prefix."""
+def _append_window(bank, chunk, offset):
+    """Append to a head-major ring and return the keys/values visible to this chunk."""
+    capacity = bank.shape[-2]
+    count = chunk.shape[-2]
+    end = offset + count
+    if end <= capacity:
+        bank[..., offset:end, :].copy_(chunk)
+        return bank[..., :end, :]
+
+    if count == 1:
+        # Attention to one token sees every ring slot. Keys and values may
+        # share the same permutation because rotary positions are already applied.
+        slot = offset % capacity
+        bank[..., slot:slot + 1, :].copy_(chunk)
+        return bank
+
+    # Across a chunk, each query can see a different suffix of the old window.
+    # Materialize the required chronological rows before overwriting any slot.
+    history = min(offset, capacity - 1)
+    visible = chunk
+    if history:
+        first = (offset - history) % capacity
+        first_count = min(history, capacity - first)
+        parts = [bank[..., first:first + first_count, :]]
+        if first_count < history:
+            parts.append(bank[..., :history - first_count, :])
+        visible = torch.cat([*parts, chunk], dim=-2)
+
+    keep = min(capacity, count)
+    tail = chunk[..., count - keep:, :]
+    first = (end - keep) % capacity
+    first_count = min(keep, capacity - first)
+    bank[..., first:first + first_count, :].copy_(tail[..., :first_count, :])
+    if first_count < keep:
+        bank[..., :keep - first_count, :].copy_(tail[..., first_count:, :])
+    return visible
+
+
+def _kv_append(cache: InferenceCache, state: _NodeState, key, value, window_size=0):
+    """Append head-major keys and values, retaining at most one local window."""
+    capacity = min(cache.max_seq_len, window_size) if window_size else cache.max_seq_len
+    if "key" not in state.tensors:
+        state.tensors["key"] = key.new_empty(*key.shape[:-2], capacity, key.shape[-1])
+        state.tensors["value"] = value.new_empty(*value.shape[:-2], capacity, value.shape[-1])
+    if window_size:
+        return (_append_window(state.tensors["key"], key, state.position),
+                _append_window(state.tensors["value"], value, state.position))
     offset = state.position
     end = offset + key.shape[-2]
-    if "key" not in state.tensors:
-        state.tensors["key"] = key.new_empty(*key.shape[:-2], cache.max_seq_len, key.shape[-1])
-        state.tensors["value"] = value.new_empty(*value.shape[:-2], cache.max_seq_len, value.shape[-1])
     state.tensors["key"][..., offset:end, :].copy_(key)
     state.tensors["value"][..., offset:end, :].copy_(value)
     return state.tensors["key"][..., :end, :], state.tensors["value"][..., :end, :]

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import keyword
 import math
 import re
+import warnings
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -345,11 +346,18 @@ class ResolvedNode(Node):
         object.__setattr__(self, "output_shapes", freeze(self.output_shapes))
         object.__setattr__(self, "provenance", freeze(self.provenance))
 
+    @property
+    def parameter_ties(self) -> Mapping[str, str]:
+        """Resolved target parameter paths and the source paths they share."""
+        return self.source.get("tie", {}) if isinstance(self.source, Mapping) else {}
+
     def to_dict(self, *, semantic: bool = False) -> dict[str, Any]:
         result = {key: plain(getattr(self, key)) for key in (
             "id", "op", "args", "inputs", "outputs", "input_shapes", "output_shapes",
             "initialization", "trainability"
         )}
+        if semantic and self.parameter_ties:
+            result["tie"] = plain(self.parameter_ties)
         if not semantic:
             result.update(source=plain(self.source), provenance=plain(self.provenance))
         return result
@@ -462,7 +470,15 @@ class ResolvedPlan(Immutable):
                     data[f"named_{key}"] = _saved_ports(data.pop(key), key, fields)
             plan = cls(nodes=nodes, registry=registry, **data)
             if semantic != plan.semantic_digest:
-                raise HNDLError("E_INTEGRITY", _CORRUPTED.format(field="semantic_digest"))
+                # Through 0.11.0, schema 1 stored ties in the checksummed
+                # artifact but excluded them from the semantic digest.
+                legacy = plan._data(semantic=True)
+                for node in legacy["nodes"]:
+                    node.pop("tie", None)
+                if not any(node.parameter_ties for node in nodes) or semantic != digest(legacy):
+                    raise HNDLError("E_INTEGRITY", _CORRUPTED.format(field="semantic_digest"))
+                warnings.warn("Upgraded saved plan semantic digest to include parameter ties; "
+                              "save it again with to_json() to record the new digest.", stacklevel=2)
             from .resolver import validate_concrete_plan
             return validate_concrete_plan(plan, registry=registry, limits=limits)
         except HNDLError:
@@ -497,10 +513,14 @@ class ResolvedPlan(Immutable):
         self,
         batch_size: int = 1,
         sequence_lengths: Mapping[str, int] | None = None,
+        *,
+        cache_capacity: int | None = None,
+        absorbed_mla: bool | Collection[str] = False,
     ) -> Any:
         """Evaluate parameter counts, FLOPs, peak memory, and KV state memory statically."""
         from .profile import profile_plan
-        return profile_plan(self, batch_size=batch_size, sequence_lengths=sequence_lengths)
+        return profile_plan(self, batch_size=batch_size, sequence_lengths=sequence_lengths,
+                            cache_capacity=cache_capacity, absorbed_mla=absorbed_mla)
 
     def to_mermaid(self) -> str:
         """Render this plan as a shape-annotated Mermaid flowchart diagram."""
@@ -610,6 +630,8 @@ def diff_plans(plan1: ResolvedPlan, plan2: ResolvedPlan) -> PlanDiff:
                 changes["op"] = (n1.op, n2.op)
             if n1.args != n2.args:
                 changes["args"] = (dict(n1.args), dict(n2.args))
+            if n1.parameter_ties != n2.parameter_ties:
+                changes["tie"] = (dict(n1.parameter_ties), dict(n2.parameter_ties))
             if n1.input_shapes != n2.input_shapes:
                 changes["input_shapes"] = (dict(n1.input_shapes), dict(n2.input_shapes))
             if n1.output_shapes != n2.output_shapes:

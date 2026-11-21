@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ._activations import ACTIVATION_NAMES
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ._equalized import EqualLinear
 from ._relations import non_image
@@ -39,7 +40,7 @@ def _reference(module):
     args={
         "hidden": Arg(int, min=1, max=MAX_DIMENSION_LITERAL,
                       help="Width of the inner layer; typically two to four times the feature width D."),
-        "activation": Arg(str, "gelu", positional=False, choices=tuple(ACTIVATIONS),
+        "activation": Arg(str, "gelu", positional=False, choices=ACTIVATION_NAMES,
                           help="Nonlinearity applied to the inner activations."),
         "dropout": Arg(float, 0.0, min=0, max=1, exclusive_max=True, positional=False,
                        help="Dropout probability applied after the activation; 0 disables it."),

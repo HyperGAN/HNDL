@@ -113,11 +113,11 @@ def test_b02_rope_caches_and_device_transfer():
     rope2 = RoPE(theta=10000.0)
     x_long = torch.randn(2, 32, 64)
     _ = rope2(x_long)
-    key = (64, str(x_long.device), x_long.dtype)
-    assert rope2._cache[key][0].shape[1] == 32
+    tables, = rope2._cache.values()
+    assert tables[0].shape[-2] == 32
     x_short = torch.randn(2, 16, 64)
     _ = rope2(x_short)
-    assert rope2._cache[key][0].shape[1] == 32  # Kept max length
+    assert next(iter(rope2._cache.values())) is tables
 
 
 

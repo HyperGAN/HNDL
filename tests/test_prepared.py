@@ -388,6 +388,34 @@ def test_cuda_replay_pins_rotary_tables_after_cache_growth_and_eviction():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_replay_pins_flex_score_cap_after_eviction():
+    from hndl.operators._attention_backend import clear_attention_cache
+
+    source = network("attention(4, head_dim=16, logit_softcap=0.25)", input_shape=("B", 17, 64),
+                     output_shape=("B", 17, 64), device="cuda:0").eval()
+    x = torch.randn(2, 17, 64, device="cuda:0")
+    with torch.inference_mode():
+        expected = source(x)
+        fast = source.prepare(backend="cuda_graph", attention_backend="flex")
+        # The constant can be created on a different stream before capture.
+        producer = torch.cuda.Stream(device=x.device)
+        producer.wait_stream(torch.cuda.current_stream(x.device))
+        with torch.cuda.stream(producer):
+            source(x)
+        torch.testing.assert_close(fast(x), expected, rtol=5e-4, atol=5e-5)
+        pointer = source[0]._hndl_attention_softcap[1].data_ptr()
+        clear_attention_cache(source[0])
+        assert not hasattr(source[0], "_hndl_attention_softcap")
+        entry = next(iter(fast._graphs.values()))
+        assert pointer in {t.data_ptr() for t in entry[5]}
+        with torch.cuda.stream(producer):
+            scratch = [torch.full((), 100., device=x.device) for _ in range(24)]
+        torch.testing.assert_close(fast(x), expected, rtol=5e-4, atol=5e-5)
+        producer.synchronize()
+        assert all(t.data_ptr() != pointer for t in scratch)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_cuda_replay_reuses_one_capture_for_repeated_parameterized_calls(monkeypatch):
     source = network("linear(16); silu(); linear(4)", input_shape=("B", 8),
                      output_shape=("B", 4), device="cuda:0").eval()
@@ -500,3 +528,86 @@ def test_temporary_cuda_executor_keeps_cross_stream_buffers_until_replay_finishe
         torch.testing.assert_close(actual, expected)
         for value in pressure:
             torch.testing.assert_close(value, torch.full_like(value, 12345.0), rtol=0, atol=0)
+
+
+def test_compiled_preparation_enforces_contracts_for_new_signatures_and_custom_nodes():
+    model = network("relu()", input_shape=("B", 8), output_shape=("B", 8), device="cpu")
+    compiled = torch.compile(model.prepare(), backend="eager", fullgraph=True)
+    x = torch.ones(2, 8)
+    torch.testing.assert_close(compiled(x), x)
+    for invalid in (x[:, :-1], x.long(), x[:0]):
+        with pytest.raises((AssertionError, RuntimeError), match="E_RUNTIME"):
+            compiled(invalid)
+    torch.testing.assert_close(compiled(x[:1]), x[:1])
+
+    registry = Registry.builtins()
+
+    @registry.operator("truncate", shape="x[B, D] -> out[B, D]", summary="Drop a feature.")
+    class Truncate(nn.Module):
+        def forward(self, x):
+            return x[:, :-1]
+
+    custom = network("truncate(); relu()", input_shape=("B", 8), output_shape=("B", 8),
+                     device="cpu", registry=registry)
+    with pytest.raises((AssertionError, RuntimeError), match="shape mismatch"):
+        torch.compile(custom.prepare(), backend="eager", fullgraph=True)(x)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_checkpoint_on_first_block_reduces_saved_tensors_with_detached_inputs(prepared):
+    source = network("attention(4, causal=True)", input_shape=("B", 8, 16),
+                     output_shape=("B", 8, 16), device="cpu", checkpoint=True)
+    baseline = copy.deepcopy(source[0])
+    model = source.prepare() if prepared else source
+    x = torch.randn(2, 8, 16)
+    model(x)  # Exercise the validated path as well as the cold call.
+    def step(module):
+        saved = []
+        with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append(t.numel()) or t, lambda t: t):
+            output = module(x)
+        output.sum().backward()
+        return output, sum(saved)
+    expected, baseline_saved = step(baseline)
+    actual, checkpoint_saved = step(model)
+    torch.testing.assert_close(actual, expected)
+    assert checkpoint_saved < baseline_saved
+    for parameter, reference in zip(model.parameters(), baseline.parameters(), strict=True):
+        torch.testing.assert_close(parameter.grad, reference.grad)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_cache_port_accepts_keyword_and_positional_decoding(prepared):
+    from hndl.inference import InferenceCache
+
+    model = network("attention(cache, 2, causal=True)", input_shape={"cache": ("B", 4, 8)},
+                    output_shape=("B", 4, 8), device="cpu").eval()
+    model = model.prepare() if prepared else model
+    x = torch.randn(1, 4, 8)
+    with torch.no_grad():
+        expected = model(cache=x)
+        torch.testing.assert_close(model(x), expected)
+        session = InferenceCache(4)
+        actual = torch.cat([model(v, cache=session) for v in x.split(2, dim=1)], dim=1)
+        torch.testing.assert_close(actual, expected)
+        with pytest.raises(HNDLError, match="positionally"):
+            model(cache=session)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_compiled_first_block_checkpoints_detached_inputs(prepared):
+    model = network("attention(2, causal=True)", input_shape=("B", 4, 8),
+                    output_shape=("B", 4, 8), device="cpu", checkpoint=True)
+    reference = copy.deepcopy(model[0])
+    targets = []
+
+    def backend(graph, inputs):
+        targets.extend(str(node.target) for node in graph.graph.nodes)
+        return graph.forward
+
+    x = torch.randn(2, 4, 8)
+    result = torch.compile(model.prepare() if prepared else model, backend=backend, fullgraph=True)(x)
+    result.sum().backward()
+    reference(x).sum().backward()
+    assert any("tag_activation_checkpoint" in target for target in targets)
+    for p, q in zip(model.parameters(), reference.parameters(), strict=True):
+        torch.testing.assert_close(p.grad, q.grad)

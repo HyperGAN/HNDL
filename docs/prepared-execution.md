@@ -17,9 +17,11 @@ loss.backward()
 ```
 
 The first call for an input shape, dtype, device and training mode runs
-the checked executor. Subsequent calls use generated tensor locals and release
+the checked executor. Compiling the public prepared wrapper also enforces the
+resolved contracts, including custom operator output ports. Subsequent calls use generated tensor locals and release
 intermediates after their last consumer. Preparation does not copy or initialize
-weights. The input binding and output conventions match the original model.
+weights. During training, checkpointed nodes can recompute activations when
+only their weights require gradients. The input binding and output conventions match the original model.
 An optional tuple or mapping of example inputs warms the executor immediately:
 `fast = model.prepare((x,))` or `model.prepare({"x": x})`.
 
@@ -88,3 +90,7 @@ wall-clock measurements or use `torch.utils.benchmark.Timer`. Compare identical
 weights, shapes, input residency and output ownership; a replay returning a
 borrowed buffer does less work than a call returning an independent tensor.
 Check training throughput and memory separately from inference latency.
+
+For a plan with an external input named `cache`, pass that tensor by keyword
+or position. To decode with that plan, pass the tensor positionally and use
+`cache=session` for the `InferenceCache`.

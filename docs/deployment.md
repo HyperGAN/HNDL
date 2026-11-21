@@ -70,7 +70,9 @@ that independently establishes compatibility can explicitly pass
 `check_environment=False` to `load`.
 
 Keep the `.pt2` archive and its adjacent `.json` manifest together when copying
-them to another directory. `inspect_artifact(path)` reads the manifest without
+them to another directory. Standalone packages can be loaded from a read-only
+directory. Loads from a managed cache use its shared lock and update recency
+when writable. `inspect_artifact(path)` reads the manifest without
 importing PyTorch or loading executable code. C++ applications can use
 [PyTorch's AOTInductor package loader](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/torch.compiler_aot_inductor.html);
 they must enforce the same input and environment contracts themselves.

@@ -1,4 +1,4 @@
-# Implementation notes: 0.11.0
+# Implementation notes: 0.12.0
 
 This release implements the contract in [SPEC.md](SPEC.md). [README.md](README.md)
 introduces the APIs with examples; the [operator catalog](docs/operators/index.md)
@@ -153,7 +153,8 @@ relation that never settles) rather than budgeting ordinary networks. Pass a
 explicitly; keys are `max_nodes`, `max_edges`, `max_dimension`,
 `max_elements`, `max_state_bytes`, and `max_iterations`. Storage is measured
 by constructing every module on PyTorch's allocation-free `meta` device before
-real construction; `build_receipt["state_bytes"]` records the total. These
+real construction. The builder counts tied storage once in both the limit
+and `build_receipt["state_bytes"]`. These
 bounds do not estimate peak training memory or bound arbitrary native Python
 authoring code.
 
@@ -207,16 +208,41 @@ changed.
 
 Schema 1 uses sorted JSON object keys, compact separators, UTF-8 without ASCII
 escaping, arrays for tuples, finite numbers, and SHA-256 digests. Node order,
-identities, arguments, shapes, dtypes, initialization, and trainability
-participate in the semantic digest. Source/frontend metadata and argument
-provenance affect the artifact digest but not the semantic digest. The
+identities, arguments, shapes, dtypes, initialization, trainability, and
+resolved parameter ties participate in the semantic digest. The artifact
+digest also covers source locations, frontend metadata and argument provenance. The
 digests detect corruption and hand edits. Restoring re-resolves the saved
 arguments and fails with a per-node list of mismatches; a plan missing only an
 operator default or a dimension-bound argument loads completed, with a warning
 (SPEC §12). Restoring arbitrary third-party artifacts is not the same boundary
 as loading declarative source.
 
+## Profiling a resolved plan
+
+`plan.profile(batch_size=2).summary()` reports logical activation bytes using
+each port's resolved dtype. The peak counts live graph inputs and outputs.
+Kernel workspace, allocator overhead, aliasing, and tensors saved by autograd
+are outside this estimate. Each node reports its own logical parameter count.
+The graph total counts shared parameters once, including transitive ties.
+When routed experts share weights across nodes, the active count is an upper
+bound on the number of distinct parameters used by a token.
+
+The KV and recurrent state estimate defaults to each node's sequence length
+and expanded latent-attention keys and values. For a session with capacity
+4096 and an absorbed MLA node named `attn`, use
+`plan.profile(batch_size=2, cache_capacity=4096, absorbed_mla={"attn"})`.
+Pass `absorbed_mla=True` when every MLA layer has absorbed its weights.
+The summary records these assumptions. Causal local attention retains up
+to the window length. Recurrent operators include their convolution history
+and accumulation dtype. Rotary tables belong to the model. For attention
+operators without an incremental implementation, the estimate describes
+the size of the corresponding projected keys and values.
+
 ## Construction settings
+
+Set `tie={"weight": "encoder.weight"}` to share a parameter with an earlier
+node named `encoder`. Nested parameter paths are supported. Both tensors
+must have the same shape and dtype.
 
 `init={"weight": 0, "bias": 0}` selects constant parameter overrides after
 normal module construction, and `init={"weight": xavier_uniform(gain=1.0)}`
@@ -264,8 +290,6 @@ parameter gradients, not input gradients or train/eval mode.
 - Custom shape relations beyond the DSL are trusted Python functions; there is
   no declarative form for arithmetic relations, and inferable custom scalars
   must be bound to a shape symbol or set by a relation.
-- Weight tying between graph nodes is unsupported; `pretrained` loads tied
-  checkpoints correctly because the wrapped model ties them internally.
 - Vision checkpoints load at their native resolution only.
 - Full derivation chains for every inferred value, published machine-readable
   plan schemas, and strict checkpoint-compatibility tooling beyond ordinary

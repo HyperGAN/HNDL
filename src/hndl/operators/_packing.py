@@ -130,12 +130,19 @@ def _packed(owner, key, parameters, *, stacked=False):
     return layout.value()
 
 
+def _has_call_hooks(module):
+    return (module._forward_hooks or module._forward_pre_hooks
+            or module._backward_hooks or module._backward_pre_hooks)
+
+
+def _global_call_hooks():
+    return (_torch_module._global_forward_hooks or _torch_module._global_forward_pre_hooks
+            or _torch_module._global_backward_hooks or _torch_module._global_backward_pre_hooks)
+
+
 def _plain_linear(module):
-    return (type(module) is nn.Linear
-            and not module._forward_hooks and not module._forward_pre_hooks
-            and not module._backward_hooks and not module._backward_pre_hooks
-            and not _torch_module._global_forward_hooks and not _torch_module._global_forward_pre_hooks
-            and not _torch_module._global_backward_hooks and not _torch_module._global_backward_pre_hooks)
+    return (type(module) is nn.Linear and "forward" not in module.__dict__
+            and not _has_call_hooks(module) and not _global_call_hooks())
 
 
 def project(owner, x, names):
@@ -234,7 +241,7 @@ def prepare_packed(module, *, trusted=False):
         if hasattr(child, "experts") and isinstance(child.experts, nn.ModuleList):
             child._hndl_grouped_mm = hasattr(torch, "_grouped_mm")
             for name in ("gate", "up", "down"):
-                if child.experts and all(hasattr(expert, name) for expert in child.experts):
+                if child.experts and all(_plain_linear(getattr(expert, name, None)) for expert in child.experts):
                     expert_parameters(child, name)
                     if all(getattr(expert, name).bias is not None for expert in child.experts):
                         expert_parameters(child, name, "bias")

@@ -42,11 +42,14 @@ def _load_plan(hndl_path: Path, sidecar_path: Path | None = None) -> ResolvedPla
         if "dtype" in meta:
             kwargs["dtype"] = meta["dtype"]
 
-    return resolve(source, **kwargs)
+    from ._inspection import InspectionRegistry
+    return resolve(source, registry=InspectionRegistry(), **kwargs)
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
     """Inspect resolved contracts, nodes, and static profiling metrics."""
+    if args.device is not None:
+        sys.stderr.write("Deprecated: --device has no effect on static inspection.\n")
     hndl_path = Path(args.file)
     sidecar_path = Path(args.sidecar) if args.sidecar else None
     try:
@@ -129,6 +132,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 1 if failed > 0 else 0
 
 
+def _legacy_device(value):
+    kind, separator, index = value.partition(":")
+    if kind not in {"cpu", "cuda"} or (separator and not index.isdecimal()):
+        raise argparse.ArgumentTypeError(f"unknown device {value!r}; expected cpu or cuda[:index]")
+    return value
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -143,7 +153,8 @@ def create_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--sidecar", help="Path to optional .json sidecar metadata.")
     inspect_parser.add_argument("--batch-size", type=int, default=1, help="Batch size for static profiling.")
     inspect_parser.add_argument("--profile", action="store_true", help="Compute zero-compute static profile.")
-    inspect_parser.add_argument("--device", default="cpu", help="Target device.")
+    inspect_parser.add_argument("--device", type=_legacy_device,
+                                help="Deprecated. Static inspection is device independent.")
 
     # mermaid
     mermaid_parser = subparsers.add_parser("mermaid", help="Export Mermaid flowchart diagram.")

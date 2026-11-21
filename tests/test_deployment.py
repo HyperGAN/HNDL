@@ -51,6 +51,25 @@ def test_import_and_manifest_inspection_do_not_import_torch(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_standalone_package_loads_without_writing(tmp_path, fake_compiler, monkeypatch):
+    model, x = mlp(), torch.randn(2, 4)
+    artifact = export(model, (x,), tmp_path / "cache")
+    standalone = tmp_path / "release"
+    standalone.mkdir()
+    package = Path(shutil.copy(artifact.path, standalone))
+    manifest = Path(shutil.copy(artifact.manifest_path, standalone))
+    original_mtime = manifest.stat().st_mtime_ns
+    monkeypatch.setattr(inductor, "aoti_load_package", lambda path: model)
+    standalone.chmod(0o555)
+    manifest.chmod(0o444)
+    try:
+        torch.testing.assert_close(load(package)(x), model(x))
+        assert set(standalone.iterdir()) == {package, manifest}
+        assert manifest.stat().st_mtime_ns == original_mtime
+    finally:
+        standalone.chmod(0o755)
+
+
 def test_repeated_export_hits_cache_but_weight_updates_recompile(tmp_path, fake_compiler):
     model, x = mlp(), torch.randn(2, 4)
     first = export(model, (x,), tmp_path)
@@ -61,6 +80,18 @@ def test_repeated_export_hits_cache_but_weight_updates_recompile(tmp_path, fake_
     third = export(model, (x,), tmp_path)
     assert not third.cache_hit and third.cache_key != first.cache_key
     assert len(fake_compiler) == 2
+
+
+def test_attention_fingerprint_ignores_derived_score_storage():
+    from hndl.deployment import _implementation
+
+    model = network("attention(4, head_dim=16, logit_softcap=2.0)", input_shape=("B", 17, 64),
+                    output_shape=("B", 17, 64), device="cpu").eval()
+    cold = _implementation(model)
+    model[0]._hndl_attention_softcap = (2.0, torch.tensor(2.0))
+    assert _implementation(model) == cold
+    model[0].logit_softcap = 3.0
+    assert _implementation(model) != cold
 
 
 def test_non_state_python_settings_and_forward_code_invalidate(tmp_path, fake_compiler):

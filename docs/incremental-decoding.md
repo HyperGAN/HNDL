@@ -89,13 +89,16 @@ needed by their causal depthwise convolutions. Their state size remains
 constant as the sequence grows. `pos_embed` and standalone `rope` retain their
 position counters, so they can appear in an incremental model as well.
 
-Attention buffers allocate their full `max_seq_len` capacity on first use.
-Appending a token writes its slot without copying the existing prefix. An
-append past the capacity raises an error; create a larger cache or reset to
-start a new sequence. A sliding window currently bounds attended positions,
-while storage still uses the declared sequence capacity. The
-`cache.allocated_bytes` property reports bytes retained by built-in tensor
-states. `cache.position(node_id)` reports the number of positions consumed by
+Full-prefix attention allocates `max_seq_len` slots on first use. Sliding-window
+attention allocates `min(window_size, max_seq_len)` slots per KV head and reuses
+them in a ring. A multi-token chunk spanning the window can also use temporary
+workspace to attend to earlier positions. In either mode position counters
+remain absolute, and appending past `max_seq_len` raises an error.
+
+Rotary lookup tables belong to the model and can be reused between sessions.
+Length-independent incremental tables grow geometrically up to the session
+capacity. The `cache.allocated_bytes` property counts the session's retained
+KV, convolution and recurrent tensors. `cache.position(node_id)` reports the number of positions consumed by
 an operator; a transformer block uses the child key `node_id + '/attention'`.
 
 The cache retains the existing dictionary interface: `get`, `set`, indexing,

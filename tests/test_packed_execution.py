@@ -310,3 +310,44 @@ def test_functorch_input_grad_uses_differentiable_packing_fallback():
     actual = torch.func.grad(lambda value: module(value).sum())(x)
     expected = torch.func.grad(lambda value: reference(value).sum())(x)
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("dispatch", ["sparse", "padded", "auto"])
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else []))
+def test_expert_dispatch_respects_output_and_backward_hooks(dispatch, device):
+    module = prepare_packed(MixtureOfExperts(4, 16, 4, "silu", D=8).to(device))
+    module.configure_dispatch(dispatch)
+    calls = []
+    x = torch.randn(3, 8, device=device, requires_grad=True)
+    for index, expert in enumerate(module.experts):
+        expert.down.register_forward_hook(lambda m, args, result: result * 0)
+        expert.register_full_backward_hook(lambda *args, index=index: calls.append(index))
+    result = module(x)
+    torch.testing.assert_close(result, torch.zeros_like(result))
+    result.sum().backward()
+    assert sorted(calls) == list(range(4))
+    torch.testing.assert_close(x.grad, torch.zeros_like(x))
+
+
+@pytest.mark.parametrize("dispatch", ["auto", "padded"])
+def test_batched_offsets_allow_empty_experts_without_a_dense_count_matrix(dispatch, monkeypatch):
+    module = MixtureOfExperts(8, 16, 2, "silu", D=8).configure_dispatch(dispatch)
+    reference = copy.deepcopy(module)
+    # All tokens select the same two experts, leaving both interior and end
+    # offsets repeated in the sorted route vector.
+    with torch.no_grad():
+        module.router.weight.fill_(0)
+        module.router.weight[1].fill_(1)
+        module.router.weight[4].fill_(2)
+        reference.load_state_dict(module.state_dict())
+    x = torch.ones(17, 8, requires_grad=True)
+    expected_x = x.detach().clone().requires_grad_()
+    monkeypatch.setattr(torch.nn.functional, "one_hot", lambda *a, **kw: pytest.fail("dense route counts"))
+    actual = module(x)
+    expected = _reference(reference)(expected_x)
+    torch.testing.assert_close(actual, expected)
+    actual.sum().backward()
+    expected.sum().backward()
+    torch.testing.assert_close(x.grad, expected_x.grad)
+    for p, q in zip(module.parameters(), reference.parameters(), strict=True):
+        torch.testing.assert_close(p.grad, q.grad)

@@ -259,3 +259,26 @@ def test_cpu_sessions_do_not_query_cuda_streams(monkeypatch):
         torch.testing.assert_close(actual, model[0](x))
         cache.reset()
         torch.testing.assert_close(model[0](x, cache=cache, node_id="attention"), model[0](x))
+
+
+@pytest.mark.parametrize("replace", ["parameter", "buffer_store", "submodule", "storage"])
+def test_flat_graph_state_guard_tracks_live_registrations(replace):
+    import copy
+
+    model = _buffer_weight_model("cpu")
+    cache = InferenceCache(2)
+    x = torch.randn(1, 1, 16)
+    with torch.no_grad():
+        model(x, cache=cache)
+        attn = model[0]
+        if replace == "parameter":
+            attn.q_proj.weight = nn.Parameter(attn.q_proj.weight.clone())
+        elif replace == "buffer_store":
+            attn.k_proj._buffers = {"weight": attn.k_proj.weight.clone()}
+        elif replace == "submodule":
+            attn.v_proj = copy.deepcopy(attn.v_proj)
+        else:
+            attn.q_proj.weight.data = attn.q_proj.weight.detach().clone()
+        with pytest.raises(HNDLError, match="changed"):
+            model(x, cache=cache)
+        assert cache.position("n0") == 1

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 import math
 from typing import TYPE_CHECKING, Any
 
+from .registry import Registry
+from .resolver import _propagate_dtypes
 from .types import batch_multiple
 
 if TYPE_CHECKING:
@@ -59,6 +61,9 @@ class PlanProfile:
     nodes: tuple[NodeProfile, ...] = ()
     _by_id: dict[str, NodeProfile] = field(default_factory=dict, repr=False)
 
+    cache_capacity: int | None = None
+    absorbed_mla_nodes: tuple[str, ...] = ()
+
     def __getitem__(self, node_id: str) -> NodeProfile:
         return self._by_id[node_id]
 
@@ -90,6 +95,8 @@ class PlanProfile:
             f"  Training FLOPs (est):   {self.training_flops:>14,d}",
             f"  Peak Activation Memory: {self._format_bytes(self.peak_activation_bytes):>14}",
             f"  KV / Recurrent State:   {self._format_bytes(self.kv_cache_bytes):>14}",
+            f"  Cache capacity:         {self.cache_capacity if self.cache_capacity is not None else 'per-node sequence length'}",
+            f"  Absorbed MLA nodes:     {', '.join(self.absorbed_mla_nodes) or 'none'}",
             "============================================================",
         ]
         return "\n".join(lines)
@@ -200,7 +207,7 @@ def _compute_node_parameters(
 
     if alias == "layer_norm":
         dim = in_shapes["x"][-1]
-        affine = args.get("elementwise_affine", True)
+        affine = args.get("affine", True)
         bias = args.get("bias", True)
         params = (dim + (dim if bias else 0)) if affine else 0
         return params, params
@@ -656,178 +663,173 @@ def _compute_node_flops(
 
 def _compute_kv_cache_bytes(
     alias: str,
-    args: dict[str, Any],
+    args: Mapping[str, Any],
     in_shapes: dict[str, tuple[int, ...]],
     dtype_size: int,
+    capacity: int | None,
+    absorbed: bool,
 ) -> int:
-    """Calculate KV-cache or recurrent state bytes for stateful sequence decoders."""
-    if alias in ("attention", "cross_attention"):
-        b = in_shapes["x"][0]
-        t = in_shapes.get("context", in_shapes["x"])[1]
-        d = in_shapes["x"][2]
+    """Estimate persistent decoder state, excluding model-owned rotary tables."""
+    if alias in ("attention", "transformer_block", "cross_attention"):
+        batch, _, width = in_shapes["x"]
+        positions = capacity or in_shapes.get("context", in_shapes["x"])[1]
+        window = args.get("window_size", 0)
+        if window and args.get("causal"):
+            positions = min(window, positions)
         heads = args["heads"]
-        head_dim = args.get("head_dim", 0) or (d // heads)
+        head_dim = args.get("head_dim", 0) or width // heads
         kv_heads = args.get("kv_heads", 0) or heads
-        return 2 * b * kv_heads * head_dim * t * dtype_size
+        return 2 * batch * kv_heads * head_dim * positions * dtype_size
 
     if alias == "latent_attention":
-        b = in_shapes["x"][0]
-        t = in_shapes["x"][1]
-        kv_lora_rank = int(args["kv_lora_rank"])
-        qk_rope_head_dim = int(args.get("qk_rope_head_dim", 0))
-        return b * t * (kv_lora_rank + qk_rope_head_dim) * dtype_size
+        batch, length, width = in_shapes["x"]
+        rotary = args.get("qk_rope_head_dim", 0)
+        if absorbed:
+            channels = args["kv_lora_rank"] + rotary
+        else:
+            heads = args["heads"]
+            content = args.get("qk_nope_head_dim", 0) or width // heads
+            value = args.get("v_head_dim", 0) or content
+            channels = heads * (content + rotary + value)
+        return batch * (capacity or length) * channels * dtype_size
 
     if alias == "gated_delta_attention":
-        b = in_shapes["x"][0]
-        d = in_shapes["x"][2]
-        heads = int(args["heads"])
-        head_dim = int(args.get("head_dim", 0) or (d // heads))
-        conv_size = int(args.get("conv_size", 4))
-        inner_dim = heads * head_dim
-        recurrent_state = b * heads * (head_dim ** 2) * dtype_size
-        conv_buf = b * inner_dim * max(0, conv_size - 1) * dtype_size
-        return recurrent_state + conv_buf
+        batch, _, width = in_shapes["x"]
+        heads = args["heads"]
+        head_dim = args.get("head_dim", 0) or width // heads
+        recurrent_state = batch * heads * head_dim ** 2 * max(4, dtype_size)
+        conv_channels = 3 * heads * head_dim
+        history = max(0, args.get("conv_size", 4) - 1)
+        return recurrent_state + batch * conv_channels * history * dtype_size
 
     if alias in ("mamba2", "ssd"):
-        b = in_shapes["x"][0]
-        heads = int(args.get("heads", 8))
-        head_dim = int(args.get("head_dim", 64))
-        d_state = int(args.get("d_state", 64))
-        d_conv = int(args.get("d_conv", 4))
-        inner_dim = heads * head_dim
-        state_bytes = b * heads * head_dim * d_state * dtype_size
-        conv_bytes = b * inner_dim * max(0, d_conv - 1) * dtype_size
-        return state_bytes + conv_bytes
-
-    if alias == "transformer_block":
-        b = in_shapes["x"][0]
-        t = in_shapes["x"][1]
-        d = in_shapes["x"][2]
-        heads = int(args["heads"])
-        head_dim = int(args.get("head_dim", 0) or (d // heads))
-        kv_heads = int(args.get("kv_heads", 0) or heads)
-        return 2 * b * kv_heads * head_dim * t * dtype_size
+        batch = in_shapes["x"][0]
+        heads = args.get("heads", 8)
+        head_dim = args.get("head_dim", 64)
+        d_state = args.get("d_state", 64)
+        recurrent_state = batch * heads * head_dim * d_state * max(4, dtype_size)
+        conv_channels = heads * (head_dim + 2 * d_state)
+        history = max(0, args.get("d_conv", 4) - 1)
+        return recurrent_state + batch * conv_channels * history * dtype_size
 
     return 0
+
+
+def _tied_parameter_counts(plan, registry, specs):
+    """Probe just the connected tie participants, sharing metadata-only parameters."""
+    involved = set()
+    for node in plan.nodes:
+        if node.parameter_ties:
+            involved.add(node.id)
+            involved.update(ref.split(".", 1)[0] for ref in node.parameter_ties.values())
+    if not involved:
+        return {}, 0, 0
+
+    from .torch import DTYPES, construct, _tie_parameters
+
+    counts = {}
+    layers = {}
+    seen, always_active = set(), set()
+    shared, shared_active = 0, 0
+    with registry.activated():
+        for node in plan.nodes:
+            if node.id not in involved:
+                continue
+            spec = specs[node.id]
+            layer = construct(spec, node, "meta", DTYPES[plan.dtype])
+            _tie_parameters(layer, node, layers, compute_dtype=DTYPES[plan.dtype])
+            layers["n_" + node.id] = layer
+            parameters = dict(layer.named_parameters())
+            counts[node.id] = sum(p.numel() for p in parameters.values())
+            for name, p in parameters.items():
+                if p in seen:
+                    shared += p.numel()
+                seen.add(p)
+                # A routed expert can be inactive at one site and active at
+                # another. Only subtract duplicates guaranteed to participate.
+                if spec.alias == "moe" and name.startswith("experts.") and node.args["top_k"] < node.args["experts"]:
+                    continue
+                if p in always_active:
+                    shared_active += p.numel()
+                always_active.add(p)
+    return counts, shared, shared_active
 
 
 def profile_plan(
     plan: ResolvedPlan,
     batch_size: int = 1,
     sequence_lengths: Mapping[str, int] | None = None,
+    *,
+    cache_capacity: int | None = None,
+    absorbed_mla: bool | Collection[str] = False,
 ) -> PlanProfile:
-    """Perform zero-compute static profiling on a ResolvedPlan."""
-    if batch_size <= 0:
-        raise ValueError(f"batch_size must be positive, got {batch_size}")
-
+    """Profile a plan at a given inference cache capacity and MLA storage mode."""
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
+    if cache_capacity is not None and (type(cache_capacity) is not int or cache_capacity <= 0):
+        raise ValueError("cache_capacity must be a positive integer")
     seq_lens = sequence_lengths or {}
-    dtype_size = DTYPE_SIZES.get(plan.dtype, 4)
+    registry = plan.registry or Registry.builtins()
+    specs = {node.id: registry.by_identity(node.op) for node in plan.nodes}
+    dtypes = _propagate_dtypes(plan, plan.nodes, specs)
+    mla = {node.id for node in plan.nodes if specs[node.id].alias == "latent_attention"}
+    if isinstance(absorbed_mla, bool):
+        absorbed = mla if absorbed_mla else set()
+    elif isinstance(absorbed_mla, Collection) and not isinstance(absorbed_mla, str):
+        absorbed = set(absorbed_mla)
+        if not absorbed <= mla:
+            raise ValueError("absorbed_mla must name latent_attention nodes in the plan")
+    else:
+        raise ValueError("absorbed_mla must be a boolean or a collection of latent_attention node IDs")
 
-    # 1. Resolve concrete shapes for external contracts and all nodes
-    concrete_ext_inputs: dict[str, tuple[int, ...]] = {
-        name: _resolve_shape(port["shape"] if isinstance(port, Mapping) else getattr(port, "shape", port), batch_size, seq_lens)
-        for name, port in plan.inputs.items()
+    counts, shared, shared_active = _tied_parameter_counts(plan, registry, specs)
+    public = {entry["ref"] for entry in plan.outputs.values()}
+    last_consumer = {ref: i for i, node in enumerate(plan.nodes) for ref in node.inputs.values()}
+    ref_bytes = {
+        f"input:{name}": math.prod(_resolve_shape(entry["shape"], batch_size, seq_lens)) * DTYPE_SIZES[entry["dtype"]]
+        for name, entry in plan.inputs.items()
     }
-
-    node_in_shapes: dict[str, dict[str, tuple[int, ...]]] = {}
-    node_out_shapes: dict[str, dict[str, tuple[int, ...]]] = {}
-    ref_shapes: dict[str, tuple[int, ...]] = {}
-
-    for name, s in concrete_ext_inputs.items():
-        ref_shapes[name] = s
-        ref_shapes[f"input:{name}"] = s
-
-    for node in plan.nodes:
-        in_s = {
-            port: _resolve_shape(s, batch_size, seq_lens)
-            for port, s in node.input_shapes.items()
-        }
-        out_s = {
-            port: _resolve_shape(s, batch_size, seq_lens)
-            for port, s in node.output_shapes.items()
-        }
-        node_in_shapes[node.id] = in_s
-        node_out_shapes[node.id] = out_s
-
-        # Register output refs
-        for port, s in out_s.items():
-            ref_shapes[f"node:{node.id}/{port}"] = s
-            ref_shapes[f"{node.id}:{port}"] = s
-            ref_shapes[f"{node.id}/{port}"] = s
-            ref_shapes[node.id] = s
-
-    # 2. Compute per-node profiles
-    node_profiles: list[NodeProfile] = []
-    total_params = 0
-    active_params = 0
-    total_flops = 0
-    total_kv_bytes = 0
-
-    for node in plan.nodes:
-        alias = plan._operation_name(node.op) if hasattr(plan, "_operation_name") else (
-            node.op.split("@")[0] if "@" in node.op else node.op
-        )
-        in_s = node_in_shapes[node.id]
-        out_s = node_out_shapes[node.id]
-        tot_p, act_p = _compute_node_parameters(alias, node.args, in_s, out_s)
-        flops = _compute_node_flops(alias, node.args, in_s, out_s)
-        act_bytes = sum(math.prod(s) * dtype_size for s in out_s.values())
-        kv_bytes = _compute_kv_cache_bytes(alias, node.args, in_s, dtype_size)
-
-        np = NodeProfile(
-            id=node.id,
-            op=alias,
-            total_parameters=tot_p,
-            active_parameters=act_p,
-            forward_flops=flops,
-            activation_bytes=act_bytes,
-            kv_cache_bytes=kv_bytes,
-        )
-        node_profiles.append(np)
-        total_params += tot_p
-        active_params += act_p
-        total_flops += flops
-        total_kv_bytes += kv_bytes
-
-    # 3. Peak Live Activation Memory Simulation (Slot-Recycled Liveness)
-    graph_output_refs = set()
-    for port in plan.outputs.values():
-        ref = port["ref"] if isinstance(port, Mapping) else getattr(port, "ref", str(port))
-        graph_output_refs.add(ref)
-
-    last_consumer_step: dict[str, int] = {}
+    live = peak = sum(ref_bytes.values())
+    profiles = []
     for i, node in enumerate(plan.nodes):
-        for ref in node.inputs.values():
-            last_consumer_step[ref] = i
+        alias = specs[node.id].alias
+        if node.id in absorbed and node.args.get("bias", False):
+            raise ValueError(f"absorbed_mla requires bias=False at {node.id!r}")
+        ins = {p: _resolve_shape(s, batch_size, seq_lens) for p, s in node.input_shapes.items()}
+        outs = {p: _resolve_shape(s, batch_size, seq_lens) for p, s in node.output_shapes.items()}
+        total, active = _compute_node_parameters(alias, node.args, ins, outs)
+        if node.id in counts:
+            # Meta construction also covers custom nodes used in a tie.
+            inactive = total - active
+            total = counts[node.id]
+            active = max(0, total - inactive)
+        flops = _compute_node_flops(alias, node.args, ins, outs)
+        state = _compute_kv_cache_bytes(alias, node.args, ins, DTYPE_SIZES[plan.dtype],
+                                        cache_capacity, node.id in absorbed)
+        outputs = {}
+        for port, shape in outs.items():
+            ref = f"node:{node.id}/{port}"
+            outputs[ref] = math.prod(shape) * DTYPE_SIZES[dtypes[ref]]
+        output_bytes = sum(outputs.values())
+        profiles.append(NodeProfile(node.id, alias, total, active, flops, output_bytes, state))
 
-    current_live_bytes = sum(
-        math.prod(s) * dtype_size for s in concrete_ext_inputs.values()
-    )
-    peak_bytes = current_live_bytes
+        ref_bytes.update(outputs)
+        live += output_bytes
+        peak = max(live, peak)
+        for ref in set(node.inputs.values()) | outputs.keys():
+            if last_consumer.get(ref, i) == i and ref not in public:
+                live -= ref_bytes.pop(ref)
 
-    for i, node in enumerate(plan.nodes):
-        # Outputs produced by node
-        out_s = node_out_shapes[node.id]
-        for s in out_s.values():
-            current_live_bytes += math.prod(s) * dtype_size
-        peak_bytes = max(peak_bytes, current_live_bytes)
-
-        # Free inputs whose last consumer is step i
-        for ref in set(node.inputs.values()):
-            if last_consumer_step.get(ref) == i and ref not in graph_output_refs:
-                s = ref_shapes.get(ref)
-                if s is not None:
-                    current_live_bytes -= math.prod(s) * dtype_size
-
-    nodes_tuple = tuple(node_profiles)
-    by_id = {np.id: np for np in node_profiles}
-
+    total = sum(p.total_parameters for p in profiles) - shared
+    active = min(total, sum(p.active_parameters for p in profiles) - shared_active)
     return PlanProfile(
-        total_parameters=total_params,
-        active_parameters=active_params,
-        forward_flops=total_flops,
-        peak_activation_bytes=max(peak_bytes, 1),
-        kv_cache_bytes=total_kv_bytes,
-        nodes=nodes_tuple,
-        _by_id=by_id,
+        total_parameters=total,
+        active_parameters=active,
+        forward_flops=sum(p.forward_flops for p in profiles),
+        peak_activation_bytes=peak,
+        kv_cache_bytes=sum(p.kv_cache_bytes for p in profiles),
+        nodes=tuple(profiles),
+        _by_id={p.id: p for p in profiles},
+        cache_capacity=cache_capacity,
+        absorbed_mla_nodes=tuple(sorted(absorbed)),
     )

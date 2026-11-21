@@ -1,13 +1,66 @@
 """Optional fused softcap/window attention, with bounded per-module metadata."""
 
 from collections import OrderedDict
+from functools import lru_cache
 import importlib
+import inspect
 
 import torch
 
 
 _MAX_MASKS = 16
-_compiled_flex = None
+# Older compiler APIs specialize on concrete sizes. PyTorch 2.6 needs them
+# when selecting backward tiles and ordering packed Q/K/V strides.
+_ISOLATED_FLEX = "isolate_recompiles" in inspect.signature(torch.compile).parameters
+_UNSAFE_FLEX_BACKWARD = torch.__version__.startswith("2.6.")
+
+
+def _capped_score(owner, softcap, device):
+    # A captured Python float becomes a symbolic scalar under dynamic=True,
+    # which FlexAttention cannot lower inside a differentiable score modifier.
+    cached = getattr(owner, "_hndl_attention_softcap", None)
+    if cached is not None and cached[0] == softcap and cached[1].device == device:
+        cap = cached[1]
+    else:
+        with torch.inference_mode(False):
+            # Finish this one-time copy before publishing the constant to
+            # other streams, including a prepared executor's capture stream.
+            host = torch.tensor(softcap, device="cpu", dtype=torch.float32)
+            cap = host.to(device, non_blocking=False)
+        if owner is not None:
+            owner._hndl_attention_softcap = (softcap, cap)
+    cap.record_stream(torch.cuda.current_stream(device))
+
+    def score_mod(score, batch, head, query, key):
+        return cap * torch.tanh(score / cap)
+
+    return score_mod
+
+
+@lru_cache(maxsize=32)
+def _flex_kernel(configuration):
+    from torch.nn.attention.flex_attention import flex_attention
+
+    if _ISOLATED_FLEX:
+        return torch.compile(flex_attention, isolate_recompiles=True, dynamic=True, fullgraph=True)
+
+    # Older PyTorch tracks the recompile budget by Python code object. Give
+    # each configuration its own entry point while keeping the same kernels.
+    def run(*args, **kwargs):
+        return flex_attention(*args, **kwargs)
+
+    run.__code__ = run.__code__.replace()
+    return torch.compile(run, dynamic=False, fullgraph=True)
+
+
+def _compiled_flex(q, k, v, *, score_mod, block_mask, enable_gqa, fixed_mask=()):
+    # Flex kernels specialize on head layout and execution mode. Sequence
+    # lengths stay dynamic within each configuration (e.g. chunked decoding).
+    fixed_shapes = () if _ISOLATED_FLEX else (q.shape, k.shape, fixed_mask)
+    kernel = _flex_kernel((q.device, q.dtype, q.shape[1], k.shape[1], q.shape[-1], fixed_shapes,
+                           torch.is_grad_enabled(), torch.is_inference_mode_enabled(),
+                           score_mod is not None, block_mask is not None))
+    return kernel(q, k, v, score_mod=score_mod, block_mask=block_mask, enable_gqa=enable_gqa)
 
 
 def prepare_attention(module, *, backend="auto"):
@@ -23,13 +76,15 @@ def prepare_attention(module, *, backend="auto"):
         child._hndl_attention_requested = backend
         child._hndl_attention_masks = OrderedDict()
         child._hndl_attention_failures = OrderedDict()
+        child.__dict__.pop("_hndl_attention_softcap", None)
         child._hndl_attention_backend = "reference"
     return module
 
 
 def clear_attention_cache(module):
-    """Release retained block mask tensors, for example before a device move."""
+    """Release derived mask and softcap tensors, for example before a move."""
     for child in module.modules():
+        child.__dict__.pop("_hndl_attention_softcap", None)
         cache = getattr(child, "_hndl_attention_masks", None)
         if cache is not None:
             cache.clear()
@@ -92,6 +147,8 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
     if (q.shape[-1] < 16 or q.shape[-1] > 128 or q.shape[-1] % 8 or q.shape[-1] != v.shape[-1]
             or q.shape[-2] == 0 or k.shape[-2] == 0):
         return _fallback(owner, "head dimensions or empty sequence")
+    if _UNSAFE_FLEX_BACKWARD and torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v)):
+        return _fallback(owner, "PyTorch 2.6 FlexAttention backward can return incorrect key/value gradients")
     if torch.cuda.get_device_capability(q.device)[0] < 8:
         return _fallback(owner, "CUDA capability below SM80")
     try:
@@ -120,8 +177,9 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
             cache.move_to_end(key)
         else:
             try:
-                block_mask = api.create_block_mask(allowed, None, None, q.shape[-2], k.shape[-2],
-                                                   device=str(q.device), _compile=True)
+                with torch.inference_mode(False), torch.no_grad():
+                    block_mask = api.create_block_mask(allowed, None, None, q.shape[-2], k.shape[-2],
+                                                       device=str(q.device), _compile=True)
             except Exception as error:
                 return _failed(owner, failures, failure_key, error)
             if cache is not None:
@@ -129,18 +187,12 @@ def specialized_attention(q, k, v, *, causal=False, window_size=0,
                 while len(cache) > _MAX_MASKS:
                     cache.popitem(last=False)
 
-    score_mod = None
-    if softcap > 0.0:
-        def cap(score, batch, head, query, key):
-            return softcap * torch.tanh(score / softcap)
-        score_mod = cap
+    score_mod = _capped_score(owner, softcap, q.device) if softcap > 0.0 else None
 
-    global _compiled_flex
     try:
-        if _compiled_flex is None:
-            _compiled_flex = torch.compile(api.flex_attention, fullgraph=True, dynamic=False)
+        fixed_mask = () if _ISOLATED_FLEX else (causal, window_size, query_offset)
         result = _compiled_flex(q, k, v, score_mod=score_mod, block_mask=block_mask,
-                                enable_gqa=q.shape[1] != k.shape[1])
+                                enable_gqa=q.shape[1] != k.shape[1], fixed_mask=fixed_mask)
     except Exception as error:
         return _failed(owner, failures, failure_key, error)
     if owner is not None:

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import weakref
 
 import torch
+from torch.utils.checkpoint import checkpoint as _checkpoint
 from torch import nn
 from torch.nn.modules import module as _torch_module
 
@@ -341,6 +342,9 @@ class GraphModule(nn.Module):
         self._spec_out = {node.id: {port: _compile_shape(shape) for port, shape in node.output_shapes.items()}
                           for node in plan.nodes}
         self._compiled = _UNCOMPILED
+        # Dynamo in PyTorch 2.6 cannot traverse the plan's frozen mappings.
+        # Bake its module/port tuples here and bind the live batch while tracing.
+        self._trace_program = self._resolve_shapes(None, cache=False)
         self._fast = self._build_fast_program()
         # Input signatures whose calls passed every check, and the watch
         # generation and store contents at which the registered state last
@@ -373,6 +377,7 @@ class GraphModule(nn.Module):
         self._stores = self._record_stores()
         self._fast = self._build_fast_program()
         self._compiled = _UNCOMPILED
+        self._trace_program = self._resolve_shapes(None, cache=False)
         self._validated.clear()
         self._preparation_epoch += 1
         self._notify_prepared()
@@ -433,7 +438,7 @@ class GraphModule(nn.Module):
         result = type(self).__new__(type(self))
         memo[id(self)] = result
         for name, value in self.__dict__.items():
-            if name in {"_stores", "_prepared_dependents"}:
+            if name in {"_stores", "_prepared_dependents", "_trace_program"}:
                 continue  # rebuilt below from the copy's own modules
             # The architecture lock guards attribute writes; this rebuilds the
             # instance dictionary directly, exactly as unpickling would.
@@ -443,6 +448,7 @@ class GraphModule(nn.Module):
         # modules rather than trusting a structure copied mid-flight, validates
         # its first call afresh, and watches its own modules for registrations.
         object.__setattr__(result, "_compiled", _UNCOMPILED)
+        object.__setattr__(result, "_trace_program", result._resolve_shapes(None, cache=False))
         object.__setattr__(result, "_fast", result._build_fast_program())
         object.__setattr__(result, "_validated", {})
         object.__setattr__(result, "_prepared_dependents", weakref.WeakSet())
@@ -472,8 +478,9 @@ class GraphModule(nn.Module):
         self._runtime_device = probe.device
         # ``.double()``, ``.half()`` and ``.to(dtype=...)`` cast floating state
         # only; a probe that came back integral means no compute-dtype change.
-        if probe.is_floating_point() or probe.is_complex():
+        if (probe.is_floating_point() or probe.is_complex()) and self._runtime_dtype != probe.dtype:
             self._runtime_dtype = probe.dtype
+            self._trace_program = self._resolve_shapes(None, cache=False)
         # Every validated signature named the old device and dtype. A move is
         # also a natural point to re-check registered state in full, which
         # catches the edits no registration hook reports (see _state_seen).
@@ -924,6 +931,17 @@ class GraphModule(nn.Module):
             raise self._port_error(port, value, dtype, batch,
                                    f"expected device {self._runtime_device}, got {value.device}")
 
+    def _check_traced(self, value, expected, dtype, port, batch):
+        # Static predicates become Dynamo guards. Symbolic batch constraints
+        # remain traceable without formatting SymInts in an exception.
+        expected = self._resolve(port[1], batch)
+        label = "E_RUNTIME: " + port[0]
+        torch._assert(isinstance(value, torch.Tensor), label + " expected a tensor")
+        torch._assert(value.ndim > 0 and value.shape == expected, label + " shape mismatch")
+        torch._assert(value.shape[0] > 0, label + " expected a positive batch size")
+        torch._assert(dtype is None or value.dtype == dtype, label + " dtype mismatch")
+        torch._assert(value.device == self._runtime_device, label + " device mismatch")
+
     def _split_result(self, result, out_ports, out_set, node_id):
         """A module's return value as one value per declared output port."""
         if isinstance(result, dict) and set(result) == out_set:
@@ -950,11 +968,15 @@ class GraphModule(nn.Module):
         # The resolved expectations depend on the batch and on the dtype casts
         # ``_apply`` records; the device is read live by ``_check`` instead, so
         # ``.to(device)`` needs no invalidation.
-        compiled = self._compiled
-        if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
-            compiled = self._resolve_shapes(batch, cache=not compiling)
+        if compiling and not _compiling_simulated:
+            compiled = self._trace_program
+            check = self._check_traced
+        else:
+            compiled = self._compiled
+            if batch != compiled[0] or self._runtime_dtype is not compiled[1]:
+                compiled = self._resolve_shapes(batch, cache=not compiling)
+            check = self._check
         _, _, input_program, node_program, output_program = compiled
-        check = self._check
         values = {}
         for (name, key, expected, dtype, port), value in zip(input_program, inputs):
             check(value, expected, dtype, port, batch)
@@ -965,15 +987,12 @@ class GraphModule(nn.Module):
                 value = values[ref]
                 check(value, expected, dtype, port, batch)
                 bound.append(value)
-            if compiling:
-                result = module(*bound)
-            elif cache is not None and getattr(module, "_supports_inference_cache", False):
+            if cache is not None and getattr(module, "_supports_inference_cache", False):
                 result = module(*bound, cache=cache, node_id=node_id)
-            elif self.training and node_id in self.checkpoint_nodes:
-                if any(isinstance(a, torch.Tensor) and a.requires_grad for a in bound):
-                    result = torch.utils.checkpoint.checkpoint(module, *bound, use_reentrant=False)
-                else:
-                    result = module(*bound)
+            elif self.training and node_id in self.checkpoint_nodes and torch.is_grad_enabled():
+                result = _checkpoint(module, *bound, use_reentrant=False)
+            elif compiling:
+                result = module(*bound)
             else:
                 try:
                     result = module(*bound)
@@ -1058,61 +1077,59 @@ class GraphModule(nn.Module):
             if single:
                 return next(iter(outputs.values()))
             return outputs
-        old_cache = getattr(self, "_active_cache", None)
-        self._active_cache = cache
-        try:
-            generation = _watch_generation
-            signature = self._signature(inputs)
-            # _record_stores, compared: submodules and empty stores by identity,
-            # the other stores by length and which values are None.
-            changed = self._stores_changed()
-            if changed or generation != self._state_seen or signature not in self._validated or cache is not None:
-                outputs = self._validate(inputs, signature, generation, changed, cache=cache)
-                if single:
-                    return next(iter(outputs.values()))
-                return outputs
-            padding, program, output_slots = self._fast
-            values = [*inputs, *padding]
-            try:
-                for module, ins, out, node, to_clear in program:
-                    node_id = node[4]
-                    args = (values[ins],) if type(ins) is int else tuple(ins(values)) if ins is not None else ()
-                    if cache is not None and getattr(module, "_supports_inference_cache", False):
-                        result = module(*args, cache=cache, node_id=node_id)
-                    elif self.training and node_id in self.checkpoint_nodes:
-                        if any(isinstance(a, torch.Tensor) and a.requires_grad for a in args):
-                            result = torch.utils.checkpoint.checkpoint(module, *args, use_reentrant=False)
-                        else:
-                            result = module(*args)
-                    else:
-                        result = (module(values[ins]) if type(ins) is int
-                                  else module(*ins(values)) if ins is not None
-                                  else module())
-                    if out is not None and type(result) is _Tensor:
-                        values[out] = result
-                    else:
-                        _, outs, out_ports, out_set, node_id = node
-                        for slot, value in zip(outs, self._split_result(result, out_ports, out_set, node_id)):
-                            values[slot] = value
-                    for slot in to_clear:
-                        values[slot] = None
-            except Exception as error:
-                ins, _, _, _, node_id = node
-                leading = values[0]
-                self._annotate_failure(node_id, error, [values[slot] for slot in ins],
-                                       leading.shape[0] if leading.ndim else None, after_validation=True)
-                raise
-            if _watch_generation != generation:
-                # Something registered state while this call ran --- perhaps one
-                # of its own modules. Check it now, as the first call would have.
-                generation = _watch_generation
-                self._verify_state("forward")
-                self._state_checked(generation)
+        generation = _watch_generation
+        signature = self._signature(inputs)
+        # _record_stores, compared: submodules and empty stores by identity,
+        # the other stores by length and which values are None.
+        changed = self._stores_changed()
+        if changed or generation != self._state_seen or signature not in self._validated:
+            outputs = self._validate(inputs, signature, generation, changed)
             if single:
-                return values[output_slots[0][1]]
-            return OutputDict((name, values[slot]) for name, slot in output_slots)
-        finally:
-            self._active_cache = old_cache
+                return next(iter(outputs.values()))
+            return outputs
+        padding, program, output_slots = self._fast
+        values = [*inputs, *padding]
+        try:
+            for module, ins, out, node, to_clear in program:
+                node_id = node[4]
+                if self.training and node_id in self.checkpoint_nodes and torch.is_grad_enabled():
+                    args = (values[ins],) if type(ins) is int else ins(values) if ins is not None else ()
+                    result = _checkpoint(module, *args, use_reentrant=False)
+                else:
+                    result = (module(values[ins]) if type(ins) is int
+                              else module(*ins(values)) if ins is not None
+                              else module())
+                if out is not None and type(result) is _Tensor:
+                    values[out] = result
+                else:
+                    _, outs, out_ports, out_set, node_id = node
+                    for slot, value in zip(outs, self._split_result(result, out_ports, out_set, node_id)):
+                        values[slot] = value
+                for slot in to_clear:
+                    values[slot] = None
+        except Exception as error:
+            ins, _, _, _, node_id = node
+            leading = values[0]
+            self._annotate_failure(node_id, error, [values[slot] for slot in ins],
+                                   leading.shape[0] if leading.ndim else None, after_validation=True)
+            raise
+        if _watch_generation != generation:
+            # Something registered state while this call ran --- perhaps one
+            # of its own modules. Check it now, as the first call would have.
+            generation = _watch_generation
+            self._verify_state("forward")
+            self._state_checked(generation)
+        if single:
+            return values[output_slots[0][1]]
+        return OutputDict((name, values[slot]) for name, slot in output_slots)
+
+    def _bind_cache_port(self, args, named, cache):
+        if isinstance(cache, InferenceCache):
+            if "cache" in self._input_names[len(args):]:
+                raise HNDLError("E_BINDING", "supply the 'cache' tensor positionally when also passing a decoding session")
+            return cache
+        named["cache"] = cache
+        return None
 
     def _bind(self, args, kwargs):
         """Bind runtime tensors to the declared external inputs, in order."""
@@ -1139,8 +1156,8 @@ class GraphModule(nn.Module):
         cache: InferenceCache | None = None,
         **named: torch.Tensor,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
-        if "cache" in named and cache is None:
-            cache = named.pop("cache")
+        if cache is not None and "cache" in self._input_set:
+            cache = self._bind_cache_port(inputs, named, cache)
         single = bool(inputs and not named and self._single_output)
         return self._execute(self._bind(inputs, named), single=single, cache=cache)
 
@@ -1276,8 +1293,8 @@ class Network(GraphModule):
         cache: InferenceCache | None = None,
         **named: torch.Tensor,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
-        if "cache" in named and cache is None:
-            cache = named.pop("cache")
+        if cache is not None and "cache" in self._input_set:
+            cache = self._bind_cache_port(inputs, named, cache)
         return self._execute(self._bind(inputs, named), single=self._single_output, cache=cache)
 
 
@@ -1357,7 +1374,7 @@ def construct(spec, node, device, dtype, initialization_seed=None):
     return layer.to(device=device_obj, dtype=dtype)
 
 
-def _state_bytes(module, compute_dtype=None):
+def _state_bytes(module, compute_dtype=None, *, tied_tensors=()):
     """Unique registered parameter/buffer storage, including nonpersistent buffers.
 
     With ``compute_dtype`` the count assumes floating tensors will be cast to
@@ -1365,6 +1382,8 @@ def _state_bytes(module, compute_dtype=None):
     """
     storages = {}
     for value in (*module.parameters(), *module.buffers()):
+        if value in tied_tensors:
+            continue
         storage = value.untyped_storage()
         key = (value.device, storage._cdata) if value.device.type == "meta" else (value.device, storage.data_ptr())
         if compute_dtype is not None and value.is_floating_point():
@@ -1380,20 +1399,30 @@ def parameter_counts(
     plan: ResolvedPlan,
     *,
     registry: Registry | None = None,
+    unique: bool = False,
 ) -> dict[str, int | None]:
-    """Per-node parameter counts from an allocation-free meta-device construction."""
+    """Count parameters per node using allocation-free meta-device construction.
+
+    With ``unique=True``, charge a tied parameter only to its first owner so
+    the counts sum to the model total. An unavailable meta probe returns None.
+    """
     from .registry import Registry
     registry = registry if registry is not None else plan.registry or Registry.builtins()
     counts: dict[str, int | None] = {}
+    sources = {ref.split(".", 1)[0] for node in plan.nodes for ref in node.parameter_ties.values()}
+    layers = {}
     with registry.activated():
         for node in plan.nodes:
             spec = registry.by_identity(node.op)
             try:
                 layer = construct(spec, node, "meta", DTYPES[plan.dtype])
+                tied = _tie_parameters(layer, node, layers, compute_dtype=DTYPES[plan.dtype])
             except Exception:
                 counts[node.id] = None
                 continue
-            counts[node.id] = sum(p.numel() for p in layer.parameters())
+            if node.id in sources:
+                layers[f"n_{node.id}"] = layer
+            counts[node.id] = sum(p.numel() for p in layer.parameters() if not unique or p not in tied)
     return counts
 
 
@@ -1528,6 +1557,37 @@ def _set_parameter_or_buffer(module: nn.Module, name: str, tensor: torch.Tensor)
     for part in parts[:-1]:
         curr = getattr(curr, part)
     setattr(curr, parts[-1], tensor)
+
+
+def _tie_parameters(layer, node, modules, *, compute_dtype=None):
+    """Bind declared ties to earlier layers on the build or meta device."""
+    tied_tensors = set()
+    for target_p, source_ref in node.parameter_ties.items():
+        if "." not in source_ref:
+            raise HNDLError("E_SCHEMA", f"Tied parameter source reference must be 'node_id.param', got {source_ref!r}", node=node.id)
+        source_node_id, source_p = source_ref.split(".", 1)
+        source_key = f"n_{source_node_id}"
+        if source_key not in modules:
+            raise HNDLError("E_SCHEMA", f"Tied parameter source node {source_node_id!r} not found or not preceding {node.id}", node=node.id)
+        source_layer = modules[source_key]
+        try:
+            source_tensor = _get_parameter_or_buffer(source_layer, source_p)
+        except AttributeError:
+            raise HNDLError("E_SCHEMA", f"Tied parameter source {source_ref} does not exist", node=node.id)
+        try:
+            target_tensor = _get_parameter_or_buffer(layer, target_p)
+        except AttributeError:
+            raise HNDLError("E_SCHEMA", f"Tied parameter target {target_p} does not exist on {node.id}", node=node.id)
+        if source_tensor.shape != target_tensor.shape:
+            raise HNDLError("E_SCHEMA", f"Tied parameter shape mismatch: {source_ref} shape {list(source_tensor.shape)} != {target_p} shape {list(target_tensor.shape)}", node=node.id)
+        # A probe retains any explicit constructor dtype. Real modules have
+        # already been converted to their plan compute dtype before tying.
+        both_cast = compute_dtype is not None and source_tensor.is_floating_point() and target_tensor.is_floating_point()
+        if source_tensor.dtype != target_tensor.dtype and not both_cast:
+            raise HNDLError("E_SCHEMA", f"Tied parameter dtype mismatch: {source_ref} dtype {source_tensor.dtype} != {target_p} dtype {target_tensor.dtype}", node=node.id)
+        _set_parameter_or_buffer(layer, target_p, source_tensor)
+        tied_tensors.add(source_tensor)
+    return tied_tensors
 
 
 def _apply_depth_scaled_init(plan: ResolvedPlan, modules: Mapping[str, nn.Module]) -> None:
@@ -1698,17 +1758,28 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
 
     # Bound registered storage with an allocation-free meta construction first.
     total = 0
-    unbounded = []
+    unbounded = set()
+    tie_sources = {ref.split(".", 1)[0] for node in plan.nodes for ref in node.parameter_ties.values()}
+    probes = {}
     with registry.activated():
         for node in plan.nodes:
+            # If an earlier source cannot be probed, size this node after
+            # binding the real tensors. This also handles transitive ties.
+            if any(ref.split(".", 1)[0] in unbounded for ref in node.parameter_ties.values()):
+                unbounded.add(node.id)
+                continue
             try:
                 probe = construct(specs[node.id], node, "meta", dtype)
             except Exception:
-                unbounded.append(node.id)
+                unbounded.add(node.id)
                 continue
-            total += _state_bytes(probe, dtype)
+            tied = _tie_parameters(probe, node, probes, compute_dtype=dtype) if node.parameter_ties else ()
+            total += _state_bytes(probe, dtype, tied_tensors=tied)
             if total > bounds["max_state_bytes"]:
                 raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes before allocation", node=node.id)
+            if node.id in tie_sources:
+                probes[f"n_{node.id}"] = probe
+    probes.clear()
 
     modules = OrderedDict()
     module_owners, tensor_owners, storage_owners = {}, {}, {}
@@ -1731,34 +1802,10 @@ def _build(plan, *, device, initialization_seed=None, registry=None, facade=Fals
     with registry.activated(), _initialization_rng(device, initialization_seed):
         for node in plan.nodes:
             layer = construct(specs[node.id], node, device, dtype, initialization_seed=initialization_seed)
-            tie = node.source.get("tie") if node.source else None
-            tied_tensors = set()
-            if tie:
-                for target_p, source_ref in tie.items():
-                    if "." not in source_ref:
-                        raise HNDLError("E_SCHEMA", f"Tied parameter source reference must be 'node_id.param', got {source_ref!r}", node=node.id)
-                    source_node_id, source_p = source_ref.split(".", 1)
-                    source_key = f"n_{source_node_id}"
-                    if source_key not in modules:
-                        raise HNDLError("E_SCHEMA", f"Tied parameter source node {source_node_id!r} not found or not preceding {node.id}", node=node.id)
-                    source_layer = modules[source_key]
-                    try:
-                        source_tensor = _get_parameter_or_buffer(source_layer, source_p)
-                    except AttributeError:
-                        raise HNDLError("E_SCHEMA", f"Tied parameter source {source_ref} does not exist", node=node.id)
-                    try:
-                        target_tensor = _get_parameter_or_buffer(layer, target_p)
-                    except AttributeError:
-                        raise HNDLError("E_SCHEMA", f"Tied parameter target {target_p} does not exist on {node.id}", node=node.id)
-                    if source_tensor.shape != target_tensor.shape:
-                        raise HNDLError("E_SCHEMA", f"Tied parameter shape mismatch: {source_ref} shape {list(source_tensor.shape)} != {target_p} shape {list(target_tensor.shape)}", node=node.id)
-                    if source_tensor.dtype != target_tensor.dtype:
-                        raise HNDLError("E_SCHEMA", f"Tied parameter dtype mismatch: {source_ref} dtype {source_tensor.dtype} != {target_p} dtype {target_tensor.dtype}", node=node.id)
-                    _set_parameter_or_buffer(layer, target_p, source_tensor)
-                    tied_tensors.add(source_tensor)
+            tied_tensors = _tie_parameters(layer, node, modules)
             check_ownership(layer, node.id, tied_tensors=tied_tensors)
             if node.id in unbounded:
-                total += _state_bytes(layer)
+                total += _state_bytes(layer, tied_tensors=tied_tensors)
                 if total > bounds["max_state_bytes"]:
                     raise HNDLError("E_RESOURCE", "Plan exceeds max_state_bytes", node=node.id)
             modules[f"n_{node.id}"] = layer

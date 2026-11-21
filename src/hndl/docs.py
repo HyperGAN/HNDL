@@ -113,7 +113,7 @@ def render_operator(spec, registry):
         kwargs = {"input_dtype": example.input_dtype} if example.input_dtype else {}
         plan = resolve(example.source, input_shape=example.input_shape, output_shape=example.output_shape,
                        registry=registry, **kwargs)
-        counts = parameter_counts(plan, registry=registry)
+        counts = parameter_counts(plan, registry=registry, unique=True)
         total = sum(count for count in counts.values() if count is not None)
         lines += ["```text", _shape_table(plan), "```", "", f"Parameters: {total:,}", ""]
     return "\n".join(lines).rstrip() + "\n"
@@ -157,7 +157,8 @@ def render_networks(directory, registry=None):
         kwargs = {key: meta[key] for key in ("input_dtype", "dtype") if key in meta}
         plan = resolve(source, input_shape=contract_value(meta["input_shape"]),
                        output_shape=contract_value(meta["output_shape"]), registry=registry, **kwargs)
-        total = sum(count for count in parameter_counts(plan, registry=registry).values() if count is not None)
+        counts = parameter_counts(plan, registry=registry, unique=True)
+        total = sum(count for count in counts.values() if count is not None)
         contract = "Input " + _contract_text(meta["input_shape"])
         if "input_dtype" in meta:
             contract += f" (`input_dtype=\"{meta['input_dtype']}\"`)"

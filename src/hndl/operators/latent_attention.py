@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from ..inference import _decode_mask, _kv_append
 from ..errors import HNDLError
 from ..operator import PAIR, Arg, Example, operator
-from .rope import compute_rope_tables
+from .rope import _cached_rope_tables, compute_rope_tables
 
 
 def _rotate_half(tensor):
@@ -301,27 +301,11 @@ class LatentAttention(nn.Module):
         return res
 
 
-    def _tables(self, positions, dim, device, dtype):
-        if torch.compiler.is_compiling():
-            cos_4d, sin_4d = compute_rope_tables(
-                positions, dim, device, dtype,
-                theta=self.rope_theta, rope_scaling=self.rope_scaling,
-                rope_scale=self.rope_scale, spatial_shape=self.spatial_shape,
-            )
-            return cos_4d[0, 0], sin_4d[0, 0]
-        key = (dim, str(device), dtype, self.rope_theta, self.rope_scaling, self.rope_scale, self.spatial_shape)
-        hit = self._cache.get(key)
-        if hit is not None and hit[0].shape[0] >= positions:
-            return hit[0][:positions], hit[1][:positions]
-        cos_4d, sin_4d = compute_rope_tables(
-            positions, dim, device, dtype,
-            theta=self.rope_theta, rope_scaling=self.rope_scaling,
-            rope_scale=self.rope_scale, spatial_shape=self.spatial_shape,
-        )
-        cos = cos_4d[0, 0]
-        sin = sin_4d[0, 0]
-        self._cache[key] = (cos, sin)
-        return cos, sin
+    def _tables(self, end, dim, device, dtype, *, start=0, capacity=None):
+        cos, sin = _cached_rope_tables(self._cache, end, dim, device, dtype, self.rope_theta,
+                                       self.rope_scaling, self.rope_scale, self.spatial_shape,
+                                       start=start, capacity=capacity)
+        return cos[0, 0], sin[0, 0]
 
     def absorb_weights(self):
         """Absorb k_up into q_proj and v_up into o_proj for low-memory inference.
@@ -365,8 +349,8 @@ class LatentAttention(nn.Module):
         q_input = self.q_norm(self.q_down(x)) if self.q_lora_rank > 0 else x
         q = self.q_up(q_input).view(b, t, self.heads, -1).transpose(1, 2)
         if self.qk_rope_head_dim > 0:
-            cos, sin = self._tables(end, self.qk_rope_head_dim, x.device, x.dtype)
-            cos, sin = cos[offset:end], sin[offset:end]
+            cos, sin = self._tables(end, self.qk_rope_head_dim, x.device, x.dtype,
+                                    start=offset, capacity=cache.max_seq_len)
             kr_raw = self.k_rope_proj(x)
             kr = kr_raw * cos.unsqueeze(0) + _rotate_half(kr_raw) * sin.unsqueeze(0)
             qr_raw = q[..., self.qk_nope_head_dim:]

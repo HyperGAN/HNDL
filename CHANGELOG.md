@@ -1,7 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 (2026-11-20)
 
+- Preserve hooks and custom expert projections across MoE dispatch modes and compute group boundaries from sorted routes to reduce runtime and temporary allocations.
+- Reuse length-independent rotary tables during decoding, preserve YaRN length and inference-to-training semantics, bound local-attention KV storage by its window, and reduce per-token state-guard traversal.
+- Isolate FlexAttention compilation across execution modes and head layouts, and retain its softcap storage across CUDA graph replay. On PyTorch 2.6, automatic attention uses the reference implementation for gradient-carrying calls and explicit Flex training reports the upstream gradient issue. Native deployment fingerprints support attention code that indexes tensors with slices and ellipses.
+- Load standalone native packages from read-only directories with checksum and environment verification. Managed caches still coordinate readers and writers.
+- Move local branch and worktree housekeeping to an explicit maintainer check and recognize an optional packaging tool correctly in checkouts with a local `build/` directory.
+- Enforce shape, dtype, device and batch contracts under compiled prepared execution, including intermediate custom operator outputs and cold full-graph calls on PyTorch 2.6.
+- Honor non-reentrant activation checkpointing for first-layer trainable weights with ordinary input tensors, and reduce dispatch overhead in eager and prepared execution.
+- Accept named tensor inputs called `cache` alongside the positional-input convention for incremental sessions.
+- Include parameter ties in plan digests and diffs, count shared storage once in build receipts and resource limits, and migrate saved tied plans after verifying their original checksums. `parameter_counts(plan, unique=True)` attributes shared weights to their first owner for model totals.
+- Report activation bytes by port dtype, respect non-affine normalization, and expose decoder cache capacity and latent-attention absorption when estimating persistent storage.
+- Export all bundled recipes as standalone PyTorch models with their helper functions, initialization, trainability and nested parameter ties. Unsupported custom dependencies now identify the affected node during export.
+- Load operator contracts on demand for CLI inspection, diagrams and recipe checks. Static inspection now warns about the deprecated `--device` option and rejects unrecognized device names.
+- Add a [correctness and optimization review](https://github.com/HyperGAN/HNDL/blob/v0.12.0/reports/optimization-2026-11-20.md#implementation-and-verification-results) with execution parity findings, CPU latency measurements, and CUDA memory comparisons.
 - The CPU ParticleGAN example and integration tests use ParticleGAN 0.11.0 with the explicit BiSPF recipe.
 - Preserve the tested source tag when publishing a GitHub release draft.
 - Releases from `master` mirror the same tested wheel and source archive to GitHub after PyPI verifies their hashes.
