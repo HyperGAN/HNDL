@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..errors import HNDLError
+from ._activations import ACTIVATION_NAMES
 from ..operator import Arg, Example, MAX_DIMENSION_LITERAL, operator
 from ._relations import non_image
 from ._packing import _global_call_hooks, _has_call_hooks, clear_packed_cache, expert_parameters, guard_expert_input
@@ -134,7 +135,7 @@ class SwiGLUExpert(nn.Module):
         "hidden": Arg(int, min=1, max=MAX_DIMENSION_LITERAL, help="Inner width of every expert's feed-forward."),
         "top_k": Arg(int, 2, min=1, positional=True,
                      help="Experts each token is routed to; must not exceed experts."),
-        "activation": Arg(str, "gelu", positional=False, choices=tuple(ACTIVATIONS),
+        "activation": Arg(str, "gelu", positional=False, choices=ACTIVATION_NAMES,
                           help='Nonlinearity inside each expert: "gelu", "gelu_tanh", "relu" or "silu".'),
         "expert_kind": Arg(str, "mlp", choices=("mlp", "swiglu"), positional=False, since="0.9.0",
                            help='Expert architecture: "mlp" (2-layer) or "swiglu" (3-projection gated).'),

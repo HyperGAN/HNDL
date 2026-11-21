@@ -2,9 +2,10 @@ import torch
 from torch import nn
 
 from ..errors import HNDLError
+from ._activations import ACTIVATION_NAMES
 from ..operator import Arg, Example, operator
 from .attention import Attention, _reference as _attention_reference
-from .feed_forward import ACTIVATIONS, FeedForward, _reference as _feed_forward_reference
+from .feed_forward import FeedForward, _reference as _feed_forward_reference
 from .layer_norm import LayerNorm, _reference as _layer_norm_reference
 from .rms_norm import RMSNorm, _reference as _rms_norm_reference
 from .swiglu import SwiGLU, _reference as _swiglu_reference
@@ -72,7 +73,7 @@ def _reference(module):
         "heads": Arg(int, min=1, help="Number of attention heads; must divide the model width D."),
         "mlp_ratio": Arg(int, 4, min=1, positional=False,
                          help="Inner width of the feed-forward as a multiple of D; hidden = mlp_ratio * D."),
-        "activation": Arg(str, "gelu", positional=False, choices=tuple(ACTIVATIONS),
+        "activation": Arg(str, "gelu", positional=False, choices=ACTIVATION_NAMES,
                           help="Nonlinearity inside the feed-forward branch."),
         "norm": Arg(str, "layer_norm", positional=False, choices=NORMS,
                     help='Normalization in front of each branch: "layer_norm" or "rms_norm".'),

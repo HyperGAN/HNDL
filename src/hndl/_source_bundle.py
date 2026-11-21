@@ -39,8 +39,11 @@ def _definition(node):
 
 @lru_cache(maxsize=128)
 def _definitions(module):
+    return top_level_bindings(ast.parse(inspect.getsource(module)))
+
+
+def top_level_bindings(tree):
     """Index top-level bindings, preserving the originating import for each name."""
-    tree = ast.parse(inspect.getsource(module))
     bindings = {}
     for node in tree.body:
         if isinstance(node, (ast.ClassDef, ast.FunctionDef)):

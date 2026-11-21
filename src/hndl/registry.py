@@ -94,7 +94,7 @@ class Registry:
             return self._aliases[alias]
         except (KeyError, TypeError):
             import difflib
-            matches = difflib.get_close_matches(str(alias), self._aliases.keys(), n=1) if isinstance(alias, str) else []
+            matches = difflib.get_close_matches(str(alias), self.aliases, n=1) if isinstance(alias, str) else []
             suggestion = f". Did you mean {matches[0]!r}?" if matches else ""
             raise HNDLError("E_OPERATOR", f"Unknown operator alias {alias!r}; register it explicitly{suggestion}") from None
 
