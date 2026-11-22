@@ -7,11 +7,14 @@ import torch
 from .errors import HNDLError
 
 
+_get_tracing_state = torch._C._get_tracing_state
+
 _TOKENWISE = frozenset({
     "embedding", "linear", "relu", "gelu", "silu", "sigmoid", "tanh", "elu",
-    "leaky_relu", "quick_gelu", "hardswish", "identity", "dropout", "drop_path",
+    "leaky_relu", "quick_gelu", "hardswish", "mish", "softplus", "clamp",
+    "identity", "dropout", "drop_path",
     "layer_norm", "rms_norm", "l2_norm", "softmax", "dy_tanh", "learned_scale",
-    "scale", "cast", "add", "sub", "broadcast_mul", "broadcast_add", "where",
+    "scale", "cast", "add", "sub", "mul", "broadcast_mul", "broadcast_add", "where",
     "swiglu", "feed_forward", "moe", "adaptive_norm", "adaln_zero", "split",
     "chunk", "concat", "sinusoidal_embed",
 })
@@ -117,18 +120,30 @@ def execute(model, inputs, cache, *, single):
     try:
         generation = runtime._watch_generation
         token = (model._preparation_epoch, generation)
-        if getattr(model, "_stream_token", None) != token or model._stores_changed():
+        stores_already_checked = (
+            cache._graph_guard is not None
+            and cache._stream_verified_token == token
+        )
+        if getattr(model, "_stream_token", None) != token or (
+            not stores_already_checked and model._stores_changed()
+        ):
             model._verify_state("build")
             model._stream_axes = _axes(model)
             object.__setattr__(model, "_stream_executor", execution_module(model, cached=True))
             model._stream_validated = set()
             model._stream_token = token
         axes = model._stream_axes
-        counts = {value.shape[axes[f"input:{name}"]]
-                  for name, value in zip(model._input_names, inputs) if f"input:{name}" in axes}
-        if len(counts) != 1 or next(iter(counts)) < 1:
-            raise HNDLError("E_RUNTIME", "incremental sequence inputs must have the same positive chunk length")
-        count = next(iter(counts))
+        if len(inputs) == 1:
+            axis = axes.get(f"input:{model._input_names[0]}")
+            count = inputs[0].shape[axis] if axis is not None else 0
+            if count < 1:
+                raise HNDLError("E_RUNTIME", "incremental sequence inputs must have the same positive chunk length")
+        else:
+            counts = {value.shape[axes[f"input:{name}"]]
+                      for name, value in zip(model._input_names, inputs) if f"input:{name}" in axes}
+            if len(counts) != 1 or next(iter(counts)) < 1:
+                raise HNDLError("E_RUNTIME", "incremental sequence inputs must have the same positive chunk length")
+            count = next(iter(counts))
         signature = model._signature(inputs)
         if signature not in model._stream_validated:
             result = _checked(model, inputs, cache, axes, count)
@@ -138,10 +153,18 @@ def execute(model, inputs, cache, *, single):
                 model._stream_validated.clear()
             model._stream_validated.add(signature)
         else:
-            result = model._stream_executor(cache, *inputs)
+            exec_mod = model._stream_executor
+            if (exec_mod._can_direct_forward
+                    and not any(exec_mod._hook_dicts)
+                    and not _get_tracing_state()):
+                result = exec_mod._forward_fast(cache, *inputs)
+            else:
+                result = exec_mod.forward(cache, *inputs)
             if generation != runtime._watch_generation:
                 model._verify_state("forward")
                 model._state_checked(runtime._watch_generation)
+        if cache._graph_guard is not None and generation == runtime._watch_generation:
+            cache._stream_verified_token = token
         success = True
         if model._single_output:
             return result if single else runtime.OutputDict({next(iter(model.plan.outputs)): result})

@@ -46,6 +46,7 @@ _DERIVED_TABLES = {
     "hndl.operators.cross_attention": {"_mask_cache"},
     "hndl.operators.rope": {"_cache"},
     "hndl.operators.latent_attention": {"_cache"},
+    "hndl.operators.sinusoidal_embed": {"_freq_cache"},
 }
 _PREPARED_METADATA = frozenset({
     "_hndl_packed_layouts", "_hndl_packing_blocked", "_hndl_attention_masks", "_hndl_attention_failures",
@@ -62,29 +63,25 @@ def _digest(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
-class _HashWriter:
-    def __init__(self):
-        self.hash = hashlib.sha256()
-
-    def write(self, data):
-        self.hash.update(data)
-        return len(data)
-
-    def flush(self):
-        pass
-
-
 def _tensor_digest(value):
+    import ctypes
     import torch
 
     if value.layout != torch.strided or value.is_quantized or value.device.type == "meta":
         raise HNDLError("E_UNSUPPORTED", "deployment requires dense, materialized tensors")
-    # Streaming serialization avoids a dependency on NumPy, supports bfloat16,
-    # and limits temporary memory to the largest individual tensor. Cloning
-    # removes unrelated storage bytes behind views from the fingerprint.
-    writer = _HashWriter()
-    torch.save(value.detach().cpu().contiguous().clone(), writer)
-    return writer.hash.hexdigest()
+    # Hash raw contiguous CPU storage bytes directly (zero NumPy, supports
+    # bfloat16/float16/etc.). For contiguous views, data_ptr() already accounts
+    # for storage_offset and nbytes covers only this tensor's elements.
+    tensor = value.detach()
+    if tensor.device.type != "cpu" or not tensor.is_contiguous():
+        tensor = tensor.cpu().contiguous()
+    digest = hashlib.sha256()
+    digest.update(f"{tensor.dtype}:{tuple(tensor.shape)}:".encode())
+    nbytes = tensor.numel() * tensor.element_size()
+    if nbytes:
+        buf = (ctypes.c_ubyte * nbytes).from_address(tensor.data_ptr())
+        digest.update(memoryview(buf))
+    return digest.hexdigest()
 
 
 def _file_digest(path):
@@ -179,6 +176,20 @@ def _state(model):
     for kind, tensors in (("parameter", model.named_parameters()), ("buffer", model.named_buffers())):
         values.extend((kind, name, _tensor_digest(tensor)) for name, tensor in tensors)
     return _digest(values)
+
+
+def _state_snapshot(model):
+    """Lightweight metadata snapshot to detect mid-export state mutations without re-hashing."""
+    snap = []
+    for kind, tensors in (("parameter", model.named_parameters()), ("buffer", model.named_buffers())):
+        for name, tensor in tensors:
+            try:
+                version = tensor._version
+            except RuntimeError:
+                return None
+            snap.append((kind, name, id(tensor), version, tensor.data_ptr(),
+                         tensor.shape, tensor.stride(), tensor.dtype, tensor.device))
+    return tuple(snap)
 
 
 def _environment(device):
@@ -316,17 +327,19 @@ def _evict(directory, keep, max_entries, max_bytes):
             continue
         package = manifest.with_suffix(".pt2")
         if package.is_file():
-            entries.append((manifest.stat().st_mtime_ns, manifest.parent,
-                            manifest.stat().st_size + package.stat().st_size))
+            mstat = manifest.stat()
+            entries.append((mstat.st_mtime_ns, manifest.parent,
+                            mstat.st_size + package.stat().st_size))
     total = sum(size for _, _, size in entries)
+    remaining = len(entries)
     for _, path, size in sorted(entries):
-        if len(entries) <= max_entries and total <= max_bytes:
+        if remaining <= max_entries and total <= max_bytes:
             break
         if path == keep:
             continue
         shutil.rmtree(path)
         total -= size
-        entries = [entry for entry in entries if entry[1] != path]
+        remaining -= 1
 
 
 def export(model, example_inputs, directory, *, cache=True, max_entries=8,
@@ -366,6 +379,7 @@ def export(model, example_inputs, directory, *, cache=True, max_entries=8,
     values = _inputs(model, example_inputs)
     with torch.no_grad():
         model(*values)  # validate contracts and materialize derived lookup tables
+    state_snap = _state_snapshot(model)
     specification = {
         "plan": model.plan.semantic_digest, "implementation": _implementation(model),
         "state": _state(model), "environment": _environment(values[0].device),
@@ -386,7 +400,8 @@ def export(model, example_inputs, directory, *, cache=True, max_entries=8,
     specification["graph"] = _digest({"code": program.graph_module.code,
                                       "signature": str(program.graph_signature),
                                       "constants": _semantic(program.constants)})
-    if _state(model) != specification["state"] or _implementation(model) != specification["implementation"]:
+    state_changed = state_snap is None or _state_snapshot(model) != state_snap
+    if (state_changed and _state(model) != specification["state"]) or _implementation(model) != specification["implementation"]:
         raise HNDLError("E_DEPLOYMENT", "model state or Python settings changed during deployment export")
     cache_key = _digest(specification)
     directory = Path(directory).expanduser().resolve()
@@ -411,7 +426,8 @@ def export(model, example_inputs, directory, *, cache=True, max_entries=8,
         with torch.no_grad():
             inductor.aoti_compile_and_package(program, package_path=str(staging / "model.pt2"),
                                               inductor_configs=dict(configs))
-        if _state(model) != specification["state"] or _implementation(model) != specification["implementation"]:
+        state_changed = state_snap is None or _state_snapshot(model) != state_snap
+        if (state_changed and _state(model) != specification["state"]) or _implementation(model) != specification["implementation"]:
             raise HNDLError("E_DEPLOYMENT", "model state or Python settings changed during deployment compilation")
         manifest = {"schema_version": _SCHEMA, "cache_key": cache_key, "specification": specification,
                     "package_sha256": _file_digest(staging / "model.pt2")}
@@ -433,34 +449,60 @@ class DeploymentModel:
     """A loaded native inference callable with fixed shape/dtype/stride guards."""
 
     def __init__(self, runner, manifest, *, run_single_threaded=False):
+        import torch
+
         self._runner = runner
         self.manifest = manifest
         self._inputs = tuple({**contract, "shape": list(contract["shape"]), "stride": list(contract["stride"])}
                              for contract in manifest["specification"]["inputs"])
         self._names = tuple(contract["name"] for contract in self._inputs)
+        self._n_inputs = len(self._inputs)
+        self._specs = tuple(
+            (
+                contract["name"],
+                torch.Size(contract["shape"]),
+                tuple(contract["stride"]),
+                getattr(torch, contract["dtype"].removeprefix("torch.")),
+                torch.device(contract["device"]),
+                contract,
+            )
+            for contract in self._inputs
+        )
+        self._Tensor = torch.Tensor
+        self._is_grad_enabled = torch.is_grad_enabled
+        self._no_grad = torch.no_grad
+        self._cuda = torch.cuda
         self._serial_lock = threading.Lock() if run_single_threaded else None
         self._serial_stream = None
 
     def __call__(self, *inputs, **named):
-        import torch
-
-        if len(inputs) > len(self._names):
-            raise HNDLError("E_BINDING", f"deployment expects inputs {self._names}")
-        values = dict(zip(self._names, inputs))
-        if values.keys() & named.keys():
-            raise HNDLError("E_BINDING", "deployment input was supplied twice")
-        values.update(named)
-        if set(values) != set(self._names):
-            raise HNDLError("E_BINDING", f"deployment expects inputs {self._names}")
-        bound = tuple(values[name] for name in self._names)
-        for value, contract in zip(bound, self._inputs):
-            if not isinstance(value, torch.Tensor) or _contract(contract["name"], value) != contract:
-                raise HNDLError("E_RUNTIME", f"deployment input {contract['name']!r} must match {contract}")
+        if not named and len(inputs) == self._n_inputs:
+            bound = inputs
+        else:
+            if len(inputs) > self._n_inputs:
+                raise HNDLError("E_BINDING", f"deployment expects inputs {self._names}")
+            values = dict(zip(self._names, inputs))
+            if values.keys() & named.keys():
+                raise HNDLError("E_BINDING", "deployment input was supplied twice")
+            values.update(named)
+            if set(values) != set(self._names):
+                raise HNDLError("E_BINDING", f"deployment expects inputs {self._names}")
+            bound = tuple(values[name] for name in self._names)
+        _Tensor = self._Tensor
+        for value, (name, shape, stride, dtype, device, contract) in zip(bound, self._specs):
+            if (not isinstance(value, _Tensor)
+                    or value.shape != shape
+                    or value.dtype is not dtype
+                    or value.device != device
+                    or value.stride() != stride):
+                raise HNDLError("E_RUNTIME", f"deployment input {name!r} must match {contract}")
             if value.requires_grad:
                 raise HNDLError("E_UNSUPPORTED", "deployment is inference-only; detach the inputs")
         if self._serial_lock is None:
-            with torch.no_grad():
-                return self._runner(*bound)
+            if self._is_grad_enabled():
+                with self._no_grad():
+                    return self._runner(*bound)
+            return self._runner(*bound)
         if not self._serial_lock.acquire(blocking=False):
             raise HNDLError("E_RUNTIME", "single-threaded deployment cannot execute overlapping host calls")
         try:
@@ -468,16 +510,18 @@ class DeploymentModel:
             # The native serial path also omits its ordinary CUDA device
             # guard. Preserve explicit cuda:N input semantics when another
             # device happens to be current on the caller's host thread.
-            guard = (torch.cuda.device(device) if device.type == "cuda"
-                     and torch.cuda.current_device() != device.index else nullcontext())
+            guard = (self._cuda.device(device) if device.type == "cuda"
+                     and self._cuda.current_device() != device.index else nullcontext())
             with guard:
                 if device.type == "cuda":
-                    stream = torch.cuda.current_stream(device).cuda_stream
+                    stream = self._cuda.current_stream(device).cuda_stream
                     if self._serial_stream is not None and self._serial_stream != stream:
                         raise HNDLError("E_RUNTIME", "single-threaded deployment is bound to its first CUDA stream; load another instance for another stream")
                     self._serial_stream = stream
-                with torch.no_grad():
-                    return self._runner(*bound)
+                if self._is_grad_enabled():
+                    with self._no_grad():
+                        return self._runner(*bound)
+                return self._runner(*bound)
         finally:
             self._serial_lock.release()
 
