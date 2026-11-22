@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import chain
+import operator
 import threading
 from typing import Any
 import weakref
@@ -15,6 +16,14 @@ from .errors import HNDLError
 
 
 _MISSING = object()
+_chain = chain.from_iterable
+_get_ver = operator.attrgetter("_version")
+_get_ptr = torch.Tensor.data_ptr
+_get_shape = operator.attrgetter("shape")
+_get_dtype = operator.attrgetter("dtype")
+_get_modules = operator.attrgetter("_modules")
+_get_parameters = operator.attrgetter("_parameters")
+_get_buffers = operator.attrgetter("_buffers")
 
 
 @dataclass
@@ -59,6 +68,112 @@ def _parameter_signature(module):
                  for t in tensors if t is not None)
 
 
+_DEFAULT_PARAMETER_SIGNATURE = _parameter_signature
+
+
+def _graph_guard_plan(model):
+    """Build and cache structural views on the GraphModule itself (no extra refs in cache)."""
+    state_program = model._state_program
+    state_prog_id = id(state_program)
+    plan = getattr(model, "_inference_guard_plan", None)
+    if plan is not None and plan[0] == state_prog_id:
+        return plan
+    owners = tuple(row[0] for row in state_program)
+    mod_dict_ids = tuple(id(o._modules) for o in owners)
+    param_dict_ids = tuple(id(o._parameters) for o in owners)
+    buf_dict_ids = tuple(id(o._buffers) for o in owners)
+    mod_views = tuple(o._modules.values() for o in owners)
+    mod_lens = tuple(len(row[3]) for row in state_program)
+    mod_child_ids = tuple(id(child) for row in state_program for _, child in row[3])
+    mod_key_views = tuple(o._modules.keys() for o in owners)
+    mod_keys = tuple(tuple(name for name, _ in row[3]) for row in state_program)
+    all_stores = tuple(s for o in owners for s in (o._parameters, o._buffers))
+    empty_stores = tuple(s for s in all_stores if not s)
+    empty_copies = tuple({} for _ in empty_stores)
+    store_views = tuple(s.values() for s in all_stores if s)
+    store_lens = tuple(len(v) for v in store_views)
+    plan = (
+        state_prog_id, owners, mod_dict_ids, param_dict_ids, buf_dict_ids,
+        mod_views, mod_lens, mod_child_ids, mod_key_views, mod_keys,
+        empty_stores, empty_copies, store_views, store_lens,
+    )
+    object.__setattr__(model, "_inference_guard_plan", plan)
+    return plan
+
+
+def _snapshot_graph_guard(model):
+    """Capture pure-value tensor metadata for fast steady-state verification."""
+    plan = _graph_guard_plan(model)
+    (state_prog_id, owners, mod_dict_ids, param_dict_ids, buf_dict_ids,
+     mod_views, mod_lens, mod_child_ids, mod_key_views, mod_keys,
+     empty_stores, empty_copies, store_views, store_lens) = plan
+    # Confirm live dictionaries currently match the plan before snapshotting.
+    if (tuple(map(id, map(_get_modules, owners))) != mod_dict_ids
+            or tuple(map(len, mod_views)) != mod_lens
+            or tuple(map(id, _chain(mod_views))) != mod_child_ids
+            or tuple(map(tuple, mod_key_views)) != mod_keys
+            or tuple(map(id, map(_get_parameters, owners))) != param_dict_ids
+            or tuple(map(id, map(_get_buffers, owners))) != buf_dict_ids
+            or empty_stores != empty_copies
+            or tuple(map(len, store_views)) != store_lens):
+        return None
+    tensors = tuple(_chain(store_views))
+    all_ids = tuple(map(id, tensors))
+    has_nones = any(t is None for t in tensors)
+    non_none = tuple(t for t in tensors if t is not None) if has_nones else tensors
+    try:
+        vers = tuple(map(_get_ver, non_none))
+    except RuntimeError:
+        return None
+    ptrs = tuple(map(_get_ptr, non_none))
+    shapes = tuple(map(_get_shape, non_none))
+    dtypes = tuple(map(_get_dtype, non_none))
+    return (state_prog_id, all_ids, has_nones, vers, ptrs, shapes, dtypes)
+
+
+def _check_graph_guard(model, guard):
+    """Fast C-level verification of model structure and parameter/buffer state.
+
+    Returns ``True`` if unchanged, ``False`` if parameter/buffer state changed,
+    and raises ``HNDLError`` if module structure changed or an inference-mode
+    unversioned tensor is encountered.
+    """
+    state_prog_id, all_ids, has_nones, vers, ptrs, shapes, dtypes = guard
+    if id(model._state_program) != state_prog_id:
+        return False
+    plan = _graph_guard_plan(model)
+    (_, owners, mod_dict_ids, param_dict_ids, buf_dict_ids,
+     mod_views, mod_lens, mod_child_ids, mod_key_views, mod_keys,
+     empty_stores, empty_copies, store_views, store_lens) = plan
+    if (tuple(map(id, map(_get_modules, owners))) != mod_dict_ids
+            or tuple(map(len, mod_views)) != mod_lens
+            or tuple(map(id, _chain(mod_views))) != mod_child_ids
+            or tuple(map(tuple, mod_key_views)) != mod_keys):
+        raise HNDLError("E_RUNTIME", "cache model structure changed; rebind_state() and reset() first")
+    if (tuple(map(id, map(_get_parameters, owners))) != param_dict_ids
+            or tuple(map(id, map(_get_buffers, owners))) != buf_dict_ids
+            or empty_stores != empty_copies
+            or tuple(map(len, store_views)) != store_lens):
+        return False
+    tensors = tuple(_chain(store_views))
+    if tuple(map(id, tensors)) != all_ids:
+        return False
+    non_none = tuple(t for t in tensors if t is not None) if has_nones else tensors
+    try:
+        if tuple(map(_get_ver, non_none)) != vers:
+            return False
+    except RuntimeError as error:
+        raise HNDLError(
+            "E_RUNTIME", "cached model state must track mutation versions; create parameters and buffers "
+            "outside torch.inference_mode() before using an InferenceCache",
+        ) from error
+    if (tuple(map(_get_ptr, non_none)) != ptrs
+            or tuple(map(_get_shape, non_none)) != shapes
+            or tuple(map(_get_dtype, non_none)) != dtypes):
+        return False
+    return True
+
+
 def _stream_id(device):
     return torch.cuda.current_stream(device).cuda_stream if device.type == "cuda" else None
 
@@ -80,11 +195,16 @@ class InferenceCache:
         self._model = None
         self._input_signature = None
         self._model_parameters = None
+        self._graph_guard = None
+        self._stream_verified_token = None
         self._model_epoch = None
         self._graph_nodes = None
         self._cuda_stream = None
         self._active = False
         self._active_thread = None
+        self._active_device = None
+        self._active_stream = None
+        self._active_autocast = None
         self._session_lock = threading.Lock()
         self._invalid = False
 
@@ -107,12 +227,17 @@ class InferenceCache:
                 self._model = None
                 self._input_signature = None
                 self._model_parameters = None
+                self._graph_guard = None
+                self._stream_verified_token = None
                 self._model_epoch = None
                 self._graph_nodes = None
                 self._cuda_stream = None
                 self._invalid = False
                 self._active = False
                 self._active_thread = None
+                self._active_device = None
+                self._active_stream = None
+                self._active_autocast = None
             else:
                 self._states.pop(node_id, None)
                 # A composite operator uses hierarchical child keys.
@@ -172,6 +297,9 @@ class InferenceCache:
         except BaseException:
             self._active = False
             self._active_thread = None
+            self._active_device = None
+            self._active_stream = None
+            self._active_autocast = None
             self._session_lock.release()
             raise
 
@@ -183,30 +311,72 @@ class InferenceCache:
         if model.training or torch.is_grad_enabled():
             raise HNDLError("E_RUNTIME", "incremental decoding requires eval() and torch.no_grad() or inference_mode()")
         values = tuple(inputs.values()) if isinstance(inputs, dict) else tuple(inputs)
-        if not values or any(not isinstance(x, torch.Tensor) or x.ndim not in (2, 3) for x in values):
-            raise HNDLError("E_RUNTIME", "cached graph inputs must be rank-2 token IDs or rank-3 sequences")
-        streams = tuple(_stream_id(x.device) for x in values)
-        binding = self._check_cuda_stream({(x.device, stream) for x, stream in zip(values, streams)
-                                           if stream is not None})
-        signature = tuple((tuple(x.shape[:1]) + tuple(x.shape[2:]), x.dtype, x.device,
-                           torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type), stream)
-                          for x, stream in zip(values, streams))
-        parameters = _parameter_signature(model)
+        if len(values) == 1:
+            x = values[0]
+            if not isinstance(x, torch.Tensor) or x.ndim not in (2, 3):
+                raise HNDLError("E_RUNTIME", "cached graph inputs must be rank-2 token IDs or rank-3 sequences")
+            dev = x.device
+            stream = _stream_id(dev)
+            if stream is not None:
+                binding = (dev, stream)
+                if self._cuda_stream is not None and binding != self._cuda_stream:
+                    raise HNDLError("E_RUNTIME", "cache CUDA stream changed; reset() before using a different stream")
+            else:
+                binding = None
+            ac_enabled = torch.is_autocast_enabled(dev.type)
+            ac_dtype = torch.get_autocast_dtype(dev.type)
+            shape_key = (x.shape[0],) if x.ndim == 2 else (x.shape[0], x.shape[2])
+            signature = ((shape_key, x.dtype, dev, ac_enabled, ac_dtype, stream),)
+            active_device, active_stream, active_autocast = dev, stream, (ac_enabled, ac_dtype)
+        else:
+            if not values or any(not isinstance(x, torch.Tensor) or x.ndim not in (2, 3) for x in values):
+                raise HNDLError("E_RUNTIME", "cached graph inputs must be rank-2 token IDs or rank-3 sequences")
+            streams = tuple(_stream_id(x.device) for x in values)
+            binding = self._check_cuda_stream({(x.device, stream) for x, stream in zip(values, streams)
+                                               if stream is not None})
+            signature = tuple((tuple(x.shape[:1]) + tuple(x.shape[2:]), x.dtype, x.device,
+                               torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type), stream)
+                              for x, stream in zip(values, streams))
+            dev0 = values[0].device
+            active_device = dev0
+            active_stream = streams[0]
+            active_autocast = (signature[0][3], signature[0][4])
         epoch = getattr(model, "_preparation_epoch", None)
-        if self._model is not None and (self._model() is not model or signature != self._input_signature
-                                       or parameters != self._model_parameters or epoch != self._model_epoch):
-            raise HNDLError("E_RUNTIME", "cache model, parameters/buffers, batch, features, dtype or device changed; reset() first")
-        if self._graph_nodes is not None and any(not isinstance(self._states.get(key), _NodeState) for key in self._graph_nodes):
-            raise HNDLError("E_RUNTIME", "part of the graph cache was reset; reset() the complete session before decoding")
-        positions = {self._states[key].position for key in (self._graph_nodes or ())}
-        if len(positions) > 1:
-            raise HNDLError("E_RUNTIME", "cached graph positions differ; reset() before decoding")
-        self._model = weakref.ref(model)
-        self._input_signature = signature
-        self._model_parameters = parameters
-        self._model_epoch = epoch
+        if self._model is not None:
+            if self._model() is not model or signature != self._input_signature or epoch != self._model_epoch:
+                raise HNDLError("E_RUNTIME", "cache model, parameters/buffers, batch, features, dtype or device changed; reset() first")
+            if self._graph_guard is not None and _parameter_signature is _DEFAULT_PARAMETER_SIGNATURE:
+                if not _check_graph_guard(model, self._graph_guard):
+                    raise HNDLError("E_RUNTIME", "cache model, parameters/buffers, batch, features, dtype or device changed; reset() first")
+            else:
+                if _parameter_signature(model) != self._model_parameters:
+                    raise HNDLError("E_RUNTIME", "cache model, parameters/buffers, batch, features, dtype or device changed; reset() first")
+            if self._graph_nodes is not None:
+                states = self._states
+                positions = set()
+                for key in self._graph_nodes:
+                    st = states.get(key)
+                    if not isinstance(st, _NodeState):
+                        raise HNDLError("E_RUNTIME", "part of the graph cache was reset; reset() the complete session before decoding")
+                    positions.add(st.position)
+                if len(positions) > 1:
+                    raise HNDLError("E_RUNTIME", "cached graph positions differ; reset() before decoding")
+        else:
+            parameters = _parameter_signature(model)
+            self._model = weakref.ref(model)
+            self._input_signature = signature
+            self._model_parameters = parameters
+            self._model_epoch = epoch
+            from .torch import GraphModule
+            if isinstance(model, GraphModule) and _parameter_signature is _DEFAULT_PARAMETER_SIGNATURE:
+                self._graph_guard = _snapshot_graph_guard(model)
+            else:
+                self._graph_guard = None
         if binding is not None:
             self._cuda_stream = binding
+        self._active_device = active_device
+        self._active_stream = active_stream
+        self._active_autocast = active_autocast
         self._active = True
 
     def _check_cuda_stream(self, streams):
@@ -228,6 +398,9 @@ class InferenceCache:
         finally:
             self._active = False
             self._active_thread = None
+            self._active_device = None
+            self._active_stream = None
+            self._active_autocast = None
             self._session_lock.release()
 
     def _finish_call(self, success):
@@ -258,10 +431,20 @@ class InferenceCache:
             raise HNDLError("E_RUNTIME", "cached operator calls require a nonempty node_id")
         if x.ndim not in (3, 4) or x.shape[0] < 1 or x.shape[sequence_axis] < 1:
             raise HNDLError("E_RUNTIME", "incremental decoding expects a nonempty sequence tensor")
-        stream = _stream_id(x.device)
-        binding = self._check_cuda_stream({(x.device, stream)} if stream is not None else set())
-        signature = (tuple(size for i, size in enumerate(x.shape) if i != sequence_axis), x.dtype, x.device,
-                     torch.is_autocast_enabled(x.device.type), torch.get_autocast_dtype(x.device.type), stream)
+        if self._active and x.device == self._active_device:
+            stream = self._active_stream
+            binding = None
+            ac_enabled, ac_dtype = self._active_autocast
+        else:
+            stream = _stream_id(x.device)
+            binding = self._check_cuda_stream({(x.device, stream)} if stream is not None else set())
+            ac_enabled = torch.is_autocast_enabled(x.device.type)
+            ac_dtype = torch.get_autocast_dtype(x.device.type)
+        if sequence_axis == 1:
+            shape_key = (x.shape[0], x.shape[2]) if x.ndim == 3 else (x.shape[0], x.shape[2], x.shape[3])
+        else:
+            shape_key = tuple(size for i, size in enumerate(x.shape) if i != sequence_axis)
+        signature = (shape_key, x.dtype, x.device, ac_enabled, ac_dtype, stream)
         state = self._states.get(node_id)
         # The graph runtime has just checked every parameter in _begin_call.
         # Repeating subtree walks for existing operator states adds avoidable
