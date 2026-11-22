@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 (2026-11-21)
 
 - Enforce registered-state and mid-forward mutation checks on `PreparedNetwork` generated execution with thread-safe signature updates, while reducing wrapper and generated-forward overhead so batch-1 CPU MLP execution beats `nn.Sequential`.
 - Unify `InferenceCache` and streaming session guards into a single low-overhead traversal, reuse active device/stream/autocast context across layers, and add `mul`, `mish`, `softplus`, and `clamp` to the streaming tokenwise contract.
