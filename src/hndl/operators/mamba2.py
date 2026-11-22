@@ -5,7 +5,17 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..inference import _causal_conv
+from ._packing import _global_call_hooks, _has_call_hooks
 from ..operator import Arg, Example, operator
+
+
+def _plain_conv1d(module):
+    return (
+        type(module) is nn.Conv1d
+        and "forward" not in module.__dict__
+        and not _has_call_hooks(module)
+        and not _global_call_hooks()
+    )
 
 
 def _relation(s):
@@ -81,18 +91,16 @@ def _reference(module):
         x_h = x_conv.view(b, t, module.heads, module.head_dim)
         b_h = b_conv.view(b, t, module.heads, module.d_state)
         c_h = c_conv.view(b, t, module.heads, module.d_state)
-        dt = F.softplus(dt_raw + module.dt_bias)
-
-        # Discretize A
-        a_scaled = -torch.exp(module.A_log)
-        a_bar = torch.exp(dt * a_scaled)  # [B, T, H]
 
         # SSD Recurrence Oracle (Independent step-by-step sequential reference)
         calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        dt = F.softplus(dt_raw.to(calc_dtype) + module.dt_bias.to(calc_dtype))
+        a_scaled = -torch.exp(module.A_log.to(calc_dtype))
+        a_bar_calc = torch.exp(dt * a_scaled)  # [B, T, H]
+
         x_h_calc = x_h.to(calc_dtype)
         b_h_calc = b_h.to(calc_dtype)
         c_h_calc = c_h.to(calc_dtype)
-        a_bar_calc = a_bar.to(calc_dtype)
         D_calc = module.D.to(calc_dtype) if module.D is not None else None
 
         state = torch.zeros(
@@ -214,43 +222,49 @@ class Mamba2(nn.Module):
             return torch.empty(b, t, self.d_model, device=x.device, dtype=x.dtype)
 
         zxbcdt = self.in_proj(x)
-        z = zxbcdt[..., : inner_dim]
-        x_ssm = zxbcdt[..., inner_dim : 2 * inner_dim]
-        b_proj = zxbcdt[
-            ...,
-            2 * inner_dim : 2 * inner_dim + bc_dim,
-        ]
-        c_proj = zxbcdt[
-            ...,
-            2 * inner_dim + bc_dim : 2 * inner_dim + 2 * bc_dim,
-        ]
+        z = zxbcdt[..., :inner_dim]
         dt_raw = zxbcdt[..., -self.heads :]
 
         if self.d_conv > 0 and self.conv1d is not None:
-            conv_in = torch.cat([x_ssm, b_proj, c_proj], dim=-1).transpose(1, 2)
+            conv_in = zxbcdt[..., inner_dim : 2 * inner_dim + 2 * bc_dim].transpose(1, 2)
             if state is None:
                 convolved = self.conv1d(conv_in)[..., :t]
+            elif _plain_conv1d(self.conv1d):
+                convolved = _causal_conv(
+                    state, "conv", conv_in, self.conv1d.weight, self.conv1d.bias, self.conv1d.groups
+                )
             else:
-                convolved = _causal_conv(state, "conv", conv_in, self.conv1d.weight,
-                                         self.conv1d.bias, self.conv1d.groups)
+                history_len = self.conv1d.kernel_size[0] - 1
+                if history_len == 0:
+                    convolved = self.conv1d(conv_in)[..., :t]
+                else:
+                    history = state.tensors.get("conv")
+                    if history is None:
+                        history = torch.zeros(
+                            *conv_in.shape[:-1], history_len, device=conv_in.device, dtype=conv_in.dtype
+                        )
+                        state.tensors["conv"] = history
+                    window = torch.cat((history, conv_in), dim=-1)
+                    convolved = self.conv1d(window)[..., history_len : history_len + t]
+                    history.copy_(window[..., -history_len:])
             conv_out = F.silu(convolved).transpose(1, 2)
-            x_conv = conv_out[..., : inner_dim]
+            x_conv = conv_out[..., :inner_dim]
             b_conv = conv_out[..., inner_dim : inner_dim + bc_dim]
             c_conv = conv_out[..., inner_dim + bc_dim : inner_dim + 2 * bc_dim]
         else:
-            x_conv, b_conv, c_conv = x_ssm, b_proj, c_proj
+            x_conv = zxbcdt[..., inner_dim : 2 * inner_dim]
+            b_conv = zxbcdt[..., 2 * inner_dim : 2 * inner_dim + bc_dim]
+            c_conv = zxbcdt[..., 2 * inner_dim + bc_dim : 2 * inner_dim + 2 * bc_dim]
 
         x_h = x_conv.view(b, t, self.heads, self.head_dim)
         b_h = b_conv.view(b, t, self.heads, self.d_state)
         c_h = c_conv.view(b, t, self.heads, self.d_state)
-        dt = F.softplus(dt_raw + self.dt_bias)
 
-        a_scaled = -torch.exp(self.A_log)
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        dt = F.softplus(dt_raw.to(calc_dtype) + self.dt_bias.to(calc_dtype))
+        a_scaled = -torch.exp(self.A_log.to(calc_dtype))
         log_a = dt * a_scaled
 
-        # Semi-separable chunked recurrence
-        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
-        chunk_size = self.chunk_size
         H_prev = state.tensors.get("recurrent") if state is not None else None
         if H_prev is None:
             H_prev = torch.zeros(
@@ -259,44 +273,130 @@ class Mamba2(nn.Module):
             if state is not None:
                 state.tensors["recurrent"] = H_prev
         D_calc = self.D.to(calc_dtype) if self.D is not None else None
-        y_chunks = []
-        for start in range(0, t, chunk_size):
-            end = min(start + chunk_size, t)
-            L = end - start
 
-            X = x_h[:, start:end].permute(0, 2, 1, 3).to(calc_dtype)
-            B_mat = b_h[:, start:end].permute(0, 2, 1, 3).to(calc_dtype)
-            C_mat = c_h[:, start:end].permute(0, 2, 1, 3).to(calc_dtype)
-            log_a_chunk = log_a[:, start:end].permute(0, 2, 1).to(calc_dtype)
-
-            cumsum_log_a = torch.cumsum(log_a_chunk, dim=-1)
-            decay = torch.exp(cumsum_log_a)
-
-            log_decay_diff = cumsum_log_a[:, :, :, None] - cumsum_log_a[:, :, None, :]
-            mask = torch.tril(torch.ones(L, L, device=x.device, dtype=torch.bool))
-            log_decay_diff = torch.where(mask[None, None, :, :], log_decay_diff, torch.full_like(log_decay_diff, -1e4))
-            decay_matrix = torch.where(mask[None, None, :, :], torch.exp(log_decay_diff), torch.zeros_like(log_decay_diff))
-
-            S = torch.matmul(C_mat, B_mat.transpose(-1, -2))
-            M = S * decay_matrix
-            y_intra = torch.matmul(M, X)
-
-            C_tilde = C_mat * decay[:, :, :, None]
-            y_inter = torch.matmul(C_tilde, H_prev.transpose(-1, -2))
-
-            y_chunk = y_intra + y_inter
+        if t == 1:
+            x0 = x_h[:, 0].to(calc_dtype)
+            b0 = b_h[:, 0].to(calc_dtype)
+            c0 = c_h[:, 0].to(calc_dtype)
+            decay0 = torch.exp(log_a[:, 0])
+            H_prev = H_prev * decay0[:, :, None, None] + x0.unsqueeze(-1) * b0.unsqueeze(-2)
+            y0 = torch.matmul(H_prev, c0.unsqueeze(-1)).squeeze(-1)
             if D_calc is not None:
-                y_chunk = y_chunk + X * D_calc[None, :, None, None]
-            y_chunks.append(y_chunk.permute(0, 2, 1, 3).to(x.dtype))
+                y0 = y0 + x0 * D_calc[None, :, None]
+            y = y0.to(x.dtype).reshape(b, 1, inner_dim)
+        else:
+            chunk_size = self.chunk_size
+            N_full = t // chunk_size
+            full_len = N_full * chunk_size
+            y_parts = []
 
-            last_log_a = cumsum_log_a[:, :, -1, None]
-            lambda_j = torch.exp(last_log_a - cumsum_log_a)
-            B_tilde = B_mat * lambda_j[:, :, :, None]
+            if N_full > 0:
+                X = (
+                    x_h[:, :full_len]
+                    .view(b, N_full, chunk_size, self.heads, self.head_dim)
+                    .permute(0, 3, 1, 2, 4)
+                    .to(calc_dtype)
+                )
+                B_mat = (
+                    b_h[:, :full_len]
+                    .view(b, N_full, chunk_size, self.heads, self.d_state)
+                    .permute(0, 3, 1, 2, 4)
+                    .to(calc_dtype)
+                )
+                C_mat = (
+                    c_h[:, :full_len]
+                    .view(b, N_full, chunk_size, self.heads, self.d_state)
+                    .permute(0, 3, 1, 2, 4)
+                    .to(calc_dtype)
+                )
+                log_a_full = (
+                    log_a[:, :full_len]
+                    .view(b, N_full, chunk_size, self.heads)
+                    .permute(0, 3, 1, 2)
+                )
 
-            S_chunk = torch.matmul(X.transpose(-1, -2), B_tilde)
-            H_prev = H_prev * torch.exp(last_log_a[:, :, :, None]) + S_chunk
+                cumsum_log_a = torch.cumsum(log_a_full, dim=-1)
+                decay = torch.exp(cumsum_log_a)
 
-        y = torch.cat(y_chunks, dim=1).view(b, t, inner_dim)
+                mask = torch.tril(torch.ones(chunk_size, chunk_size, device=x.device, dtype=torch.bool))
+                log_decay_diff = cumsum_log_a.unsqueeze(-1) - cumsum_log_a.unsqueeze(-2)
+                decay_matrix = torch.exp(log_decay_diff.clamp(max=0.0)) * mask
+
+                S = torch.matmul(C_mat, B_mat.transpose(-1, -2))
+                y_intra = torch.matmul(S * decay_matrix, X)
+
+                C_tilde = C_mat * decay.unsqueeze(-1)
+                last_log_a = cumsum_log_a[..., -1:]
+                lambda_j = torch.exp((last_log_a - cumsum_log_a).clamp(max=0.0))
+                B_tilde = B_mat * lambda_j.unsqueeze(-1)
+                S_chunks = torch.matmul(X.transpose(-1, -2), B_tilde)
+                chunk_decay_log = last_log_a.squeeze(-1)
+
+                if N_full == 1:
+                    y_inter = torch.matmul(C_tilde, H_prev.unsqueeze(2).transpose(-1, -2))
+                    H_prev = H_prev * torch.exp(chunk_decay_log[:, :, 0, None, None]) + S_chunks[:, :, 0]
+                else:
+                    states_in = torch.cat((H_prev.unsqueeze(2), S_chunks), dim=2)
+                    zeros = torch.zeros(b, self.heads, 1, device=x.device, dtype=calc_dtype)
+                    cum_d = torch.cumsum(torch.cat((zeros, chunk_decay_log), dim=-1), dim=-1)
+                    d_diff = (cum_d.unsqueeze(-1) - cum_d.unsqueeze(-2)).clamp(max=0.0)
+                    w_mask = torch.tril(torch.ones(N_full + 1, N_full + 1, device=x.device, dtype=torch.bool))
+                    W = torch.exp(d_diff) * w_mask
+                    H_all = torch.matmul(
+                        W, states_in.reshape(b, self.heads, N_full + 1, self.head_dim * self.d_state)
+                    ).view(b, self.heads, N_full + 1, self.head_dim, self.d_state)
+                    H_before = H_all[:, :, :-1]
+                    H_prev = H_all[:, :, -1]
+                    y_inter = torch.matmul(C_tilde, H_before.transpose(-1, -2))
+
+                y_full = y_intra + y_inter
+                if D_calc is not None:
+                    y_full = y_full + X * D_calc[None, :, None, None, None]
+                y_parts.append(y_full.permute(0, 2, 3, 1, 4).reshape(b, full_len, inner_dim).to(x.dtype))
+
+            if full_len < t:
+                rem_len = t - full_len
+                if rem_len == 1:
+                    x0 = x_h[:, full_len].to(calc_dtype)
+                    b0 = b_h[:, full_len].to(calc_dtype)
+                    c0 = c_h[:, full_len].to(calc_dtype)
+                    decay0 = torch.exp(log_a[:, full_len])
+                    H_prev = H_prev * decay0[:, :, None, None] + x0.unsqueeze(-1) * b0.unsqueeze(-2)
+                    y0 = torch.matmul(H_prev, c0.unsqueeze(-1)).squeeze(-1)
+                    if D_calc is not None:
+                        y0 = y0 + x0 * D_calc[None, :, None]
+                    y_parts.append(y0.to(x.dtype).reshape(b, 1, inner_dim))
+                else:
+                    X = x_h[:, full_len:].permute(0, 2, 1, 3).to(calc_dtype)
+                    B_mat = b_h[:, full_len:].permute(0, 2, 1, 3).to(calc_dtype)
+                    C_mat = c_h[:, full_len:].permute(0, 2, 1, 3).to(calc_dtype)
+                    log_a_rem = log_a[:, full_len:].permute(0, 2, 1)
+
+                    cumsum_log_a = torch.cumsum(log_a_rem, dim=-1)
+                    decay = torch.exp(cumsum_log_a)
+
+                    mask = torch.tril(torch.ones(rem_len, rem_len, device=x.device, dtype=torch.bool))
+                    log_decay_diff = cumsum_log_a.unsqueeze(-1) - cumsum_log_a.unsqueeze(-2)
+                    decay_matrix = torch.exp(log_decay_diff.clamp(max=0.0)) * mask
+
+                    S = torch.matmul(C_mat, B_mat.transpose(-1, -2))
+                    y_intra = torch.matmul(S * decay_matrix, X)
+
+                    C_tilde = C_mat * decay.unsqueeze(-1)
+                    y_inter = torch.matmul(C_tilde, H_prev.transpose(-1, -2))
+
+                    y_rem = y_intra + y_inter
+                    if D_calc is not None:
+                        y_rem = y_rem + X * D_calc[None, :, None, None]
+                    y_parts.append(y_rem.permute(0, 2, 1, 3).reshape(b, rem_len, inner_dim).to(x.dtype))
+
+                    last_log_a = cumsum_log_a[:, :, -1:]
+                    lambda_j = torch.exp((last_log_a - cumsum_log_a).clamp(max=0.0))
+                    B_tilde = B_mat * lambda_j.unsqueeze(-1)
+                    S_chunk = torch.matmul(X.transpose(-1, -2), B_tilde)
+                    H_prev = H_prev * torch.exp(last_log_a.unsqueeze(-1)) + S_chunk
+
+            y = y_parts[0] if len(y_parts) == 1 else torch.cat(y_parts, dim=1)
         y = self.norm(y) * F.silu(z)
         out = self.out_proj(y)
         if state is not None:

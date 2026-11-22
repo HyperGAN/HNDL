@@ -32,13 +32,15 @@ def compute_rope_tables(
     h_grid, w_grid = int(sh[0]), int(sh[1])
 
     if h_grid > 0 and w_grid > 0:
+        if head_dim % 4 != 0:
+            raise HNDLError("E_CONSTRAINT", f"2D axial RoPE requires head_dim divisible by 4, got {head_dim}")
         d_axis = head_dim // 2
         exp = torch.arange(0, d_axis, 2, device=device, dtype=calc_dtype) / d_axis
         base_freq = float(theta) ** (-exp)
         if rope_scaling == "linear":
             base_freq = base_freq / float(rope_scale)
         elif rope_scaling == "ntk":
-            theta_ntk = float(theta) * (float(rope_scale) ** (head_dim / max(head_dim - 2, 1)))
+            theta_ntk = float(theta) * (float(rope_scale) ** (d_axis / max(d_axis - 2, 1)))
             base_freq = float(theta_ntk) ** (-exp)
         elif rope_scaling == "yarn":
             wavelength = 2.0 * math.pi / (base_freq + 1e-12)
@@ -60,8 +62,12 @@ def compute_rope_tables(
         angles_h = rows[:, None] * base_freq[None, :]
         angles_w = cols[:, None] * base_freq[None, :]
         angles_2d = torch.cat((angles_h, angles_w), dim=-1)
-        duplicated = torch.cat((angles_2d, angles_2d), dim=-1)
-        return duplicated.cos().to(dtype)[None, None, :, :], duplicated.sin().to(dtype)[None, None, :, :]
+        cos_half = angles_2d.cos().to(dtype)
+        sin_half = angles_2d.sin().to(dtype)
+        return (
+            torch.cat((cos_half, cos_half), dim=-1)[None, None, :, :],
+            torch.cat((sin_half, sin_half), dim=-1)[None, None, :, :],
+        )
 
     exponent = torch.arange(0, head_dim, 2, device=device, dtype=calc_dtype) / head_dim
     base_freq = float(theta) ** (-exponent)
@@ -85,15 +91,22 @@ def compute_rope_tables(
         base_freq = (1.0 - smooth) * base_freq + smooth * (base_freq / float(rope_scale))
 
     angles = torch.arange(positions, device=device, dtype=calc_dtype)[:, None] * base_freq[None, :]
-    duplicated = torch.cat((angles, angles), dim=-1)
-    return duplicated.cos().to(dtype)[None, None, :, :], duplicated.sin().to(dtype)[None, None, :, :]
+    cos_half = angles.cos().to(dtype)
+    sin_half = angles.sin().to(dtype)
+    return (
+        torch.cat((cos_half, cos_half), dim=-1)[None, None, :, :],
+        torch.cat((sin_half, sin_half), dim=-1)[None, None, :, :],
+    )
 
 
 def _cached_rope_tables(cache, end, head_dim, device, dtype, theta, scaling, scale, spatial_shape,
                         *, start=0, capacity=None):
     """Return rotary rows [start:end], retaining one table per frequency configuration."""
     if torch.compiler.is_compiling():
-        return compute_rope_tables(end, head_dim, device, dtype, theta, scaling, scale, spatial_shape)
+        cos, sin = compute_rope_tables(end, head_dim, device, dtype, theta, scaling, scale, spatial_shape)
+        if start > 0:
+            return cos[..., start:end, :], sin[..., start:end, :]
+        return cos, sin
 
     key = (head_dim, device, dtype, theta, scaling, scale, spatial_shape)
     tables = cache.get(key)

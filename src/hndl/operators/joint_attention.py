@@ -5,7 +5,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..errors import HNDLError
 from ..operator import Arg, Example, operator
+from ._packing import clear_packed_cache, project
 
 
 def _relation(s):
@@ -146,7 +148,16 @@ class JointAttention(nn.Module):
     ):
         super().__init__()
         self.heads = int(heads)
-        self.head_dim = int(head_dim) if head_dim > 0 else ((int(D_x) if D_x > 0 else int(D)) // self.heads)
+        base_d = int(D_x) if D_x > 0 else int(D)
+        if head_dim == 0:
+            if base_d % self.heads != 0:
+                raise HNDLError(
+                    "E_CONSTRAINT",
+                    f"joint_attention heads={self.heads} must divide width D={base_d}",
+                )
+            self.head_dim = base_d // self.heads
+        else:
+            self.head_dim = int(head_dim)
         self.qk_norm = str(qk_norm)
         self.bias = bool(bias)
         self.dropout = float(dropout)
@@ -174,17 +185,30 @@ class JointAttention(nn.Module):
             self.c_q_norm = nn.RMSNorm(self.head_dim, eps=self.eps)
             self.c_k_norm = nn.RMSNorm(self.head_dim, eps=self.eps)
 
+    def _apply(self, fn, recurse=True):
+        res = super()._apply(fn, recurse=recurse)
+        if getattr(self, "_hndl_packing", False):
+            clear_packed_cache(self)
+        return res
+
     def forward(self, x, context):
         b, tx, _ = x.shape
         _, tc, _ = context.shape
 
-        qx = self.x_q_proj(x).view(b, tx, self.heads, self.head_dim).transpose(1, 2)
-        kx = self.x_k_proj(x).view(b, tx, self.heads, self.head_dim).transpose(1, 2)
-        vx = self.x_v_proj(x).view(b, tx, self.heads, self.head_dim).transpose(1, 2)
+        if getattr(self, "_hndl_packing", False):
+            qxp, kxp, vxp = project(self, x, ("x_q_proj", "x_k_proj", "x_v_proj"))
+            qcp, kcp, vcp = project(self, context, ("c_q_proj", "c_k_proj", "c_v_proj"))
+        else:
+            qxp, kxp, vxp = self.x_q_proj(x), self.x_k_proj(x), self.x_v_proj(x)
+            qcp, kcp, vcp = self.c_q_proj(context), self.c_k_proj(context), self.c_v_proj(context)
 
-        qc = self.c_q_proj(context).view(b, tc, self.heads, self.head_dim).transpose(1, 2)
-        kc = self.c_k_proj(context).view(b, tc, self.heads, self.head_dim).transpose(1, 2)
-        vc = self.c_v_proj(context).view(b, tc, self.heads, self.head_dim).transpose(1, 2)
+        qx = qxp.view(b, tx, self.heads, self.head_dim).transpose(1, 2)
+        kx = kxp.view(b, tx, self.heads, self.head_dim).transpose(1, 2)
+        vx = vxp.view(b, tx, self.heads, self.head_dim).transpose(1, 2)
+
+        qc = qcp.view(b, tc, self.heads, self.head_dim).transpose(1, 2)
+        kc = kcp.view(b, tc, self.heads, self.head_dim).transpose(1, 2)
+        vc = vcp.view(b, tc, self.heads, self.head_dim).transpose(1, 2)
 
         if self.qk_norm == "rms_norm":
             qx = self.x_q_norm(qx)
