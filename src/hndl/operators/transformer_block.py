@@ -19,19 +19,24 @@ def _validate(args):
 
 
 def _relation(s):
-    """``heads`` must divide the model width ``D``, whichever side fixes it."""
+    """``heads`` must divide the model width ``D`` when ``head_dim=0``, whichever side fixes it."""
     heads = s.args["heads"]
     kv_heads = s.args.get("kv_heads", 0)
+    head_dim = s.args.get("head_dim", 0)
     if kv_heads > 0 and heads % kv_heads != 0:
         s.error("E_CONSTRAINT", f"heads={heads} must be divisible by kv_heads={kv_heads}")
     for port in ("x", "out"):
         shape = s.shape(port)
         if shape is not None and len(shape) == 3 and shape[2] is not None:
             width = shape[2]
-            if width % heads:
-                s.error("E_CONSTRAINT", f"heads={heads} must divide the model width D={width}")
-            if s.args.get("rope") and (width // heads) % 2:
-                s.error("E_CONSTRAINT", f"rope needs an even head dimension, but D={width} over heads={heads} gives {width // heads}")
+            if head_dim == 0:
+                if width % heads:
+                    s.error("E_CONSTRAINT", f"heads={heads} must divide the model width D={width}")
+                effective_head_dim = width // heads
+            else:
+                effective_head_dim = head_dim
+            if s.args.get("rope") and effective_head_dim % 2:
+                s.error("E_CONSTRAINT", f"rope needs an even head dimension, got {effective_head_dim}")
             return
 
 
@@ -247,7 +252,12 @@ class TransformerBlock(nn.Module):
     _supports_inference_cache = True
 
     def forward(self, x, *, cache=None, node_id=None):
-        attention_kwargs = {} if cache is None else {"cache": cache, "node_id": f"{node_id}/attention"}
+        if cache is not None:
+            if not isinstance(node_id, str) or not node_id:
+                raise HNDLError("E_RUNTIME", "cached operator calls require a nonempty node_id")
+            attention_kwargs = {"cache": cache, "node_id": f"{node_id}/attention"}
+        else:
+            attention_kwargs = {}
         if self.post_norm:
             branch = self.attn(x, **attention_kwargs)
             x = self.norm1(x + branch if self.gamma1 is None else torch.addcmul(x, branch, self.gamma1))

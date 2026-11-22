@@ -30,6 +30,20 @@ class _PackedParameters(torch.autograd.Function):
         return None, None, None, *pieces
 
 
+class _PackedExpertGroup(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, packed, sizes, num_experts, *parameters):
+        ctx.sizes = sizes
+        ctx.num_experts = num_experts
+        return packed.view_as(packed)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        unbound = [chunk.unbind(0) for chunk in gradient.split(ctx.sizes, dim=1)]
+        pieces = [unbound[j][e] for e in range(ctx.num_experts) for j in range(len(unbound))]
+        return None, None, None, *pieces
+
+
 class _VersionGuard(torch.autograd.Function):
     """Tie input-gradient execution to the original weights' version counters.
 
@@ -66,20 +80,35 @@ def _trust_token(owner):
 
 
 class _Layout:
-    def __init__(self, parameters, stacked, bindings):
+    def __init__(self, parameters, stacked, bindings, *, group_sizes=None):
         self.parameters = tuple(parameters)
         self.bindings = bindings
         self.stacked = stacked
-        self.sizes = tuple(p.shape[0] for p in parameters)
+        self.group_sizes = tuple(group_sizes) if group_sizes is not None else None
+        self.num_experts = (len(self.parameters) // len(self.group_sizes)
+                            if self.group_sizes is not None else 0)
+        self.sizes = tuple(p.shape[0] for p in self.parameters)
         # Normal tensors also work when preparation takes place inside
         # inference_mode and this same model is subsequently trained.
         with torch.inference_mode(False), torch.no_grad():
-            packed = (torch.stack(parameters) if stacked else torch.cat(parameters, dim=0)).detach()
-            views = packed.unbind(0) if stacked else packed.split(self.sizes, dim=0)
-            for parameter, view in zip(parameters, views):
-                parameter.data = view
+            if self.group_sizes is not None:
+                per_expert = len(self.group_sizes)
+                packed = torch.stack([
+                    torch.cat(self.parameters[e * per_expert:(e + 1) * per_expert], dim=0)
+                    for e in range(self.num_experts)
+                ], dim=0).detach()
+                for e in range(self.num_experts):
+                    views = packed[e].split(self.group_sizes, dim=0)
+                    for j, view in enumerate(views):
+                        self.parameters[e * per_expert + j].data = view
+            else:
+                packed = (torch.stack(self.parameters) if stacked else torch.cat(self.parameters, dim=0)).detach()
+                views = packed.unbind(0) if stacked else packed.split(self.sizes, dim=0)
+                for parameter, view in zip(self.parameters, views):
+                    parameter.data = view
         self.packed = packed
-        self.signature = _signature(parameters)
+        self.signature = _signature(self.parameters)
+        self._storage_checks = tuple((p, p.data_ptr(), p.shape, p.dtype) for p in self.parameters)
         self.token = None
 
     def matches(self, parameters):
@@ -88,9 +117,17 @@ class _Layout:
     def identities_match(self):
         return all(store.get(name) is parameter for store, name, parameter in self.bindings)
 
+    def storage_matches(self):
+        for p, ptr, shape, dtype in self._storage_checks:
+            if p.data_ptr() != ptr or p.shape != shape or p.dtype is not dtype or not p.is_contiguous():
+                return False
+        return True
+
     def value(self):
         if not torch.is_grad_enabled():
             return self.packed
+        if self.group_sizes is not None:
+            return _PackedExpertGroup.apply(self.packed, self.group_sizes, self.num_experts, *self.parameters)
         return _PackedParameters.apply(self.packed, self.sizes, self.stacked, *self.parameters)
 
 
@@ -98,16 +135,33 @@ def _bindings(owner, key):
     if key[0] == "experts":
         _, name, attribute = key
         modules = (expert._modules[name] for expert in owner.experts)
-    else:
-        names, attribute = key
-        modules = (getattr(owner, name) for name in names)
+        return tuple((module._parameters, attribute, module._parameters[attribute]) for module in modules)
+    if key[0] == "experts_group":
+        _, names, attribute = key
+        return tuple(
+            (expert._modules[name]._parameters, attribute, expert._modules[name]._parameters[attribute])
+            for expert in owner.experts
+            for name in names
+        )
+    names, attribute = key
+    modules = (getattr(owner, name) for name in names)
     return tuple((module._parameters, attribute, module._parameters[attribute]) for module in modules)
 
 
-def _packed(owner, key, parameters, *, stacked=False):
+def _fallback_pack(parameters, stacked, group_sizes):
+    if group_sizes is not None:
+        per_expert = len(group_sizes)
+        num_experts = len(parameters) // per_expert
+        return torch.stack([
+            torch.cat(parameters[e * per_expert:(e + 1) * per_expert], dim=0)
+            for e in range(num_experts)
+        ], dim=0)
+    return torch.stack(parameters) if stacked else torch.cat(parameters, dim=0)
+
+
+def _packed(owner, key, parameters, *, stacked=False, group_sizes=None):
     if torch.compiler.is_compiling() or _functorch_active():
-        parameters = tuple(parameters)
-        return torch.stack(parameters) if stacked else torch.cat(parameters, dim=0)
+        return _fallback_pack(tuple(parameters), stacked, group_sizes)
     layouts = owner.__dict__.setdefault("_hndl_packed_layouts", {})
     token = _trust_token(owner)
     layout = layouts.get(key)
@@ -115,17 +169,18 @@ def _packed(owner, key, parameters, *, stacked=False):
     # this cheap identity guard even under a trusted storage/shape contract,
     # and never rebind ephemeral functional parameters into cached storage.
     if layout is not None and not layout.identities_match():
-        parameters = tuple(parameters)
-        return torch.stack(parameters) if stacked else torch.cat(parameters, dim=0)
+        return _fallback_pack(tuple(parameters), stacked, group_sizes)
     if token is not None and layout is not None and layout.token == token:
-        return layout.value()
+        if layout.storage_matches():
+            return layout.value()
+        return _fallback_pack(tuple(parameters), stacked, group_sizes)
     parameters = tuple(parameters)
     blocked = getattr(owner, "_hndl_packing_blocked", ())
     if (len({id(p) for p in parameters}) != len(parameters)
             or any(id(p) in blocked or type(p) is not nn.Parameter for p in parameters)):
-        return torch.stack(parameters) if stacked else torch.cat(parameters, dim=0)
+        return _fallback_pack(parameters, stacked, group_sizes)
     if layout is None or not layout.matches(parameters):
-        layout = layouts[key] = _Layout(parameters, stacked, _bindings(owner, key))
+        layout = layouts[key] = _Layout(parameters, stacked, _bindings(owner, key), group_sizes=group_sizes)
     layout.token = token
     return layout.value()
 
@@ -168,6 +223,26 @@ def expert_parameters(owner, name, attribute="weight"):
     return torch.stack(tuple(parameters))
 
 
+def expert_pair_parameters(owner, names, attribute="weight"):
+    """An expert-major concatenated view ``[E, sum(H_i), ...]`` across projection names.
+
+    Every underlying public parameter retains contiguous ``[H_i, ...]`` storage
+    sharing the packed ``[E, sum(H_i), ...]`` buffer.
+    """
+    names = tuple(names)
+    parameters = tuple(
+        expert._modules[name]._parameters[attribute]
+        for expert in owner.experts
+        for name in names
+    )
+    if not owner.experts:
+        return torch.empty(0)
+    sizes = tuple(owner.experts[0]._modules[name]._parameters[attribute].shape[0] for name in names)
+    if getattr(owner, "_hndl_packing", False):
+        return _packed(owner, ("experts_group", names, attribute), parameters, group_sizes=sizes)
+    return _fallback_pack(parameters, False, sizes)
+
+
 def _guard_packed_input(owner, key, inputs, weights):
     if (torch.compiler.is_compiling() or _functorch_active() or not torch.is_grad_enabled()
             or not inputs.requires_grad or not getattr(owner, "_hndl_packing", False)):
@@ -181,6 +256,11 @@ def _guard_packed_input(owner, key, inputs, weights):
 def guard_expert_input(owner, name, inputs, weights):
     """Preserve version checks where an expert matrix aliases public weights."""
     return _guard_packed_input(owner, ("experts", name, "weight"), inputs, weights)
+
+
+def guard_expert_pair_input(owner, names, inputs, weights):
+    """Preserve version checks where a grouped expert matrix aliases public weights."""
+    return _guard_packed_input(owner, ("experts_group", tuple(names), "weight"), inputs, weights)
 
 
 def prepare_packed(module, *, trusted=False):
@@ -213,7 +293,7 @@ def prepare_packed(module, *, trusted=False):
         child.__dict__.setdefault("_hndl_packed_layouts", {})
         layouts = child._hndl_packed_layouts
         for key, layout in tuple(layouts.items()):
-            if not layout.identities_match():
+            if not layout.identities_match() or not layout.storage_matches():
                 del layouts[key]
         if trusted:
             child._hndl_packing_owner = weakref.ref(module)
@@ -229,6 +309,13 @@ def prepare_packed(module, *, trusted=False):
                 groups.append(("q_proj", "k_proj", "v_proj"))
             else:
                 groups.append(("k_proj", "v_proj"))
+        if all(hasattr(child, name) for name in ("x_q_proj", "x_k_proj", "x_v_proj")):
+            groups.append(("x_q_proj", "x_k_proj", "x_v_proj"))
+        if all(hasattr(child, name) for name in ("c_q_proj", "c_k_proj", "c_v_proj")):
+            groups.append(("c_q_proj", "c_k_proj", "c_v_proj"))
+        if (hasattr(child, "k_up") and hasattr(child, "v_up")
+                and not getattr(child, "is_weight_absorbed", False)):
+            groups.append(("k_up", "v_up"))
         if id(child) not in expert_children and all(hasattr(child, name) for name in ("gate", "up")):
             groups.append(("gate", "up"))
         for names in groups:

@@ -63,9 +63,9 @@ class GRN(nn.Module):
     def forward(self, x):
         calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
         x_calc = x.to(calc_dtype)
-        gx = torch.sqrt(torch.sum(x_calc**2, dim=(2, 3), keepdim=True) + self.eps)
+        gx = torch.sqrt(torch.sum(x_calc.square(), dim=(2, 3), keepdim=True) + self.eps)
         nx = (gx / (gx.mean(dim=1, keepdim=True) + self.eps)).to(x.dtype)
-        return self.gamma * (x * nx) + self.beta + x
+        return torch.addcmul(self.beta, x, self.gamma * nx + 1.0)
 
     def extra_repr(self):
         return f"eps={self.eps}"

@@ -26,6 +26,8 @@ class EqualLinear(nn.Linear):
     def forward(self, x):
         if not self.equalized:
             return super().forward(x)
+        if x.numel() <= self.weight.numel():
+            return F.linear(x * self._scale, self.weight, self.bias)
         return F.linear(x, self.weight * self._scale, self.bias)
 
     def extra_repr(self):

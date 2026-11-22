@@ -122,6 +122,36 @@ class Hopfield(nn.Module):
 
     def forward(self, x):
         xi = F.layer_norm(x, self._normalized_shape, eps=EPS) if self.normalize else x
+        if (self.patterns >= 128 and xi.dtype != torch.float64
+                and (xi.device.type != "cuda"
+                     or xi.dtype in (torch.float16, torch.bfloat16)
+                     or torch.is_autocast_enabled("cuda"))):
+            stored = self.stored
+            if torch.is_autocast_enabled(xi.device.type):
+                compute_dtype = torch.get_autocast_dtype(xi.device.type)
+                if xi.dtype != compute_dtype:
+                    xi = xi.to(compute_dtype)
+                if stored.dtype != compute_dtype:
+                    stored = stored.to(compute_dtype)
+            elif stored.dtype != xi.dtype:
+                stored = stored.to(xi.dtype)
+            if xi.ndim == 2:
+                q = xi.unsqueeze(0)
+                kv = stored.unsqueeze(0)
+                for _ in range(self.steps):
+                    q = F.scaled_dot_product_attention(q, kv, kv, scale=self.beta)
+                return q.squeeze(0)
+            if xi.ndim == 3:
+                q = xi
+                kv = stored.unsqueeze(0).expand(xi.shape[0], -1, -1)
+                for _ in range(self.steps):
+                    q = F.scaled_dot_product_attention(q, kv, kv, scale=self.beta)
+                return q
+            q = xi.reshape(xi.shape[0], -1, self.features)
+            kv = stored.unsqueeze(0).expand(xi.shape[0], -1, -1)
+            for _ in range(self.steps):
+                q = F.scaled_dot_product_attention(q, kv, kv, scale=self.beta)
+            return q.reshape(xi.shape)
         stored_t = self.stored.t()
         for _ in range(self.steps):
             xi = torch.softmax(self.beta * (xi @ stored_t), dim=-1) @ self.stored

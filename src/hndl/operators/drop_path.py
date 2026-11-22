@@ -9,9 +9,8 @@ from ..operator import Arg, Example, operator
 def _relation(s):
     shape = s.shape("x") or s.shape("out")
     if shape is None:
-        rank = 3
-    else:
-        rank = len(shape)
+        return
+    rank = len(shape)
     s.rank("x", rank)
     s.rank("out", rank)
     s.equal("x", "out")
@@ -28,7 +27,7 @@ def _reference(module):
             return torch.zeros_like(x)
         keep_prob = 1.0 - drop_prob
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor = torch.rand(shape, dtype=torch.float32, device=x.device)
         mask = random_tensor < keep_prob
         if scale_by_keep:
             mask = mask.to(x.dtype) / keep_prob
@@ -75,7 +74,7 @@ class DropPath(nn.Module):
             return torch.zeros_like(x)
         keep_prob = 1.0 - self.drop_prob
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor = torch.rand(shape, dtype=torch.float32, device=x.device)
         mask = (random_tensor < keep_prob).to(x.dtype)
         if self.scale_by_keep:
             mask = mask / keep_prob
