@@ -55,9 +55,10 @@ class MatMul(nn.Module):
     the plan resolves. The batch is shared: there is no broadcasting of the
     batch axis or of a missing axis.
 
-    Batched matrix multiplication supports rank 3, rank 4, and rank 5 tensors with
+    Batched matrix multiplication supports rank 3 and rank 4 tensors with
     matching leading batch dimensions ``[B, ..., N, K] @ [B, ..., K, M] -> [B, ..., N, M]``.
-    Both operands must share the same rank (at least 3) and leading dimensions.
+    Both operands must share the same rank (at least 3) and leading dimensions;
+    rank 2 tensors are not supported (use ``linear`` for 2D feature maps).
 
     There are no parameters and no buffers, train and eval behave identically,
     and the product runs in the plan compute dtype. Reduced-precision matrix

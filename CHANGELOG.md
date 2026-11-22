@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Enforce registered-state and mid-forward mutation checks on `PreparedNetwork` generated execution with thread-safe signature updates, while reducing wrapper and generated-forward overhead so batch-1 CPU MLP execution beats `nn.Sequential`.
+- Unify `InferenceCache` and streaming session guards into a single low-overhead traversal, reuse active device/stream/autocast context across layers, and add `mul`, `mish`, `softplus`, and `clamp` to the streaming tokenwise contract.
+- Accelerate `GatedDeltaAttention` (`decay_kind="channel"`) via midpoint-shifted factored batched matmuls with overflow fallback and a direct `t=1` recurrent decode fast path; preserve `conv_q`/`conv_k`/`conv_v` hooks and handle `T=0` inputs safely.
+- Vectorize `Mamba2` chunked SSD evaluation, eliminate its redundant `zxbcdt` copy, add a direct `t=1` recurrent decode fast path, and upcast `dt`/`A_log` before `softplus`/`exp` to prevent `float16` overflow.
+- Fix `LatentAttention.absorb_weights()` to avoid autograd graph leaks, `inference_mode` cache crashes, and stale weights after `load_state_dict()`; add `unabsorb_weights()`; replace absorbed `einsum` calls with `matmul`/`F.linear`; enable FlashAttention on cached prefill; and pack `k_up`/`v_up` projections.
+- Eliminate per-token FlexAttention block-mask recompilation during single-token cached `Attention` decode, bound `_mask_cache` memory by storing a single largest window mask per configuration, avoid caching inference tensors in `_get_causal_bias()`, and preserve autocast query/key dtypes in `Attention` and `LatentAttention`.
+- Fix `MoE` `torch.autocast` dtype mismatches across grouped, padded, sparse, and fallback dispatch modes; eliminate redundant token gathers; single-pack padded execution; replace `tile=1` sparse fallback collapse with per-expert sliced `F.linear`; and pack `JointAttention` QKV projections.
+- Optimize `EqualLinear` (scale smaller operand), `RMSNorm(zero_centered=True)` (fused `F.rms_norm`), `GRN` (fused `addcmul`), `Hopfield` and `SpatialAttention` (gated SDPA), `RoPE` (pre-duplication trig), `SinusoidalEmbed` (cached fp32/fp64 frequencies), and `DeploymentModel`/`export` (pre-parsed input guards and single-pass direct-storage SHA-256 hashing).
+- Guard packed projection storage against `.weight.data` reassignments without `rebind_state()`, and extend `init_policy="depth_scaled"` to composite `transformer_block`/`resblock` modules and all `moe` experts.
+- Fix shape/argument validation and numerical edge cases in `transformer_block` (`head_dim`, empty cached `node_id`), 2D axial RoPE (`head_dim % 4 == 0`, `H * W == T`, NTK exponent, compiled `start` slice), `dy_tanh`/`drop_path`/`snake` (rank-polymorphic resolution, `bfloat16` drop sampling, `float16` NaN and channel inference), `deconv1d(causal=True)`, `resblock` bottleneck `group_norm`, and `matmul`.
+- Fix static profiler parameter and FLOP formulas across `resblock`, `cross_attention`, `joint_attention`, `dy_tanh`, `snake`, `swiglu`, `feed_forward`, `transformer_block`, `deconv`/`deconv1d`, `mamba2`, `latent_attention`, `gated_delta_attention`, `patch_embed`, `adaln_zero`, `hopfield`, and `spatial_attention`; complete `plan.diff()` for rewired inputs, initialization, trainability, and multi-output shape deltas; fix pass-through edges in `plan.to_mermaid()`; and remove O(N²) tie scans and redundant serialization in `resolver.py` and `types.py`.
+
 ## 0.12.0 (2026-11-20)
 
 - Preserve hooks and custom expert projections across MoE dispatch modes and compute group boundaries from sorted routes to reduce runtime and temporary allocations.
