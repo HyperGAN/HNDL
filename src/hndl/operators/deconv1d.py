@@ -13,8 +13,14 @@ from ._equalized import eval_weight
 def _validate(args):
     if args["output_padding"] >= args["stride"] and args["output_padding"] >= args["dilation"]:
         raise HNDLError("E_ARGUMENT", "output_padding must be smaller than stride or dilation")
-    if args.get("causal") and args.get("padding", 0) != 0:
-        raise HNDLError("E_ARGUMENT", "causal=True requires padding=0")
+    if args.get("causal"):
+        if args.get("padding", 0) != 0:
+            raise HNDLError("E_ARGUMENT", "causal=True requires padding=0")
+        if args["dilation"] * (args["kernel_size"] - 1) + args["output_padding"] + 1 < args["stride"]:
+            raise HNDLError(
+                "E_ARGUMENT",
+                "causal=True requires dilation * (kernel_size - 1) + output_padding + 1 >= stride",
+            )
 
 
 def _relation(s):
@@ -215,6 +221,14 @@ class ConvTranspose1d(nn.ConvTranspose1d):
         causal=False,
         channels_last=False,
     ):
+        if causal:
+            if padding != 0:
+                raise HNDLError("E_ARGUMENT", "causal=True requires padding=0")
+            if dilation * (kernel_size - 1) + output_padding + 1 < stride:
+                raise HNDLError(
+                    "E_ARGUMENT",
+                    "causal=True requires dilation * (kernel_size - 1) + output_padding + 1 >= stride",
+                )
         super().__init__(
             in_channels,
             out_channels,

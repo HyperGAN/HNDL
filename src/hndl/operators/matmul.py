@@ -6,18 +6,20 @@ from ..operator import Example, operator
 
 def _relation(s):
     ranks = [len(sh) for sh in (s.shape("a"), s.shape("b"), s.shape("out")) if sh is not None]
-    if ranks:
-        rank = ranks[0]
-        s.rank("a", rank)
-        s.rank("b", rank)
-        s.rank("out", rank)
-    else:
+    if not ranks:
         passes = getattr(s, "_passes", 0)
         s._passes = passes + 1
-        if passes > 0:
+        if passes > 0 and not s._solver.changed:
             s.rank("a", 3)
             s.rank("b", 3)
             s.rank("out", 3)
+        return
+    rank = ranks[0]
+    if rank < 3:
+        s.error("E_CONSTRAINT", f"matmul requires tensors of rank at least 3, got rank {rank}")
+    s.rank("a", rank)
+    s.rank("b", rank)
+    s.rank("out", rank)
 
 
 @operator(
@@ -53,9 +55,9 @@ class MatMul(nn.Module):
     the plan resolves. The batch is shared: there is no broadcasting of the
     batch axis or of a missing axis.
 
-    Batched matrix multiplication supports rank 2, rank 3, and rank 4 tensors with
-    matching leading batch dimensions [B, ..., N, K] @ [B, ..., K, M] -> [B, ..., N, M].
-    Both operands must share the same rank and leading dimensions.
+    Batched matrix multiplication supports rank 3, rank 4, and rank 5 tensors with
+    matching leading batch dimensions ``[B, ..., N, K] @ [B, ..., K, M] -> [B, ..., N, M]``.
+    Both operands must share the same rank (at least 3) and leading dimensions.
 
     There are no parameters and no buffers, train and eval behave identically,
     and the product runs in the plan compute dtype. Reduced-precision matrix

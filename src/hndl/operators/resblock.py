@@ -23,8 +23,13 @@ def _relation(s):
     stride = args["stride"]
     out = s.rank("out", 4)
     s.rank("x", 4)
-    if args["norm"] == "group_norm" and out[1] is not None and out[1] % args["groups"]:
-        s.error("E_CONSTRAINT", f"groups={args['groups']} must divide out_channels={out[1]} for group_norm")
+    if args["norm"] == "group_norm" and out[1] is not None:
+        if out[1] % args["groups"]:
+            s.error("E_CONSTRAINT", f"groups={args['groups']} must divide out_channels={out[1]} for group_norm")
+        if args["kind"] == "bottleneck":
+            mid_channels = max(1, out[1] // args["bottleneck_ratio"])
+            if mid_channels % args["groups"]:
+                s.error("E_CONSTRAINT", f"groups={args['groups']} must divide mid_channels={mid_channels} for group_norm")
     for axis in (2, 3):
         conv_axis(s, axis, kernel=KERNEL, stride=stride, padding=PADDING, dilation=1)
 

@@ -9,18 +9,17 @@ from ..operator import Arg, Example, operator
 def _relation(s):
     shape = s.shape("x") or s.shape("out")
     if shape is None:
-        rank = 3
-    else:
-        rank = len(shape)
+        return
+    rank = len(shape)
     s.rank("x", rank)
     s.rank("out", rank)
     s.equal("x", "out")
-    dim = s.args.get("dim", 0)
+    dim = s.args.get("dim")
     shape = s.shape("x") or s.shape("out")
     if shape is not None and shape[-1] is not None:
         d = shape[-1]
-        if dim == 0:
-            s.args["dim"] = d
+        if dim is None or dim == 0:
+            s.arg("dim", d)
         elif dim != d:
             s.error("E_CONSTRAINT", f"dy_tanh dim={dim} does not match tensor dim {d}")
 

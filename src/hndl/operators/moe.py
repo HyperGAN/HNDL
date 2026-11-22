@@ -20,9 +20,23 @@ class _RoutedLinear(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, inputs, weights, expert_ids, bias):
+        if torch.is_autocast_enabled(inputs.device.type):
+            compute_dtype = torch.get_autocast_dtype(inputs.device.type)
+            if inputs.dtype != compute_dtype:
+                inputs = inputs.to(compute_dtype)
+            if weights.dtype != compute_dtype:
+                weights = weights.to(compute_dtype)
+            if bias is not None and bias.dtype != compute_dtype:
+                bias = bias.to(compute_dtype)
+        else:
+            if weights.dtype != inputs.dtype:
+                weights = weights.to(inputs.dtype)
+            if bias is not None and bias.dtype != inputs.dtype:
+                bias = bias.to(inputs.dtype)
         ctx.save_for_backward(inputs, weights, expert_ids)
         ctx.has_bias = bias is not None
-        tile = max(1, min(64, 1048576 // (weights.shape[1] * weights.shape[2])))
+        weight_bytes = max(1, weights.shape[1] * weights.shape[2] * weights.element_size())
+        tile = max(1, min(64, (16 * 1024 * 1024) // weight_bytes))
         ctx.tile = tile
         out = inputs.new_empty((inputs.shape[0], weights.shape[1]))
         for start in range(0, inputs.shape[0], tile):
@@ -37,6 +51,8 @@ class _RoutedLinear(torch.autograd.Function):
     @staticmethod
     def backward(ctx, gradient):
         inputs, weights, expert_ids = ctx.saved_tensors
+        if gradient.dtype != inputs.dtype:
+            gradient = gradient.to(inputs.dtype)
         input_gradient = torch.empty_like(inputs) if ctx.needs_input_grad[0] else None
         weight_gradient = torch.zeros_like(weights) if ctx.needs_input_grad[1] else None
         bias_gradient = (gradient.new_zeros((weights.shape[0], weights.shape[1]))
@@ -60,6 +76,10 @@ class _RoutedLinear(torch.autograd.Function):
                 else:
                     bias_gradient.index_add_(0, ids, grad)
         return input_gradient, weight_gradient, None, bias_gradient
+
+
+def _align_dtype(tensor, dtype):
+    return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
 
 
 def _validate(args):
@@ -245,79 +265,190 @@ class MixtureOfExperts(nn.Module):
             weights = scores / scores.sum(dim=-1, keepdim=True).clamp(min=1e-4)
         else:
             weights = torch.softmax(values, dim=-1)
+        autocast_enabled = torch.is_autocast_enabled(flat.device.type)
+        compute_dtype = torch.get_autocast_dtype(flat.device.type) if autocast_enabled else flat.dtype
         if flat.shape[0] == 0:
-            return flat.reshape(x.shape)
+            return (flat.to(compute_dtype) if flat.dtype != compute_dtype else flat).reshape(x.shape)
 
-        token_ids = torch.arange(flat.shape[0], device=flat.device).repeat_interleave(self.top_k)
-        expert_ids = indices.reshape(-1)
-        routed_inputs = flat[token_ids]
-
-        # Grouped GEMM is useful where available. Portable dispatch keeps
-        # small dense batches fast, with a bounded-memory sparse alternative.
-        element_size = routed_inputs.element_size()
+        num_experts = len(self.experts)
+        element_size = compute_dtype.itemsize
         aligned = (self.d_model * element_size) % 16 == 0 and (self.hidden * element_size) % 16 == 0
-        grouped = (self._dispatch == "auto" and getattr(self, "_hndl_grouped_mm", True)
-                   and hasattr(torch, "_grouped_mm")
-                   and aligned and routed_inputs.dtype in (torch.bfloat16, torch.float16, torch.float32)
-                   and (not torch.compiler.is_compiling() or routed_inputs.dtype == torch.bfloat16))
-        estimated_padding = len(self.experts) * flat.shape[0] * (2 * self.d_model + 3 * self.hidden) * element_size
-        padded = (not grouped and (self._dispatch == "padded"
-                  or (self._dispatch == "auto" and estimated_padding <= self._max_padding_bytes)))
-        if (flat.device.type == "cpu" and not torch.compiler.is_compiling() and not grouped and not padded
-                or not self._can_batch_experts()):
-            out = torch.zeros_like(flat)
+        compiling = torch.compiler.is_compiling()
+        grouped = (
+            self._dispatch == "auto"
+            and getattr(self, "_hndl_grouped_mm", True)
+            and hasattr(torch, "_grouped_mm")
+            and aligned
+            and compute_dtype in (torch.bfloat16, torch.float16, torch.float32)
+            and (not compiling or compute_dtype == torch.bfloat16)
+        )
+        estimated_padding = num_experts * flat.shape[0] * (2 * self.d_model + 3 * self.hidden) * element_size
+        padded = not grouped and (
+            self._dispatch == "padded"
+            or (self._dispatch == "auto" and estimated_padding <= self._max_padding_bytes)
+        )
+
+        if not self._can_batch_experts():
+            expert_ids = indices.reshape(-1)
             route_weights = weights.reshape(-1, 1)
+            has_global_hooks = bool(_global_call_hooks())
+            out = None
             for expert_id, expert in enumerate(self.experts):
                 routes = torch.where(expert_ids == expert_id)[0]
-                tokens = token_ids[routes]
-                contribution = expert(flat[tokens]) * route_weights[routes]
+                if (routes.numel() == 0 and not has_global_hooks
+                        and not any(_has_call_hooks(m) for m in expert.modules())):
+                    continue
+                tokens = torch.div(routes, self.top_k, rounding_mode="floor")
+                contribution = expert(flat[tokens])
+                contribution = contribution * route_weights[routes].to(contribution.dtype)
+                if out is None:
+                    out = flat.new_zeros(flat.shape, dtype=contribution.dtype)
+                elif contribution.dtype != out.dtype:
+                    contribution = contribution.to(out.dtype)
                 out = out.index_add(0, tokens, contribution)
-            return (out * self.routed_scaling_factor).reshape(x.shape)
+            if out is None:
+                out = flat.new_zeros(flat.shape, dtype=compute_dtype)
+            if self.routed_scaling_factor != 1.0:
+                out = out * self.routed_scaling_factor
+            return out.reshape(x.shape)
 
         up_w = expert_parameters(self, "up")
         down_w = expert_parameters(self, "down")
         up_b = expert_parameters(self, "up", "bias") if self.bias else None
         down_b = expert_parameters(self, "down", "bias") if self.bias else None
-        if grouped or padded:
-            order = torch.argsort(expert_ids)
-            routed_inputs = routed_inputs[order]
-            expert_ids = expert_ids[order]
-            token_ids = token_ids[order]
-            routing_weights = weights.reshape(-1, 1)[order]
-            experts = torch.arange(len(self.experts), device=expert_ids.device)
-            if grouped:
-                offsets = torch.searchsorted(expert_ids, experts, right=True, out_int32=True)
-
-                def linear(inputs, weight, bias):
-                    result = torch._grouped_mm(inputs, weight.transpose(1, 2), offsets)
-                    return result if bias is None else result + bias[expert_ids]
-            else:
-                offsets = torch.searchsorted(expert_ids, experts)
-                rows = torch.arange(expert_ids.shape[0], device=flat.device) - offsets[expert_ids]
-
-                def linear(inputs, weight, bias):
-                    packed = inputs.new_zeros((len(self.experts), flat.shape[0], inputs.shape[-1]))
-                    packed[expert_ids, rows] = inputs
-                    result = torch.bmm(packed, weight.transpose(1, 2))
-                    if bias is not None:
-                        result = result + bias.unsqueeze(1)
-                    return result[expert_ids, rows]
-        else:
-            routing_weights = weights.reshape(-1, 1)
-
-            def linear(inputs, weight, bias):
-                return _RoutedLinear.apply(inputs, weight, expert_ids, bias)
-
-        up = linear(guard_expert_input(self, "up", routed_inputs, up_w), up_w, up_b)
         if self.expert_kind == "swiglu":
             gate_w = expert_parameters(self, "gate")
             gate_b = expert_parameters(self, "gate", "bias") if self.bias else None
-            gate = linear(guard_expert_input(self, "gate", routed_inputs, gate_w), gate_w, gate_b)
-            hidden = F.silu(gate) * up
         else:
-            hidden = self.experts[0].activation(up)
-        expert_out = linear(guard_expert_input(self, "down", hidden, down_w), down_w, down_b) * routing_weights
-        out = torch.zeros_like(flat).index_add(0, token_ids, expert_out)
+            gate_w = gate_b = None
+
+        if grouped or padded or not compiling:
+            expert_ids, order = torch.sort(indices.reshape(-1))
+            token_ids = torch.div(order, self.top_k, rounding_mode="floor")
+            routed_inputs = flat[token_ids]
+            if routed_inputs.dtype != compute_dtype:
+                routed_inputs = routed_inputs.to(compute_dtype)
+            routing_weights = weights.reshape(-1, 1)[order]
+            up_w_c, up_b_c = _align_dtype(up_w, compute_dtype), _align_dtype(up_b, compute_dtype)
+            down_w_c, down_b_c = _align_dtype(down_w, compute_dtype), _align_dtype(down_b, compute_dtype)
+            gate_w_c, gate_b_c = _align_dtype(gate_w, compute_dtype), _align_dtype(gate_b, compute_dtype)
+
+            if grouped:
+                experts = torch.arange(num_experts, device=expert_ids.device)
+                offsets = torch.searchsorted(expert_ids, experts, right=True, out_int32=True)
+                if self.expert_kind == "swiglu":
+                    if gate_w_c.numel() <= 1_048_576:
+                        routed_gu = guard_expert_input(
+                            self, "gate", guard_expert_input(self, "up", routed_inputs, up_w), gate_w
+                        )
+                        w_gu = torch.cat((gate_w_c, up_w_c), dim=1)
+                        gu = torch._grouped_mm(routed_gu, w_gu.transpose(1, 2), offsets)
+                        if self.bias:
+                            gu = gu + torch.cat((gate_b_c, up_b_c), dim=1)[expert_ids]
+                        gate, up = gu.chunk(2, dim=-1)
+                    else:
+                        up_in = guard_expert_input(self, "up", routed_inputs, up_w)
+                        up = torch._grouped_mm(up_in, up_w_c.transpose(1, 2), offsets)
+                        if up_b_c is not None:
+                            up = up + up_b_c[expert_ids]
+                        gate_in = guard_expert_input(self, "gate", routed_inputs, gate_w)
+                        gate = torch._grouped_mm(gate_in, gate_w_c.transpose(1, 2), offsets)
+                        if gate_b_c is not None:
+                            gate = gate + gate_b_c[expert_ids]
+                    hidden = F.silu(gate) * up
+                else:
+                    up_in = guard_expert_input(self, "up", routed_inputs, up_w)
+                    up = torch._grouped_mm(up_in, up_w_c.transpose(1, 2), offsets)
+                    if up_b_c is not None:
+                        up = up + up_b_c[expert_ids]
+                    hidden = self.experts[0].activation(up)
+                down_in = guard_expert_input(self, "down", hidden, down_w)
+                expert_out = torch._grouped_mm(down_in, down_w_c.transpose(1, 2), offsets)
+                if down_b_c is not None:
+                    expert_out = expert_out + down_b_c[expert_ids]
+                expert_out = expert_out * routing_weights.to(expert_out.dtype)
+            elif padded:
+                experts = torch.arange(num_experts, device=expert_ids.device)
+                offsets = torch.searchsorted(expert_ids, experts)
+                rows = torch.arange(expert_ids.shape[0], device=flat.device) - offsets[expert_ids]
+                if flat.device.type == "cpu" and not compiling:
+                    ends = torch.searchsorted(expert_ids, experts, right=True)
+                    max_rows = int((ends - offsets).max().item())
+                else:
+                    max_rows = flat.shape[0]
+                packed_x = routed_inputs.new_zeros((num_experts, max_rows, self.d_model))
+                packed_x[expert_ids, rows] = routed_inputs
+                up_in = guard_expert_input(self, "up", packed_x, up_w)
+                up = torch.bmm(up_in, up_w_c.transpose(1, 2))
+                if up_b_c is not None:
+                    up = up + up_b_c.unsqueeze(1)
+                if self.expert_kind == "swiglu":
+                    gate_in = guard_expert_input(self, "gate", packed_x, gate_w)
+                    gate = torch.bmm(gate_in, gate_w_c.transpose(1, 2))
+                    if gate_b_c is not None:
+                        gate = gate + gate_b_c.unsqueeze(1)
+                    hidden = F.silu(gate) * up
+                else:
+                    hidden = self.experts[0].activation(up)
+                down_in = guard_expert_input(self, "down", hidden, down_w)
+                down = torch.bmm(down_in, down_w_c.transpose(1, 2))
+                if down_b_c is not None:
+                    down = down + down_b_c.unsqueeze(1)
+                expert_out = down[expert_ids, rows] * routing_weights.to(down.dtype)
+            else:
+                # Sparse bounded-memory dispatch: one contiguous slice per active expert (no weight copies).
+                counts = torch.bincount(expert_ids, minlength=num_experts).tolist()
+                routed_up = guard_expert_input(self, "up", routed_inputs, up_w)
+                up_chunks = routed_up.split(counts, dim=0)
+                hidden_parts = []
+                if self.expert_kind == "swiglu":
+                    routed_gate = guard_expert_input(self, "gate", routed_inputs, gate_w)
+                    gate_chunks = routed_gate.split(counts, dim=0)
+                    for e, count in enumerate(counts):
+                        if count == 0:
+                            continue
+                        u = F.linear(up_chunks[e], up_w_c[e], None if up_b_c is None else up_b_c[e])
+                        g = F.linear(gate_chunks[e], gate_w_c[e], None if gate_b_c is None else gate_b_c[e])
+                        hidden_parts.append(F.silu(g) * u)
+                else:
+                    act = self.experts[0].activation
+                    for e, count in enumerate(counts):
+                        if count == 0:
+                            continue
+                        u = F.linear(up_chunks[e], up_w_c[e], None if up_b_c is None else up_b_c[e])
+                        hidden_parts.append(act(u))
+                hidden = guard_expert_input(self, "down", torch.cat(hidden_parts, dim=0), down_w)
+                down_chunks = hidden.split(counts, dim=0)
+                out_parts = []
+                for e, count in enumerate(counts):
+                    if count == 0:
+                        continue
+                    out_parts.append(
+                        F.linear(down_chunks[e], down_w_c[e], None if down_b_c is None else down_b_c[e])
+                    )
+                expert_out = torch.cat(out_parts, dim=0)
+                expert_out = expert_out * routing_weights.to(expert_out.dtype)
+        else:
+            expert_ids = indices.reshape(-1)
+            token_ids = torch.arange(flat.shape[0], device=flat.device).repeat_interleave(self.top_k)
+            routed_inputs = flat[token_ids]
+            if routed_inputs.dtype != compute_dtype:
+                routed_inputs = routed_inputs.to(compute_dtype)
+            routing_weights = weights.reshape(-1, 1)
+            up = _RoutedLinear.apply(guard_expert_input(self, "up", routed_inputs, up_w), up_w, expert_ids, up_b)
+            if self.expert_kind == "swiglu":
+                gate = _RoutedLinear.apply(
+                    guard_expert_input(self, "gate", routed_inputs, gate_w), gate_w, expert_ids, gate_b
+                )
+                hidden = F.silu(gate) * up
+            else:
+                hidden = self.experts[0].activation(up)
+            expert_out = _RoutedLinear.apply(
+                guard_expert_input(self, "down", hidden, down_w), down_w, expert_ids, down_b
+            )
+            expert_out = expert_out * routing_weights.to(expert_out.dtype)
+
+        out = flat.new_zeros(flat.shape, dtype=expert_out.dtype).index_add(0, token_ids, expert_out)
         if self.routed_scaling_factor != 1.0:
             out = out * self.routed_scaling_factor
         return out.reshape(x.shape)
