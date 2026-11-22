@@ -154,11 +154,9 @@ class CrossAttention(nn.Module):
         if self.qk_norm == "rms_norm":
             self.q_norm = RMSNorm(self.eps, affine=True, D=self.head_dim)
             self.k_norm = RMSNorm(self.eps, affine=True, D=self.head_dim)
-        self._mask_cache = {}
 
     def _apply(self, fn, recurse=True):
         res = super()._apply(fn, recurse=recurse)
-        self._mask_cache.clear()
         if getattr(self, "_hndl_flex_attention", False):
             clear_attention_cache(self)
         if getattr(self, "_hndl_packing", False):
