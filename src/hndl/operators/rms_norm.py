@@ -99,10 +99,8 @@ class RMSNorm(nn.Module):
             self.register_parameter("weight", None)
 
     def forward(self, x):
-        if self.zero_centered:
-            normed = F.rms_norm(x, self.normalized_shape, None, self.eps)
-            return normed * (1.0 + self.weight)
-        return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
+        weight = 1.0 + self.weight if self.zero_centered else self.weight
+        return F.rms_norm(x, self.normalized_shape, weight, self.eps)
 
     def extra_repr(self):
         zc = f", zero_centered={self.zero_centered}" if self.zero_centered else ""
