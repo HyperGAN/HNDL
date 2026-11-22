@@ -86,6 +86,16 @@ def _normalize_graph_nodes(graph, registry, limits):
     lookup = {}
     specs = {}
     declarations = {}
+    nodes_by_id = {}
+    nodes_by_binding = {}
+    for n in graph.nodes:
+        if isinstance(n, Node):
+            if isinstance(n.id, str) and n.id not in nodes_by_id:
+                nodes_by_id[n.id] = n
+            if isinstance(n.source, Mapping):
+                binding = n.source.get("binding")
+                if isinstance(binding, str) and binding not in nodes_by_binding:
+                    nodes_by_binding[binding] = n
     edge_count = 0
     for index, node in enumerate(graph.nodes):
         if not isinstance(node, Node) or not isinstance(node.id, str) or not _ID.fullmatch(node.id):
@@ -127,9 +137,9 @@ def _normalize_graph_nodes(graph, registry, limits):
                 if not isinstance(target_p, str) or not isinstance(source_ref, str) or "." not in source_ref:
                     raise HNDLError("E_SCHEMA", f"Invalid tie reference {source_ref!r}", node=node.id)
                 source_node_id, param = source_ref.split(".", 1)
-                matching = next((n for n in graph.nodes if n.id == source_node_id), None)
+                matching = nodes_by_id.get(source_node_id)
                 if matching is None:
-                    matching = next((n for n in graph.nodes if n.source and n.source.get("binding") == source_node_id), None)
+                    matching = nodes_by_binding.get(source_node_id)
                 if matching is None:
                     raise HNDLError("E_BINDING", f"Tied source node {source_node_id!r} not found", node=node.id)
                 normalized_tie[target_p] = f"{matching.id}.{param}"
@@ -750,6 +760,9 @@ def validate_concrete_plan(
                   named_outputs=plan.named_outputs)
     verified = resolve_graph(graph, registry, bounds)
     if plan.semantic_digest == verified.semantic_digest:
+        if plan.registry is registry:
+            object.__setattr__(plan, "_validated_stamp", stamp)
+            return plan
         res = replace(plan, registry=registry)
         object.__setattr__(res, "_validated_stamp", stamp)
         return res
