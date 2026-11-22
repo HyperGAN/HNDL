@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from ..errors import HNDLError
 from ..operator import Arg, Example, operator
@@ -124,9 +125,16 @@ class SpatialAttention(nn.Module):
         f = self.f_proj(x).reshape(batch, self.query_channels, positions)
         g = self.g_proj(x).reshape(batch, self.query_channels, positions)
         h = self.h_proj(x).reshape(batch, channels, positions)
-        energy = torch.bmm(f.transpose(1, 2), g)
-        beta = energy.softmax(dim=-1)
-        attended = torch.bmm(h, beta.transpose(1, 2))
+        if (x.device.type == "cuda" and x.dtype != torch.float64
+                and self.query_channels >= 16 and positions >= 256):
+            fq = f.transpose(1, 2).unsqueeze(1).contiguous()
+            gk = g.transpose(1, 2).unsqueeze(1).contiguous()
+            hv = h.transpose(1, 2).unsqueeze(1).contiguous()
+            attended = F.scaled_dot_product_attention(fq, gk, hv, scale=1.0).squeeze(1).transpose(1, 2)
+        else:
+            energy = torch.bmm(f.transpose(1, 2), g)
+            beta = energy.softmax(dim=-1)
+            attended = torch.bmm(h, beta.transpose(1, 2))
         return torch.addcmul(x, attended.reshape(batch, channels, height, width), self.gamma)
 
     def extra_repr(self):

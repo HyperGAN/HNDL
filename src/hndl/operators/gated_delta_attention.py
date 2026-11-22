@@ -4,9 +4,19 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..errors import HNDLError
 from ..inference import _causal_conv
-from ._packing import clear_packed_cache, project
+from ._packing import _global_call_hooks, _has_call_hooks, clear_packed_cache, project
 from ..operator import Arg, Example, operator
+
+
+def _plain_conv1d(module):
+    return (
+        type(module) is nn.Conv1d
+        and "forward" not in module.__dict__
+        and not _has_call_hooks(module)
+        and not _global_call_hooks()
+    )
 
 
 def _relation(s):
@@ -47,6 +57,8 @@ def _reference(module):
 
     def run(x):
         b, t, _ = x.shape
+        if t == 0 or b == 0:
+            return x * 0.0
         q = F.linear(x, module.q_proj.weight, module.q_proj.bias)
         k = F.linear(x, module.k_proj.weight, module.k_proj.bias)
         v = F.linear(x, module.v_proj.weight, module.v_proj.bias)
@@ -232,7 +244,15 @@ class GatedDeltaAttention(nn.Module):
         super().__init__()
         self.heads = int(heads)
         self.D = int(D)
-        self.head_dim = int(head_dim) if head_dim > 0 else self.D // self.heads
+        if head_dim == 0:
+            if self.D % self.heads != 0:
+                raise HNDLError(
+                    "E_CONSTRAINT",
+                    f"gated_delta_attention heads={self.heads} must divide width D={self.D} when head_dim=0",
+                )
+            self.head_dim = self.D // self.heads
+        else:
+            self.head_dim = int(head_dim)
         self.decay_kind = str(decay_kind)
         self.gate_rank = (
             int(gate_rank) if gate_rank > 0 else max(self.head_dim, max(1, self.D // 16))
@@ -296,20 +316,43 @@ class GatedDeltaAttention(nn.Module):
         if self.conv_size > 0:
             pad = (self.conv_size - 1, 0)
             inner_dim = self.heads * self.head_dim
-            qkv = torch.cat([q, k, v], dim=-1)
-            qkv_raw = qkv.transpose(1, 2)
-            conv_w = torch.cat([self.conv_q.weight, self.conv_k.weight, self.conv_v.weight], dim=0)
-            conv_b = (
-                torch.cat([self.conv_q.bias, self.conv_k.bias, self.conv_v.bias], dim=0)
-                if self.conv_q.bias is not None
-                else None
+            convs = (self.conv_q, self.conv_k, self.conv_v)
+            biases = tuple(c.bias for c in convs)
+            can_fuse = all(_plain_conv1d(c) for c in convs) and (
+                all(b_t is None for b_t in biases) or all(b_t is not None for b_t in biases)
             )
-            if state is None:
-                convolved = F.conv1d(F.pad(qkv_raw, pad), conv_w, conv_b, groups=3 * inner_dim)[..., :t]
+            if can_fuse:
+                qkv_raw = torch.cat([q, k, v], dim=-1).transpose(1, 2)
+                conv_w = torch.cat([self.conv_q.weight, self.conv_k.weight, self.conv_v.weight], dim=0)
+                conv_b = torch.cat(biases, dim=0) if biases[0] is not None else None
+                if state is None:
+                    convolved = F.conv1d(F.pad(qkv_raw, pad), conv_w, conv_b, groups=3 * inner_dim)
+                else:
+                    convolved = _causal_conv(state, "conv", qkv_raw, conv_w, conv_b, 3 * inner_dim)
+                qkv_conv = F.silu(convolved.transpose(1, 2))
+                q, k, v = qkv_conv.chunk(3, dim=-1)
+            elif state is None:
+                q = F.silu(self.conv_q(F.pad(q.transpose(1, 2), pad)).transpose(1, 2))
+                k = F.silu(self.conv_k(F.pad(k.transpose(1, 2), pad)).transpose(1, 2))
+                v = F.silu(self.conv_v(F.pad(v.transpose(1, 2), pad)).transpose(1, 2))
             else:
-                convolved = _causal_conv(state, "conv", qkv_raw, conv_w, conv_b, 3 * inner_dim)
-            qkv_conv = F.silu(convolved.transpose(1, 2))
-            q, k, v = qkv_conv.chunk(3, dim=-1)
+                qkv_raw = torch.cat([q, k, v], dim=-1).transpose(1, 2)
+                history_len = self.conv_size - 1
+                if history_len > 0:
+                    history = state.tensors.get("conv")
+                    if history is None:
+                        history = torch.zeros(
+                            *qkv_raw.shape[:-1], history_len, device=qkv_raw.device, dtype=qkv_raw.dtype
+                        )
+                        state.tensors["conv"] = history
+                    window = torch.cat((history, qkv_raw), dim=-1)
+                    history.copy_(window[..., -history_len:])
+                else:
+                    window = qkv_raw
+                wq, wk, wv = window.chunk(3, dim=1)
+                q = F.silu(self.conv_q(wq).transpose(1, 2))
+                k = F.silu(self.conv_k(wk).transpose(1, 2))
+                v = F.silu(self.conv_v(wv).transpose(1, 2))
 
         q = q.view(b, t, self.heads, self.head_dim).permute(0, 2, 1, 3)
         k = k.view(b, t, self.heads, self.head_dim).permute(0, 2, 1, 3)
@@ -344,112 +387,180 @@ class GatedDeltaAttention(nn.Module):
     def forward(self, x, *, cache=None, node_id=None):
         state = cache._node(self, node_id, x, "gated_delta_attention") if cache is not None else None
         b, t, _ = x.shape
+        if t == 0 or b == 0:
+            return x * 0.0
         calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
         q, k, v, beta, log_alpha, g = self._prepare_inputs(x, state=state)
         q_f, k_f, v_f, beta_f = q.to(calc_dtype), k.to(calc_dtype), v.to(calc_dtype), beta.to(calc_dtype)
-        out = torch.zeros(b, self.heads, t, self.head_dim, device=x.device, dtype=calc_dtype)
         S = state.tensors.get("recurrent") if state is not None else None
         if S is None:
             S = torch.zeros(b, self.heads, self.head_dim, self.head_dim, device=x.device, dtype=calc_dtype)
             if state is not None:
                 state.tensors["recurrent"] = S
 
-        C = self.chunk_size
-        N_full = t // C
+        if t == 1:
+            a_t = torch.exp(log_alpha[:, :, 0]).unsqueeze(-1)
+            S_decay = a_t * S
+            k0 = k_f[:, :, 0]
+            v0 = v_f[:, :, 0]
+            q0 = q_f[:, :, 0]
+            beta0 = beta_f[:, :, 0]
+            v_pred = torch.matmul(k0.unsqueeze(-2), S_decay).squeeze(-2)
+            err = v0 - v_pred
+            S = S_decay + (beta0.unsqueeze(-1) * k0).unsqueeze(-1) * err.unsqueeze(-2)
+            out = torch.matmul(q0.unsqueeze(-2), S).squeeze(-2).unsqueeze(2)
+        else:
+            out = torch.empty(b, self.heads, t, self.head_dim, device=x.device, dtype=calc_dtype)
+            C = self.chunk_size
+            N_full = t // C
+            max_safe = 300.0 if calc_dtype == torch.float64 else 35.0
 
-        if N_full > 0:
-            full_len = N_full * C
-            q_full = q_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
-            k_full = k_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
-            v_full = v_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
-            beta_full = beta_f[:, :, :full_len].view(b, self.heads, N_full, C)
-            log_a_full = log_alpha[:, :, :full_len].view(
-                b, self.heads, N_full, C, log_alpha.shape[-1]
-            )
+            if N_full > 0:
+                full_len = N_full * C
+                q_full = q_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
+                k_full = k_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
+                v_full = v_f[:, :, :full_len].view(b, self.heads, N_full, C, self.head_dim)
+                beta_full = beta_f[:, :, :full_len].view(b, self.heads, N_full, C)
+                log_a_full = log_alpha[:, :, :full_len].view(
+                    b, self.heads, N_full, C, log_alpha.shape[-1]
+                )
 
-            cum_log_a = torch.cumsum(log_a_full, dim=3)
-            lambda_init = torch.exp(cum_log_a)
+                cum_log_a = torch.cumsum(log_a_full, dim=3)
+                lambda_init = torch.exp(cum_log_a)
 
-            if self.decay_kind == "head":
-                diff = (cum_log_a - cum_log_a.transpose(-2, -1)).clamp(max=0.0)
-                decay = torch.exp(diff) * beta_full.unsqueeze(-2)
-                inner_k = torch.matmul(k_full, k_full.transpose(-2, -1)) * decay
-                inner_q = torch.matmul(q_full, k_full.transpose(-2, -1)) * decay
-                A = torch.tril(inner_k, diagonal=-1)
-                B_mat = torch.tril(inner_q, diagonal=0)
-            else:
-                A_list = []
-                B_list = []
+                if self.decay_kind == "head":
+                    diff = (cum_log_a - cum_log_a.transpose(-2, -1)).clamp(max=0.0)
+                    decay = torch.exp(diff) * beta_full.unsqueeze(-2)
+                    inner_k = torch.matmul(k_full, k_full.transpose(-2, -1)) * decay
+                    inner_q = torch.matmul(q_full, k_full.transpose(-2, -1)) * decay
+                    A = torch.tril(inner_k, diagonal=-1)
+                    B_mat = torch.tril(inner_q, diagonal=0)
+                else:
+                    use_factored = True
+                    if not torch.compiler.is_compiling() and C > 1:
+                        max_span = (cum_log_a[:, :, :, 0, :] - cum_log_a[:, :, :, -1, :]).max()
+                        use_factored = bool(max_span <= 2.0 * max_safe)
+                    if use_factored:
+                        m = 0.5 * (cum_log_a[:, :, :, :1, :] + cum_log_a[:, :, :, -1:, :])
+                        g_shift = cum_log_a - m
+                        exp_pos = torch.exp(g_shift)
+                        exp_neg = torch.exp(-g_shift)
+                        k_pos = k_full * exp_pos
+                        k_neg = k_full * exp_neg
+                        q_pos = q_full * exp_pos
+                        beta_w = beta_full.unsqueeze(-2)
+                        A = torch.tril(torch.matmul(k_pos, k_neg.transpose(-2, -1)) * beta_w, diagonal=-1)
+                        B_mat = torch.tril(torch.matmul(q_pos, k_neg.transpose(-2, -1)) * beta_w, diagonal=0)
+                    else:
+                        A_list = []
+                        B_list = []
+                        for c in range(N_full):
+                            diff_c = (cum_log_a[:, :, c].unsqueeze(3) - cum_log_a[:, :, c].unsqueeze(2)).clamp(max=0.0)
+                            decay_c = torch.exp(diff_c)
+                            beta_c = beta_full[:, :, c].unsqueeze(-2)
+                            ik_c = (k_full[:, :, c].unsqueeze(3) * decay_c * k_full[:, :, c].unsqueeze(2)).sum(-1) * beta_c
+                            iq_c = (q_full[:, :, c].unsqueeze(3) * decay_c * k_full[:, :, c].unsqueeze(2)).sum(-1) * beta_c
+                            A_list.append(torch.tril(ik_c, diagonal=-1))
+                            B_list.append(torch.tril(iq_c, diagonal=0))
+                        A = torch.stack(A_list, dim=2)
+                        B_mat = torch.stack(B_list, dim=2)
+
+                k_decay_init = lambda_init * k_full
+                vk_solve = torch.linalg.solve_triangular(
+                    A, torch.cat((v_full, k_decay_init), dim=-1), upper=False, unitriangular=True
+                )
+                E_intra, K_solve = vk_solve.chunk(2, dim=-1)
+
+                lambda_end = torch.exp(cum_log_a[:, :, :, -1])
+                lambda_to_end = torch.exp((cum_log_a[:, :, :, -1:] - cum_log_a).clamp(max=0.0))
+                W = beta_full.unsqueeze(-1) * (lambda_to_end * k_full)
+                Q_decay = q_full * lambda_init
+
+                E_list = []
+                S_list = []
                 for c in range(N_full):
-                    diff_c = (cum_log_a[:, :, c].unsqueeze(3) - cum_log_a[:, :, c].unsqueeze(2)).clamp(max=0.0)
-                    decay_c = torch.exp(diff_c)
-                    beta_c = beta_full[:, :, c].unsqueeze(-2)
-                    ik_c = (k_full[:, :, c].unsqueeze(3) * decay_c * k_full[:, :, c].unsqueeze(2)).sum(-1) * beta_c
-                    iq_c = (q_full[:, :, c].unsqueeze(3) * decay_c * k_full[:, :, c].unsqueeze(2)).sum(-1) * beta_c
-                    A_list.append(torch.tril(ik_c, diagonal=-1))
-                    B_list.append(torch.tril(iq_c, diagonal=0))
-                A = torch.stack(A_list, dim=2)
-                B_mat = torch.stack(B_list, dim=2)
+                    S_list.append(S)
+                    E_c = E_intra[:, :, c] - torch.matmul(K_solve[:, :, c], S)
+                    E_list.append(E_c)
+                    S = lambda_end[:, :, c].unsqueeze(-1) * S + torch.matmul(W[:, :, c].transpose(-2, -1), E_c)
 
-            E_intra = torch.linalg.solve_triangular(A, v_full, upper=False, unitriangular=True)
-            k_decay_init = lambda_init * k_full
-            K_solve = torch.linalg.solve_triangular(A, k_decay_init, upper=False, unitriangular=True)
+                E_all = torch.stack(E_list, dim=2)
+                S_all = torch.stack(S_list, dim=2)
+                o_all = torch.matmul(B_mat, E_all) + torch.matmul(Q_decay, S_all)
+                out[:, :, :full_len] = o_all.reshape(b, self.heads, full_len, self.head_dim)
 
-            lambda_end = torch.exp(cum_log_a[:, :, :, -1])
-            lambda_to_end = torch.exp((cum_log_a[:, :, :, -1:] - cum_log_a).clamp(max=0.0))
-            W = beta_full.unsqueeze(-1) * (lambda_to_end * k_full)
-            Q_decay = q_full * lambda_init
+            rem_start = N_full * C
+            if rem_start < t:
+                rem_len = t - rem_start
+                if rem_len == 1:
+                    a_t = torch.exp(log_alpha[:, :, rem_start]).unsqueeze(-1)
+                    S_decay = a_t * S
+                    k0 = k_f[:, :, rem_start]
+                    v0 = v_f[:, :, rem_start]
+                    q0 = q_f[:, :, rem_start]
+                    beta0 = beta_f[:, :, rem_start]
+                    v_pred = torch.matmul(k0.unsqueeze(-2), S_decay).squeeze(-2)
+                    err = v0 - v_pred
+                    S = S_decay + (beta0.unsqueeze(-1) * k0).unsqueeze(-1) * err.unsqueeze(-2)
+                    out[:, :, rem_start] = torch.matmul(q0.unsqueeze(-2), S).squeeze(-2)
+                else:
+                    qc = q_f[:, :, rem_start:t]
+                    kc = k_f[:, :, rem_start:t]
+                    vc = v_f[:, :, rem_start:t]
+                    betac = beta_f[:, :, rem_start:t]
 
-            for c in range(N_full):
-                E_c = E_intra[:, :, c] - torch.matmul(K_solve[:, :, c], S)
-                o_intra = B_mat[:, :, c] @ E_c
-                o_inter = torch.matmul(Q_decay[:, :, c], S)
-                out[:, :, c * C : (c + 1) * C] = o_intra + o_inter
-                S = lambda_end[:, :, c].unsqueeze(-1) * S + W[:, :, c].transpose(-2, -1) @ E_c
+                    log_alphac = log_alpha[:, :, rem_start:t]
+                    cum_log_alpha = torch.cumsum(log_alphac, dim=2)
+                    lambda_init = torch.exp(cum_log_alpha)
 
-        rem_start = N_full * C
-        if rem_start < t:
-            qc = q_f[:, :, rem_start:t]
-            kc = k_f[:, :, rem_start:t]
-            vc = v_f[:, :, rem_start:t]
-            betac = beta_f[:, :, rem_start:t]
+                    if self.decay_kind == "head":
+                        diff = (cum_log_alpha - cum_log_alpha.transpose(-2, -1)).clamp(max=0.0)
+                        decay = torch.exp(diff) * betac.unsqueeze(-2)
+                        inner_k = torch.matmul(kc, kc.transpose(-2, -1)) * decay
+                        inner_q = torch.matmul(qc, kc.transpose(-2, -1)) * decay
+                    else:
+                        use_factored = True
+                        if not torch.compiler.is_compiling():
+                            max_span = (cum_log_alpha[:, :, 0, :] - cum_log_alpha[:, :, -1, :]).max()
+                            use_factored = bool(max_span <= 2.0 * max_safe)
+                        if use_factored:
+                            m = 0.5 * (cum_log_alpha[:, :, :1, :] + cum_log_alpha[:, :, -1:, :])
+                            g_shift = cum_log_alpha - m
+                            exp_pos = torch.exp(g_shift)
+                            exp_neg = torch.exp(-g_shift)
+                            k_pos = kc * exp_pos
+                            k_neg = kc * exp_neg
+                            q_pos = qc * exp_pos
+                            beta_w = betac.unsqueeze(-2)
+                            inner_k = torch.matmul(k_pos, k_neg.transpose(-2, -1)) * beta_w
+                            inner_q = torch.matmul(q_pos, k_neg.transpose(-2, -1)) * beta_w
+                        else:
+                            diff = (cum_log_alpha.unsqueeze(3) - cum_log_alpha.unsqueeze(2)).clamp(max=0.0)
+                            decay = torch.exp(diff)
+                            inner_k = (kc.unsqueeze(3) * decay * kc.unsqueeze(2)).sum(-1) * betac.unsqueeze(-2)
+                            inner_q = (qc.unsqueeze(3) * decay * kc.unsqueeze(2)).sum(-1) * betac.unsqueeze(-2)
 
-            log_alphac = log_alpha[:, :, rem_start:t]
-            cum_log_alpha = torch.cumsum(log_alphac, dim=2)
-            lambda_init = torch.exp(cum_log_alpha)
+                    A = torch.tril(inner_k, diagonal=-1)
+                    B_mat = torch.tril(inner_q, diagonal=0)
 
-            if self.decay_kind == "head":
-                diff = (cum_log_alpha - cum_log_alpha.transpose(-2, -1)).clamp(max=0.0)
-                decay = torch.exp(diff) * betac.unsqueeze(-2)
-                inner_k = torch.matmul(kc, kc.transpose(-2, -1)) * decay
-                inner_q = torch.matmul(qc, kc.transpose(-2, -1)) * decay
-            else:
-                diff = (cum_log_alpha.unsqueeze(3) - cum_log_alpha.unsqueeze(2)).clamp(max=0.0)
-                decay = torch.exp(diff)
-                inner_k = (kc.unsqueeze(3) * decay * kc.unsqueeze(2)).sum(-1) * betac.unsqueeze(-2)
-                inner_q = (qc.unsqueeze(3) * decay * kc.unsqueeze(2)).sum(-1) * betac.unsqueeze(-2)
+                    k_decay_init = lambda_init * kc
+                    v_pred_inter = torch.matmul(k_decay_init, S)
+                    v_prime = vc - v_pred_inter
 
-            A = torch.tril(inner_k, diagonal=-1)
-            B_mat = torch.tril(inner_q, diagonal=0)
+                    E = torch.linalg.solve_triangular(A, v_prime, upper=False, unitriangular=True)
 
-            k_decay_init = lambda_init * kc
-            v_pred_inter = torch.matmul(k_decay_init, S)
-            v_prime = vc - v_pred_inter
+                    o_intra = B_mat @ E
+                    q_decay_init = lambda_init * qc
+                    o_inter = torch.matmul(q_decay_init, S)
+                    out[:, :, rem_start:t] = o_intra + o_inter
 
-            E = torch.linalg.solve_triangular(A, v_prime, upper=False, unitriangular=True)
+                    lambda_end = torch.exp(cum_log_alpha[:, :, -1])
+                    S_init_decayed = lambda_end.unsqueeze(-1) * S
 
-            o_intra = B_mat @ E
-            q_decay_init = lambda_init * qc
-            o_inter = torch.matmul(q_decay_init, S)
-            out[:, :, rem_start:t] = o_intra + o_inter
-
-            lambda_end = torch.exp(cum_log_alpha[:, :, -1])
-            S_init_decayed = lambda_end.unsqueeze(-1) * S
-
-            lambda_to_end = torch.exp((cum_log_alpha[:, :, -1:] - cum_log_alpha).clamp(max=0.0))
-            W = betac.unsqueeze(-1) * (lambda_to_end * kc)
-            S_update = W.transpose(-2, -1) @ E
-            S = S_init_decayed + S_update
+                    lambda_to_end = torch.exp((cum_log_alpha[:, :, -1:] - cum_log_alpha).clamp(max=0.0))
+                    W = betac.unsqueeze(-1) * (lambda_to_end * kc)
+                    S_update = W.transpose(-2, -1) @ E
+                    S = S_init_decayed + S_update
 
         out = out.permute(0, 2, 1, 3)
         out = F.rms_norm(out, (self.head_dim,), eps=self.eps) * self.rms_norm_weight.to(calc_dtype)

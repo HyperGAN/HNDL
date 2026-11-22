@@ -55,8 +55,13 @@ def _relation(s):
             width = shape[2]
         if positions is None and shape[1] is not None:
             positions = shape[1]
-    if s.args.get("relative_position_bias"):
-        grid_height, grid_width = s.args.get("spatial_shape") or (0, 0)
+    grid_height, grid_width = s.args.get("spatial_shape") or (0, 0)
+    axial_2d_rope = (
+        bool(s.args.get("rope"))
+        and not bool(s.args.get("relative_position_bias"))
+        and (grid_height > 0 or grid_width > 0)
+    )
+    if s.args.get("relative_position_bias") or axial_2d_rope:
         if grid_height > 0 and grid_width > 0:
             tokens = grid_height * grid_width
             if positions is not None and positions != tokens:
@@ -77,6 +82,9 @@ def _relation(s):
     if s.args.get("rope") and effective_head_dim % 2:
         s.error("E_CONSTRAINT",
                 f"rope needs an even head dimension, got {effective_head_dim}")
+    if axial_2d_rope and effective_head_dim % 4 != 0:
+        s.error("E_CONSTRAINT",
+                f"2D axial rope needs a head dimension divisible by 4, got {effective_head_dim}")
 
 
 def _split_heads(tensor, heads, head_dim):
@@ -394,6 +402,13 @@ class Attention(nn.Module):
 
         height, width = (spatial_shape, spatial_shape) if type(spatial_shape) is int else tuple(spatial_shape)
         self.spatial_shape = (int(height), int(width))
+        if self.rope and not self.relative_position_bias and self.spatial_shape != (0, 0):
+            if self.spatial_shape[0] < 1 or self.spatial_shape[1] < 1:
+                raise HNDLError("E_ARGUMENT",
+                                f"spatial_shape must have positive height and width, got {self.spatial_shape}")
+            if self.head_dim % 4 != 0:
+                raise HNDLError("E_CONSTRAINT",
+                                f"2D axial rope needs a head dimension divisible by 4, got {self.head_dim}")
         linear = EqualLinear if equalized else nn.Linear
         q_dim = self.heads * self.head_dim
         kv_dim = self.kv_heads * self.head_dim
@@ -445,7 +460,8 @@ class Attention(nn.Module):
         cached = self._causal_cache.get(key)
         if cached is not None and cached.shape[0] >= positions:
             return cached[:positions, :positions]
-        cached = _causal_bias(positions, device, dtype)
+        with torch.inference_mode(False), torch.no_grad():
+            cached = _causal_bias(positions, device, dtype)
         self._causal_cache[key] = cached
         return cached
 
@@ -482,15 +498,19 @@ class Attention(nn.Module):
             q = F.normalize(q, p=2, dim=-1, eps=self.eps)
             k = F.normalize(k, p=2, dim=-1, eps=self.eps)
         if self.rope:
-            cos, sin = self._get_rope_tables(end, x.device, x.dtype, start=offset, capacity=cache.max_seq_len)
+            cos, sin = self._get_rope_tables(end, x.device, q.dtype, start=offset, capacity=cache.max_seq_len)
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
         k, v = _kv_append(cache, state, k, v, self.window_size)
         key_count = k.shape[-2]
         query_offset = key_count - count
-        if getattr(self, "_hndl_flex_attention", False):
+        if getattr(self, "_hndl_flex_attention", False) and (count > 1 or self.logit_softcap > 0.0):
             fused = specialized_attention(
-                q, k, v, causal=True, window_size=self.window_size,
-                softcap=self.logit_softcap, query_offset=query_offset, owner=self,
+                q, k, v,
+                causal=(count > 1),
+                window_size=(0 if count == 1 else self.window_size),
+                softcap=self.logit_softcap,
+                query_offset=(0 if count == 1 else query_offset),
+                owner=self,
             )
             if fused is not None:
                 result = self.o_proj(fused.transpose(1, 2).reshape(batch, count, self.heads * self.head_dim))
@@ -526,15 +546,17 @@ class Attention(nn.Module):
         if cache is not None:
             return self._forward_cached(x, cache, node_id)
         batch, positions, width = x.shape
-        mask = None
         if self.relative_position_bias:
             if positions != self.positions:
                 raise HNDLError("E_CONSTRAINT",
                                 f"spatial_shape={self.spatial_shape} covers {self.positions} tokens, "
                                 f"but the input carries T={positions}")
-            mask = self.position_bias().to(dtype=x.dtype)
-            if self.causal:
-                mask = mask + self._get_causal_bias(positions, x.device, mask.dtype)
+        elif self.rope and self.spatial_shape != (0, 0):
+            expected_tokens = self.spatial_shape[0] * self.spatial_shape[1]
+            if positions != expected_tokens:
+                raise HNDLError("E_CONSTRAINT",
+                                f"spatial_shape={self.spatial_shape} covers {expected_tokens} tokens, "
+                                f"but the input carries T={positions}")
 
         if getattr(self, "_hndl_packing", False):
             qp, kp, vp = project(self, x, ("q_proj", "k_proj", "v_proj"))
@@ -546,6 +568,12 @@ class Attention(nn.Module):
             k = _split_heads(self.k_proj(x), self.kv_heads, self.head_dim)
             v = _split_heads(self.v_proj(x), self.kv_heads, self.head_dim)
 
+        mask = None
+        if self.relative_position_bias:
+            mask = self.position_bias().to(dtype=q.dtype)
+            if self.causal:
+                mask = mask + self._get_causal_bias(positions, x.device, mask.dtype)
+
         if self.qk_norm == "rms_norm":
             q = self.q_norm(q)
             k = self.k_norm(k)
@@ -554,7 +582,7 @@ class Attention(nn.Module):
             k = F.normalize(k, p=2, dim=-1, eps=self.eps)
 
         if self.rope:
-            cos, sin = self._get_rope_tables(positions, x.device, x.dtype)
+            cos, sin = self._get_rope_tables(positions, x.device, q.dtype)
             q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
 
         if getattr(self, "_hndl_flex_attention", False):
@@ -567,15 +595,16 @@ class Attention(nn.Module):
                 return self.o_proj(fused.transpose(1, 2).reshape(batch, positions, self.heads * self.head_dim))
 
         if self.window_size > 0:
-            mask_key = (positions, self.window_size, self.causal, str(x.device), x.dtype)
             if torch.compiler.is_compiling():
-                w_mask = _window_bias(positions, x.device, x.dtype, self.window_size, self.causal)
+                w_mask = _window_bias(positions, x.device, q.dtype, self.window_size, self.causal)
             else:
-                w_mask = self._mask_cache.get(mask_key)
-                if w_mask is None:
+                mask_key = (self.window_size, self.causal, str(x.device), q.dtype)
+                cached = self._mask_cache.get(mask_key)
+                if cached is None or cached.shape[0] < positions:
                     with torch.inference_mode(False), torch.no_grad():
-                        w_mask = _window_bias(positions, x.device, x.dtype, self.window_size, self.causal)
-                    self._mask_cache[mask_key] = w_mask
+                        cached = _window_bias(positions, x.device, q.dtype, self.window_size, self.causal)
+                    self._mask_cache[mask_key] = cached
+                w_mask = cached if cached.shape[0] == positions else cached[:positions, :positions]
             mask = w_mask if mask is None else mask + w_mask
 
         if self.logit_softcap > 0.0:

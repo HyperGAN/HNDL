@@ -1052,12 +1052,11 @@ class GraphModule(nn.Module):
         """Check the watched stores without retaining replacement tensors."""
         same, copies, views, store_lens, tensor_ids, shape = self._stores
         try:
-            if same != copies or any(len(v) != size for v, size in zip(views, store_lens)):
+            if same != copies or tuple(map(len, views)) != store_lens:
                 return True
-            for tensor, expected_id in zip(_chain(views), tensor_ids):
-                if id(tensor) != expected_id:
-                    dtypes_devices = [(x.dtype, x.device) if x is not None else None for x in _chain(views)]
-                    return [*store_lens, *map(_is, _chain(views), _NONES), *dtypes_devices] != shape
+            if tuple(map(id, _chain(views))) != tensor_ids:
+                dtypes_devices = [(x.dtype, x.device) if x is not None else None for x in _chain(views)]
+                return [*store_lens, *map(_is, _chain(views), _NONES), *dtypes_devices] != shape
             return False
         except Exception:  # A user module's __eq__ may raise.
             return True
@@ -1590,10 +1589,57 @@ def _tie_parameters(layer, node, modules, *, compute_dtype=None):
     return tied_tensors
 
 
+def _depth_scaled_exit_weights(layer: nn.Module) -> list[torch.Tensor]:
+    """Return residual-branch exit projection weight tensors for a layer."""
+    if hasattr(layer, "attn") and hasattr(layer, "ffn"):
+        weights = []
+        o_proj = getattr(layer.attn, "o_proj", None)
+        if getattr(o_proj, "weight", None) is not None:
+            weights.append(o_proj.weight)
+        down = getattr(layer.ffn, "down", None)
+        if getattr(down, "weight", None) is not None:
+            weights.append(down.weight)
+        if weights:
+            return weights
+    if hasattr(layer, "experts") and isinstance(layer.experts, nn.ModuleList):
+        weights = []
+        for expert in layer.experts:
+            down = getattr(expert, "down", None)
+            if getattr(down, "weight", None) is not None:
+                weights.append(down.weight)
+        if weights:
+            return weights
+    if hasattr(layer, "weight") and layer.weight is not None:
+        return [layer.weight]
+    if hasattr(layer, "o_proj") and getattr(layer.o_proj, "weight", None) is not None:
+        return [layer.o_proj.weight]
+    if hasattr(layer, "out_proj") and getattr(layer.out_proj, "weight", None) is not None:
+        return [layer.out_proj.weight]
+    if hasattr(layer, "down") and getattr(layer.down, "weight", None) is not None:
+        return [layer.down.weight]
+    if hasattr(layer, "conv3") and getattr(layer.conv3, "weight", None) is not None:
+        return [layer.conv3.weight]
+    if hasattr(layer, "conv2") and getattr(layer.conv2, "weight", None) is not None:
+        return [layer.conv2.weight]
+    for p in reversed(list(layer.parameters())):
+        if p.ndim >= 2:
+            return [p]
+    return []
+
+
 def _apply_depth_scaled_init(plan: ResolvedPlan, modules: Mapping[str, nn.Module]) -> None:
     """Scale residual branch exit projection weights by 1 / sqrt(2 * N_layers)."""
-    add_nodes = [n for n in plan.nodes if n.op.split("@")[0] == "add"]
-    if not add_nodes:
+    def _op_alias(node) -> str:
+        if plan.registry is not None:
+            try:
+                return plan.registry.by_identity(node.op).alias
+            except HNDLError:
+                pass
+        return node.op.split("@")[0]
+
+    add_nodes = [n for n in plan.nodes if _op_alias(n) == "add"]
+    composite_nodes = [n for n in plan.nodes if _op_alias(n) in ("transformer_block", "resblock")]
+    if not add_nodes and not composite_nodes:
         return
 
     node_by_id = {n.id: n for n in plan.nodes}
@@ -1642,6 +1688,13 @@ def _apply_depth_scaled_init(plan: ResolvedPlan, modules: Mapping[str, nn.Module
         return None
 
     exit_projections: list[str] = []
+    seen_exits: set[str] = set()
+
+    def record_exit(nid: str | None) -> None:
+        if nid is not None and nid not in seen_exits:
+            seen_exits.add(nid)
+            exit_projections.append(nid)
+
     for add_node in add_nodes:
         refs = list(add_node.inputs.values())
         if len(refs) != 2:
@@ -1649,24 +1702,16 @@ def _apply_depth_scaled_init(plan: ResolvedPlan, modules: Mapping[str, nn.Module
         p0 = producer_of.get(refs[0])
         p1 = producer_of.get(refs[1])
         if p0 is None and p1 is not None:
-            exit_node = find_exit_projection(p1, set())
-            if exit_node:
-                exit_projections.append(exit_node)
+            record_exit(find_exit_projection(p1, set()))
         elif p1 is None and p0 is not None:
-            exit_node = find_exit_projection(p0, set())
-            if exit_node:
-                exit_projections.append(exit_node)
+            record_exit(find_exit_projection(p0, set()))
         elif p0 is not None and p1 is not None:
             anc0 = get_ancestors(p0)
             anc1 = get_ancestors(p1)
             if p0 in anc1:
-                exit_node = find_exit_projection(p1, anc0 | {p0})
-                if exit_node:
-                    exit_projections.append(exit_node)
+                record_exit(find_exit_projection(p1, anc0 | {p0}))
             elif p1 in anc0:
-                exit_node = find_exit_projection(p0, anc1 | {p1})
-                if exit_node:
-                    exit_projections.append(exit_node)
+                record_exit(find_exit_projection(p0, anc1 | {p1}))
             else:
                 if has_params(p1) and not has_params(p0):
                     exit_node = find_exit_projection(p1, anc0 | {p0})
@@ -1674,8 +1719,10 @@ def _apply_depth_scaled_init(plan: ResolvedPlan, modules: Mapping[str, nn.Module
                     exit_node = find_exit_projection(p0, anc1 | {p1})
                 else:
                     exit_node = find_exit_projection(p1, set()) or find_exit_projection(p0, set())
-                if exit_node:
-                    exit_projections.append(exit_node)
+                record_exit(exit_node)
+
+    for node in composite_nodes:
+        record_exit(node.id)
 
     num_layers = len(exit_projections)
     if num_layers == 0:
@@ -1684,26 +1731,17 @@ def _apply_depth_scaled_init(plan: ResolvedPlan, modules: Mapping[str, nn.Module
     import math
     lambda_factor = 1.0 / math.sqrt(2.0 * num_layers)
 
-    for nid in exit_projections:
-        layer = modules.get(f"n_{nid}")
-        if layer is None:
-            continue
-        with torch.no_grad():
-            if hasattr(layer, "weight") and layer.weight is not None:
-                layer.weight.mul_(lambda_factor)
-            elif hasattr(layer, "o_proj") and getattr(layer.o_proj, "weight", None) is not None:
-                layer.o_proj.weight.mul_(lambda_factor)
-            elif hasattr(layer, "out_proj") and getattr(layer.out_proj, "weight", None) is not None:
-                layer.out_proj.weight.mul_(lambda_factor)
-            elif hasattr(layer, "conv3") and getattr(layer.conv3, "weight", None) is not None:
-                layer.conv3.weight.mul_(lambda_factor)
-            elif hasattr(layer, "conv2") and getattr(layer.conv2, "weight", None) is not None:
-                layer.conv2.weight.mul_(lambda_factor)
-            else:
-                for p in reversed(list(layer.parameters())):
-                    if p.ndim >= 2:
-                        p.mul_(lambda_factor)
-                        break
+    scaled_ids: set[int] = set()
+    with torch.no_grad():
+        for nid in exit_projections:
+            layer = modules.get(f"n_{nid}")
+            if layer is None:
+                continue
+            for param in _depth_scaled_exit_weights(layer):
+                pid = id(param)
+                if pid not in scaled_ids:
+                    scaled_ids.add(pid)
+                    param.mul_(lambda_factor)
 
 
 def _build(plan, *, device, initialization_seed=None, registry=None, facade=False, limits=None, checkpoint=False, init_policy="default"):

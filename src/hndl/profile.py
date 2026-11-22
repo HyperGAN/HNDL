@@ -239,12 +239,16 @@ def _compute_node_parameters(
 
     if alias == "dy_tanh":
         dim = args.get("dim") or in_shapes["x"][-1]
-        params = 1 + 2 * dim
+        affine = args.get("affine", True)
+        params = 1 + (2 * dim if affine else 0)
         return params, params
 
     if alias == "snake":
-        dim = args.get("dim") or args.get("channels") or in_shapes["x"][-1]
-        return dim, dim
+        c = int(args.get("channels") or args.get("dim") or 0)
+        if c <= 0:
+            x_shape = in_shapes["x"]
+            c = x_shape[1] if len(x_shape) == 4 else x_shape[-1]
+        return c, c
 
     if alias == "learned_scale":
         return 1, 1
@@ -323,7 +327,8 @@ def _compute_node_parameters(
         k_proj = d_cross * kv_dim + (kv_dim if qkv_bias else 0)
         v_proj = d_cross * kv_dim + (kv_dim if qkv_bias else 0)
         o_proj = q_dim * d + (d if out_bias else 0)
-        total = q_proj + k_proj + v_proj + o_proj
+        qk_params = (2 * head_dim) if args.get("qk_norm", "none") == "rms_norm" else 0
+        total = q_proj + k_proj + v_proj + o_proj + qk_params
         return total, total
 
     if alias == "joint_attention":
@@ -339,7 +344,8 @@ def _compute_node_parameters(
         qkv_c = 3 * (d_ctx * inner + (inner if qkv_bias else 0))
         o_x = inner * d_x + (d_x if out_bias else 0)
         o_c = inner * d_ctx + (d_ctx if out_bias else 0)
-        total = qkv_x + qkv_c + o_x + o_c
+        qk_params = (4 * head_dim) if args.get("qk_norm", "none") == "rms_norm" else 0
+        total = qkv_x + qkv_c + o_x + o_c + qk_params
         return total, total
 
     if alias == "latent_attention":
@@ -488,13 +494,13 @@ def _compute_node_parameters(
         in_ch = in_shapes["x"][1]
         out_ch = out_shapes["out"][1]
         stride = int(args.get("stride", 1))
-        bias = bool(args.get("bias", False))
-        norm_kind = str(args.get("norm_kind", "batch_norm"))
-        norm_p = (2 if norm_kind in ("batch_norm", "group_norm") else 1)
+        norm = str(args.get("norm", "batch_norm"))
+        bias = norm == "none"
+        norm_p = 2 if norm in ("batch_norm", "group_norm") else 0
 
         total = 0
         if kind == "bottleneck":
-            mid_ch = out_ch // 4
+            mid_ch = max(1, out_ch // int(args.get("bottleneck_ratio", 4)))
             # conv1: 1x1 in_ch -> mid_ch
             total += in_ch * mid_ch * 1 * 1 + (mid_ch if bias else 0) + norm_p * mid_ch
             # conv2: 3x3 mid_ch -> mid_ch
@@ -566,22 +572,22 @@ def _compute_node_flops(
     if alias in ("deconv", "deconv2d", "conv_transpose2d"):
         b = in_shapes["x"][0]
         cin = in_shapes["x"][1]
+        hin, win = in_shapes["x"][2], in_shapes["x"][3]
         cout = out_s[1]
-        hout, wout = out_s[2], out_s[3]
         k = args.get("kernel_size", 1)
         kh, kw = (k, k) if isinstance(k, int) else (int(k[0]), int(k[1]))
         groups = args.get("groups", 1)
-        return 2 * b * hout * wout * cout * (cin // groups) * kh * kw
+        return 2 * b * hin * win * cin * (cout // groups) * kh * kw
 
     if alias in ("deconv1d", "conv_transpose1d"):
         channels_last = args.get("channels_last", False)
         b = in_shapes["x"][0]
-        lout = out_s[1] if channels_last else out_s[-1]
+        lin = in_shapes["x"][1] if channels_last else in_shapes["x"][-1]
         cin = in_shapes["x"][-1] if channels_last else in_shapes["x"][1]
         cout = out_s[-1] if channels_last else out_s[1]
         k = args.get("kernel_size", 1)
         groups = args.get("groups", 1)
-        return 2 * b * lout * cout * (cin // groups) * k
+        return 2 * b * lin * cin * (cout // groups) * k
 
     if alias == "matmul":
         sa = in_shapes["a"]
@@ -590,6 +596,57 @@ def _compute_node_flops(
         n_dim = out_s[-1]
         batch_elems = math.prod(out_s[:-2])
         return 2 * batch_elems * m * k_dim * n_dim
+
+    if alias == "feed_forward":
+        din = in_shapes["x"][-1]
+        hidden = int(args.get("hidden") or args.get("hidden_features") or (din * args.get("expansion", 4)))
+        dout = int(args.get("out_features") or out_s[-1])
+        tokens = math.prod(in_shapes["x"][:-1])
+        return 2 * tokens * (din * hidden + hidden * dout)
+
+    if alias == "swiglu":
+        din = in_shapes["x"][-1]
+        hidden = int(args.get("hidden") or args.get("hidden_features") or (din * args.get("expansion", 4)))
+        dout = int(args.get("out_features") or out_s[-1])
+        tokens = math.prod(in_shapes["x"][:-1])
+        return 2 * tokens * (2 * din * hidden + hidden * dout)
+
+    if alias == "patch_embed":
+        b, cin = in_shapes["x"][0], in_shapes["x"][1]
+        n_patches, dim = out_s[1], out_s[2]
+        p = args.get("patch_size", 16)
+        ph, pw = (p, p) if isinstance(p, int) else (int(p[0]), int(p[1]))
+        return 2 * b * n_patches * dim * cin * ph * pw
+
+    if alias == "resblock":
+        kind = str(args.get("kind", "basic"))
+        b, in_ch, hin, win = in_shapes["x"]
+        _, out_ch, hout, wout = out_s
+        stride = int(args.get("stride", 1))
+        norm = str(args.get("norm", "batch_norm"))
+        norm_mult = 8 if norm in ("batch_norm", "group_norm") else 0
+
+        flops = 0
+        if kind == "bottleneck":
+            mid_ch = max(1, out_ch // int(args.get("bottleneck_ratio", 4)))
+            # conv1 (1x1, stride 1) + norm1
+            flops += 2 * b * hin * win * mid_ch * in_ch + norm_mult * b * mid_ch * hin * win
+            # conv2 (3x3, stride) + norm2
+            flops += 2 * b * hout * wout * mid_ch * mid_ch * 9 + norm_mult * b * mid_ch * hout * wout
+            # conv3 (1x1, stride 1) + norm3
+            flops += 2 * b * hout * wout * out_ch * mid_ch + norm_mult * b * out_ch * hout * wout
+        else:
+            # conv1 (3x3, stride) + norm1
+            flops += 2 * b * hout * wout * out_ch * in_ch * 9 + norm_mult * b * out_ch * hout * wout
+            # conv2 (3x3, stride 1) + norm2
+            flops += 2 * b * hout * wout * out_ch * out_ch * 9 + norm_mult * b * out_ch * hout * wout
+
+        if stride != 1 or in_ch != out_ch:
+            flops += 2 * b * hout * wout * out_ch * in_ch + norm_mult * b * out_ch * hout * wout
+
+        # Residual add
+        flops += b * out_ch * hout * wout
+        return flops
 
     if alias in ("attention", "cross_attention"):
         b = in_shapes["x"][0]
@@ -609,6 +666,124 @@ def _compute_node_flops(
         out_proj = 2 * b * t * (heads * head_dim) * d
         return qkv_projs + qk_matmul + softmax_flops + attn_v_matmul + out_proj
 
+    if alias == "joint_attention":
+        b, tx, d_x = in_shapes["x"]
+        _, tc, d_ctx = in_shapes["context"]
+        heads = int(args["heads"])
+        head_dim = int(args.get("head_dim", 0) or (d_x // heads))
+        inner = heads * head_dim
+        t_total = tx + tc
+
+        projs_x = 4 * 2 * b * tx * d_x * inner
+        projs_c = 4 * 2 * b * tc * d_ctx * inner
+        qk_matmul = 2 * b * heads * t_total * t_total * head_dim
+        softmax_flops = 3 * b * heads * t_total * t_total
+        attn_v_matmul = 2 * b * heads * t_total * t_total * head_dim
+        return projs_x + projs_c + qk_matmul + softmax_flops + attn_v_matmul
+
+    if alias == "latent_attention":
+        b, t, d = in_shapes["x"]
+        heads = int(args["heads"])
+        kv_lora_rank = int(args["kv_lora_rank"])
+        q_lora_rank = int(args.get("q_lora_rank", 0))
+        d_nope = int(args.get("qk_nope_head_dim", 0) or (d // heads))
+        d_rope = int(args.get("qk_rope_head_dim", 0))
+        d_v = int(args.get("v_head_dim", 0) or d_nope)
+        total_qk_dim = d_nope + d_rope
+
+        kv_down = 2 * b * t * d * kv_lora_rank + 5 * b * t * kv_lora_rank
+        k_up = 2 * b * t * kv_lora_rank * (heads * d_nope)
+        v_up = 2 * b * t * kv_lora_rank * (heads * d_v)
+        k_rope = (2 * b * t * d * d_rope) if d_rope > 0 else 0
+        if q_lora_rank > 0:
+            q_projs = (
+                2 * b * t * d * q_lora_rank
+                + 5 * b * t * q_lora_rank
+                + 2 * b * t * q_lora_rank * (heads * total_qk_dim)
+            )
+        else:
+            q_projs = 2 * b * t * d * (heads * total_qk_dim)
+        qk_matmul = 2 * b * heads * t * t * total_qk_dim
+        softmax_flops = 3 * b * heads * t * t
+        attn_v_matmul = 2 * b * heads * t * t * d_v
+        out_proj = 2 * b * t * (heads * d_v) * d
+        return kv_down + k_up + v_up + k_rope + q_projs + qk_matmul + softmax_flops + attn_v_matmul + out_proj
+
+    if alias == "gated_delta_attention":
+        b, t, d = in_shapes["x"]
+        heads = int(args["heads"])
+        head_dim = int(args.get("head_dim", 0) or (d // heads))
+        inner_dim = heads * head_dim
+        conv_size = int(args.get("conv_size", 4))
+        decay_kind = str(args.get("decay_kind", "channel"))
+        gate_rank = int(args.get("gate_rank", 0) or max(head_dim, max(1, d // 16)))
+
+        qkv_projs = 3 * 2 * b * t * d * inner_dim
+        conv_flops = (3 * 2 * b * t * inner_dim * conv_size) if conv_size > 0 else 0
+        b_proj = 2 * b * t * d * heads
+        if decay_kind == "channel":
+            alpha_projs = 2 * b * t * (d * gate_rank + gate_rank * inner_dim)
+        else:
+            alpha_projs = 2 * b * t * d * heads
+        gate_projs = 2 * b * t * (d * gate_rank + gate_rank * inner_dim)
+        # Delta-rule state decay + v_pred + rank-1 update + readout per step
+        recurrence = 7 * b * t * heads * head_dim * head_dim
+        norm_flops = 5 * b * t * inner_dim
+        o_proj = 2 * b * t * inner_dim * d
+        return qkv_projs + conv_flops + b_proj + alpha_projs + gate_projs + recurrence + norm_flops + o_proj
+
+    if alias in ("mamba2", "ssd"):
+        b, t, _ = in_shapes["x"]
+        d_model = int(args.get("d_model", 0) or in_shapes["x"][-1])
+        d_state = int(args.get("d_state", 64))
+        d_conv = int(args.get("d_conv", 4))
+        heads = int(args.get("heads", 8))
+        head_dim = int(args.get("head_dim", 64))
+        inner_dim = heads * head_dim
+        bc_dim = heads * d_state
+        in_proj_dim = 2 * inner_dim + 2 * bc_dim + heads
+        conv_dim = inner_dim + 2 * bc_dim
+
+        in_proj = 2 * b * t * d_model * in_proj_dim
+        conv_flops = (2 * b * t * conv_dim * d_conv) if d_conv > 0 else 0
+        # State update (decay + outer product) and readout contraction per step
+        ssm_flops = 4 * b * t * heads * head_dim * d_state
+        norm_and_gate = 6 * b * t * inner_dim
+        out_proj = 2 * b * t * inner_dim * d_model
+        return in_proj + conv_flops + ssm_flops + norm_and_gate + out_proj
+
+    if alias == "adaln_zero":
+        b, t, d = in_shapes["x"]
+        d_cond = in_shapes["cond"][-1]
+        gate = bool(args.get("gate", True))
+        dim_mult = 3 if gate else 2
+        cond_proj = 2 * b * d_cond * (dim_mult * d) + 8 * b * d_cond
+        norm_flops = 8 * b * t * d
+        modulate = 2 * b * t * d
+        return cond_proj + norm_flops + modulate
+
+    if alias == "hopfield":
+        tokens = math.prod(in_shapes["x"][:-1])
+        d = in_shapes["x"][-1]
+        patterns = int(args["patterns"])
+        steps = int(args.get("steps", 1))
+        normalize = bool(args.get("normalize", True))
+        norm_flops = (8 * tokens * d) if normalize else 0
+        per_step = 4 * tokens * d * patterns + 4 * tokens * patterns
+        return norm_flops + steps * per_step
+
+    if alias == "spatial_attention":
+        b, c, h, w = in_shapes["x"]
+        n = h * w
+        reduction = int(args.get("reduction", 8))
+        q_ch = c // reduction
+        projs = 2 * b * n * c * (2 * q_ch + c)
+        energy = 2 * b * n * n * q_ch
+        softmax_flops = 3 * b * n * n
+        attended = 2 * b * n * n * c
+        residual = 2 * b * n * c
+        return projs + energy + softmax_flops + attended + residual
+
     if alias == "moe":
         d = in_shapes["x"][-1]
         experts = int(args["experts"])
@@ -626,19 +801,24 @@ def _compute_node_flops(
         d = in_shapes["x"][-1]
         heads = int(args["heads"])
         head_dim = int(args.get("head_dim", 0) or (d // heads))
-        expansion = int(args.get("expansion", 4))
-        hidden_dim = int(args.get("hidden_dim", 0) or (d * expansion))
+        kv_heads = int(args.get("kv_heads", 0) or heads)
+        mlp_ratio = int(args.get("mlp_ratio", 4))
+        hidden_dim = int(args.get("hidden", 0) or (d * mlp_ratio))
         ffn_kind = str(args.get("ffn_kind", "mlp"))
         b, t = in_shapes["x"][0], in_shapes["x"][1]
 
-        qkv_projs = 4 * 2 * b * t * d * (heads * head_dim)
+        q_dim = heads * head_dim
+        kv_dim = kv_heads * head_dim
+        qkv_projs = 2 * b * t * d * (q_dim + 2 * kv_dim)
         scores = 2 * b * heads * t * t * head_dim
         softmax = 3 * b * heads * t * t
         attn_v = 2 * b * heads * t * t * head_dim
-        attn_out = 2 * b * t * (heads * head_dim) * d
+        attn_out = 2 * b * t * q_dim * d
         attn_total = qkv_projs + scores + softmax + attn_v + attn_out
 
-        norms = 2 * 8 * b * t * d
+        norm_kind = str(args.get("norm", "layer_norm"))
+        norm_mult = 5 if norm_kind == "rms_norm" else 8
+        norms = 2 * norm_mult * b * t * d
         mult = 3 if ffn_kind == "swiglu" else 2
         ffn = mult * 2 * b * t * d * hidden_dim
         return attn_total + norms + ffn
@@ -649,7 +829,7 @@ def _compute_node_flops(
     if alias in ("layer_norm", "group_norm", "batch_norm", "instance_norm", "adaptive_norm"):
         return 8 * out_elements
 
-    if alias in ("gelu", "silu", "mish", "swiglu", "dy_tanh"):
+    if alias in ("gelu", "silu", "mish", "dy_tanh"):
         return 8 * out_elements
 
     if alias in ("relu", "clamp", "where"):

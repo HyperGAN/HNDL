@@ -129,6 +129,12 @@ def digest(value):
     return sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def _digest_plain(value):
+    return sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
 def format_shape(shape: Any) -> str:
     """Format a shape sequence into the canonical bracketed string '[B, 64]'."""
     return "[" + ", ".join(str(part) for part in shape) + "]"
@@ -381,7 +387,7 @@ class ResolvedPlan(Immutable):
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         _external_ports(self)
-        object.__setattr__(self, "_semantic_digest", digest(self._data(semantic=True)))
+        object.__setattr__(self, "_semantic_digest", _digest_plain(self._data(semantic=True)))
         object.__setattr__(self, "_validated_stamp", None)
 
     inputs = property(lambda self: self._inputs)
@@ -419,8 +425,10 @@ class ResolvedPlan(Immutable):
         data = self._data()
         data["semantic_digest"] = self._semantic_digest
         data_str = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        data["artifact_digest"] = sha256(data_str.encode("utf-8")).hexdigest()
-        return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        artifact_digest = sha256(data_str.encode("utf-8")).hexdigest()
+        # "artifact_digest" sorts before every other top-level key ("dtype", "frontend", ...),
+        # so prepending it produces canonical sort_keys=True JSON without serializing twice.
+        return f'{{"artifact_digest":"{artifact_digest}",{data_str[1:]}'
 
     @classmethod
     def from_json(
@@ -454,7 +462,7 @@ class ResolvedPlan(Immutable):
             # The digests detect corruption and hand edits; they are not a
             # signature. Consistency with the operators is checked below.
             artifact = data.pop("artifact_digest")
-            if artifact != digest(data):
+            if artifact != _digest_plain(data):
                 raise HNDLError("E_INTEGRITY", _CORRUPTED.format(field="artifact_digest"))
             semantic = data.pop("semantic_digest")
             serialized_nodes = data.pop("nodes")
@@ -468,19 +476,21 @@ class ResolvedPlan(Immutable):
             for key, fields in (("inputs", ("name", "shape", "dtype")), ("outputs", ("name", "ref", "shape"))):
                 if key in data:
                     data[f"named_{key}"] = _saved_ports(data.pop(key), key, fields)
-            plan = cls(nodes=nodes, registry=registry, **data)
+            from .registry import Registry as _Registry
+            effective_registry = _Registry.builtins() if registry is None else registry
+            plan = cls(nodes=nodes, registry=effective_registry, **data)
             if semantic != plan.semantic_digest:
                 # Through 0.11.0, schema 1 stored ties in the checksummed
                 # artifact but excluded them from the semantic digest.
                 legacy = plan._data(semantic=True)
                 for node in legacy["nodes"]:
                     node.pop("tie", None)
-                if not any(node.parameter_ties for node in nodes) or semantic != digest(legacy):
+                if not any(node.parameter_ties for node in nodes) or semantic != _digest_plain(legacy):
                     raise HNDLError("E_INTEGRITY", _CORRUPTED.format(field="semantic_digest"))
                 warnings.warn("Upgraded saved plan semantic digest to include parameter ties; "
                               "save it again with to_json() to record the new digest.", stacklevel=2)
             from .resolver import validate_concrete_plan
-            return validate_concrete_plan(plan, registry=registry, limits=limits)
+            return validate_concrete_plan(plan, registry=effective_registry, limits=limits)
         except HNDLError:
             raise
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError, OverflowError) as error:
@@ -560,9 +570,15 @@ class ResolvedPlan(Immutable):
 
         for name, port in self.outputs.items():
             ref = port["ref"] if isinstance(port, Mapping) else port.ref
-            body = ref.removeprefix("node:")
-            src_id = (body.split("/")[0] if "/" in body else body.split(":")[0]).replace("-", "_").replace(".", "_")
-            lines.append(f"    n_{src_id} --> out_{name}")
+            if ref.startswith("input:"):
+                inp_name = ref.removeprefix("input:")
+                lines.append(f"    in_{inp_name} --> out_{name}")
+            elif ref in self.inputs:
+                lines.append(f"    in_{ref} --> out_{name}")
+            else:
+                body = ref.removeprefix("node:")
+                src_id = (body.split("/")[0] if "/" in body else body.split(":")[0]).replace("-", "_").replace(".", "_")
+                lines.append(f"    n_{src_id} --> out_{name}")
 
         return "\n".join(lines) + "\n"
 
@@ -630,8 +646,14 @@ def diff_plans(plan1: ResolvedPlan, plan2: ResolvedPlan) -> PlanDiff:
                 changes["op"] = (n1.op, n2.op)
             if n1.args != n2.args:
                 changes["args"] = (dict(n1.args), dict(n2.args))
+            if n1.inputs != n2.inputs:
+                changes["inputs"] = (dict(n1.inputs), dict(n2.inputs))
             if n1.parameter_ties != n2.parameter_ties:
                 changes["tie"] = (dict(n1.parameter_ties), dict(n2.parameter_ties))
+            if n1.initialization != n2.initialization:
+                changes["initialization"] = (plain(n1.initialization), plain(n2.initialization))
+            if n1.trainability != n2.trainability:
+                changes["trainability"] = (plain(n1.trainability), plain(n2.trainability))
             if n1.input_shapes != n2.input_shapes:
                 changes["input_shapes"] = (dict(n1.input_shapes), dict(n2.input_shapes))
             if n1.output_shapes != n2.output_shapes:
@@ -639,10 +661,13 @@ def diff_plans(plan1: ResolvedPlan, plan2: ResolvedPlan) -> PlanDiff:
             if changes:
                 modified[nid] = changes
 
-            out1 = next(iter(n1.output_shapes.values())) if n1.output_shapes else ()
-            out2 = next(iter(n2.output_shapes.values())) if n2.output_shapes else ()
-            if out1 != out2:
-                shape_deltas[nid] = (out1, out2)
+            if len(n1.output_shapes) <= 1 and len(n2.output_shapes) <= 1:
+                out1 = next(iter(n1.output_shapes.values())) if n1.output_shapes else ()
+                out2 = next(iter(n2.output_shapes.values())) if n2.output_shapes else ()
+                if out1 != out2:
+                    shape_deltas[nid] = (out1, out2)
+            elif n1.output_shapes != n2.output_shapes:
+                shape_deltas[nid] = (tuple(n1.output_shapes.values()), tuple(n2.output_shapes.values()))
 
     prof1 = plan1.profile(batch_size=1)
     prof2 = plan2.profile(batch_size=1)

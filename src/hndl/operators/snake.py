@@ -9,9 +9,8 @@ from ..operator import Arg, Example, operator
 def _relation(s):
     shape = s.shape("x") or s.shape("out")
     if shape is None:
-        rank = 3
-    else:
-        rank = len(shape)
+        return
+    rank = len(shape)
     s.rank("x", rank)
     s.rank("out", rank)
     s.equal("x", "out")
@@ -19,36 +18,60 @@ def _relation(s):
     channels = s.args.get("channels", 0)
     dim = s.args.get("dim", 0)
     c = channels if channels > 0 else dim
+    if c == 0:
+        inferred = shape[1] if rank == 4 else shape[-1]
+        if inferred is not None:
+            s.args["channels"] = inferred
+            s._solver.changed = True
+            c = inferred
     if c > 0:
-        s.args["channels"] = c
-        if shape is not None:
-            if rank == 2:
-                s.axis("x", 1, c)
-                s.axis("out", 1, c)
+        if s.args.get("channels", 0) != c:
+            s.args["channels"] = c
+            s._solver.changed = True
+        if rank == 2:
+            s.axis("x", 1, c)
+            s.axis("out", 1, c)
+        else:
+            dim1 = shape[1]
+            dim_last = shape[-1]
+            preferred_axis = 1 if rank == 4 else rank - 1
+            alt_axis = rank - 1 if rank == 4 else 1
+            preferred_dim = shape[preferred_axis]
+            alt_dim = shape[alt_axis]
+            if preferred_dim == c:
+                s.axis("x", preferred_axis, c)
+                s.axis("out", preferred_axis, c)
+            elif alt_dim == c:
+                s.axis("x", alt_axis, c)
+                s.axis("out", alt_axis, c)
+            elif dim1 is not None and dim_last is not None:
+                s.error(
+                    "E_CONSTRAINT",
+                    f"snake channels={c} does not match input channel dimension "
+                    f"(dim 1 is {dim1}, dim -1 is {dim_last})",
+                )
+            elif preferred_dim is not None:
+                s.axis("x", alt_axis, c)
+                s.axis("out", alt_axis, c)
             else:
-                dim1 = shape[1]
-                dim_last = shape[-1]
-                if dim1 == c:
-                    s.axis("x", 1, c)
-                    s.axis("out", 1, c)
-                elif dim_last == c:
-                    s.axis("x", -1, c)
-                    s.axis("out", -1, c)
-                elif dim1 is not None and dim_last is not None:
-                    s.error(
-                        "E_CONSTRAINT",
-                        f"snake channels={c} does not match input channel dimension "
-                        f"(dim 1 is {dim1}, dim -1 is {dim_last})",
-                    )
-                elif dim1 is not None:
-                    s.axis("x", -1, c)
-                    s.axis("out", -1, c)
-                elif dim_last is not None:
-                    s.axis("x", 1, c)
-                    s.axis("out", 1, c)
-                else:
-                    s.axis("x", 1, c)
-                    s.axis("out", 1, c)
+                s.axis("x", preferred_axis, c)
+                s.axis("out", preferred_axis, c)
+
+
+def _alpha_view(alpha, c_val, x):
+    if c_val <= 0:
+        return alpha
+    preferred = 1 if x.ndim == 4 else x.ndim - 1
+    alt = x.ndim - 1 if x.ndim == 4 else 1
+    if x.shape[preferred] == c_val:
+        view_shp = [1] * x.ndim
+        view_shp[preferred] = c_val
+        return alpha.view(view_shp)
+    if x.shape[alt] == c_val:
+        view_shp = [1] * x.ndim
+        view_shp[alt] = c_val
+        return alpha.view(view_shp)
+    return alpha
 
 
 def _reference(module):
@@ -57,21 +80,12 @@ def _reference(module):
     c_val = module.channels
 
     def run(x):
-        if c_val > 0:
-            if x.shape[1] == c_val:
-                view_shp = [1] * x.ndim
-                view_shp[1] = c_val
-                a = alpha.view(view_shp)
-            elif x.shape[-1] == c_val:
-                view_shp = [1] * x.ndim
-                view_shp[-1] = c_val
-                a = alpha.view(view_shp)
-            else:
-                a = alpha
-        else:
-            a = alpha
-        denom = a + eps
-        return x + (1.0 / denom) * (torch.sin(a * x) ** 2)
+        a = _alpha_view(alpha, c_val, x)
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        x_calc = x.to(calc_dtype)
+        a_calc = a.to(calc_dtype)
+        denom = a_calc + eps
+        return (x_calc + (torch.sin(a_calc * x_calc).square() / denom)).to(x.dtype)
 
     return run
 
@@ -113,21 +127,12 @@ class Snake(nn.Module):
             self.alpha = nn.Parameter(torch.tensor(float(alpha)))
 
     def forward(self, x):
-        if self.channels > 0:
-            if x.shape[1] == self.channels:
-                view_shp = [1] * x.ndim
-                view_shp[1] = self.channels
-                a = self.alpha.view(view_shp)
-            elif x.shape[-1] == self.channels:
-                view_shp = [1] * x.ndim
-                view_shp[-1] = self.channels
-                a = self.alpha.view(view_shp)
-            else:
-                a = self.alpha
-        else:
-            a = self.alpha
-        denom = a + self.eps
-        return x + (1.0 / denom) * (torch.sin(a * x) ** 2)
+        a = _alpha_view(self.alpha, self.channels, x)
+        calc_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        x_calc = x.to(calc_dtype)
+        a_calc = a.to(calc_dtype)
+        denom = a_calc + self.eps
+        return (x_calc + (torch.sin(a_calc * x_calc).square() / denom)).to(x.dtype)
 
     def extra_repr(self):
         return f"channels={self.channels}, eps={self.eps}"
